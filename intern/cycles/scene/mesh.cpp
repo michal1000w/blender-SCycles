@@ -546,6 +546,12 @@ void Mesh::compute_bounds()
     bnds.grow(zero_float3());
   }
 
+  if (use_pixel_displacement && pixel_displacement_max_distance > 0.0f) {
+    const float pad = pixel_displacement_max_distance;
+    bnds.grow(bnds.min, pad);
+    bnds.grow(bnds.max, pad);
+  }
+
   bounds = bnds;
 }
 
