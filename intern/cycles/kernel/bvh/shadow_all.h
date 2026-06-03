@@ -212,6 +212,14 @@ ccl_device_inline
               }
             }
 
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+            if (hit && pixel_displacement_shared_edge_shadow_hit(
+                           kg, ray->self, prim_object, prim, isect.u, isect.v))
+            {
+              hit = false;
+            }
+#endif
+
             if (hit) {
               if (!bvh_shadow_all_anyhit_filter<ISECT_TEST_NONE>(kg,
                                                                  payload.state,
