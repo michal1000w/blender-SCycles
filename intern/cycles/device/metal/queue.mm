@@ -471,7 +471,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     write_resource(ancillary_args, metal_device_->image_bindings, ancillary_index++);
     write_resource(ancillary_args, metal_device_->sampler_bindings, ancillary_index++);
 
-    if (metal_device_->use_metalrt) {
+    if (active_pipeline.use_metalrt) {
       write_resource(ancillary_args, metal_device_->accel_struct, ancillary_index++);
       write_resource(ancillary_args, metal_device_->blas_buffer, ancillary_index++);
 
@@ -489,7 +489,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
 
     /* Fallback path in case residency sets aren't supported:
      * Call useResource for MetalRT resources not covered by prepare_resources(). */
-    if (!metal_device_->mtlResidencySet_enabled && metal_device_->use_metalrt &&
+    if (!metal_device_->mtlResidencySet_enabled && active_pipeline.use_metalrt &&
         device_kernel_has_intersection(kernel))
     {
       if (id<MTLAccelerationStructure> accel_struct = metal_device_->accel_struct) {
