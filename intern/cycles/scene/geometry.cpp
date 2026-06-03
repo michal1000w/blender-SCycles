@@ -10,6 +10,7 @@
 #include "scene/camera.h"
 #include "scene/geometry.h"
 #include "scene/hair.h"
+#include "scene/integrator.h"
 #include "scene/light.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
@@ -32,6 +33,34 @@
 #include "util/task.h"
 
 CCL_NAMESPACE_BEGIN
+
+static bool device_supports_pixel_displacement(const Device *device)
+{
+  if (device->info.type == DEVICE_METAL) {
+    return true;
+  }
+
+  if (device->info.type == DEVICE_MULTI) {
+    for (const DeviceInfo &subdevice : device->info.multi_devices) {
+      if (subdevice.type != DEVICE_METAL) {
+        return false;
+      }
+    }
+    return !device->info.multi_devices.empty();
+  }
+
+  return false;
+}
+
+static bool scene_uses_pixel_displacement(const Scene *scene,
+                                          const Device *device,
+                                          const BVHLayout bvh_layout)
+{
+  return scene->integrator->get_use_pixel_displacement() && bvh_layout == BVH_LAYOUT_BVH2 &&
+         device_supports_pixel_displacement(device) &&
+         scene->integrator->get_pixel_displacement_scale() != 0.0f &&
+         scene->integrator->get_pixel_displacement_max_distance() > 0.0f;
+}
 
 /* Geometry */
 
@@ -59,6 +88,8 @@ Geometry::Geometry(const NodeType *node_type, const Type type)
 
   has_volume = false;
   has_surface_bssrdf = false;
+  use_pixel_displacement = false;
+  pixel_displacement_max_distance = 0.0f;
 
   attr_map_offset = 0;
   prim_offset = 0;
@@ -78,6 +109,8 @@ void Geometry::clear(bool preserve_shaders)
   transform_applied = false;
   transform_negative_scaled = false;
   transform_normal = transform_identity();
+  use_pixel_displacement = false;
+  pixel_displacement_max_distance = 0.0f;
   tag_modified();
 }
 
@@ -800,6 +833,10 @@ void GeometryManager::device_update(Device *device,
 
   LOG_INFO << "Total " << scene->geometry.size() << " meshes.";
 
+  const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
+      scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
+  const bool use_pixel_displacement = scene_uses_pixel_displacement(scene, device, bvh_layout);
+
   bool true_displacement_used = false;
   bool curve_need_update_shadow_transparency = false;
   size_t num_tessellation = 0;
@@ -812,6 +849,9 @@ void GeometryManager::device_update(Device *device,
     });
 
     for (Geometry *geom : scene->geometry) {
+      geom->use_pixel_displacement = false;
+      geom->pixel_displacement_max_distance = 0.0f;
+
       if (geom->is_modified()) {
         if (geom->is_mesh() || geom->is_volume()) {
           Mesh *mesh = static_cast<Mesh *>(geom);
@@ -835,6 +875,11 @@ void GeometryManager::device_update(Device *device,
           /* Test if we need displacement. */
           if (mesh->has_true_displacement()) {
             true_displacement_used = true;
+            if (use_pixel_displacement) {
+              mesh->use_pixel_displacement = true;
+              mesh->pixel_displacement_max_distance =
+                  scene->integrator->get_pixel_displacement_max_distance();
+            }
           }
         }
       }
@@ -925,8 +970,11 @@ void GeometryManager::device_update(Device *device,
     }
 
     /* Apply tangents for generated and UVs (if any need them) or remove if not needed */
+    if (mesh->use_pixel_displacement) {
+      mesh->add_undisplaced(scene);
+    }
     mesh->update_tangents(scene, true);
-    if (!mesh->has_true_displacement()) {
+    if (!mesh->has_true_displacement() || mesh->use_pixel_displacement) {
       mesh->update_tangents(scene, false);
     }
   });
@@ -950,8 +998,6 @@ void GeometryManager::device_update(Device *device,
   /* Device update. */
   device_free(device, dscene, false);
 
-  const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
-      scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
   geom_calc_offset(scene, bvh_layout);
   if (true_displacement_used || curve_need_update_shadow_transparency) {
     const scoped_callback_timer timer([scene](double time) {

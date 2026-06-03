@@ -172,6 +172,15 @@ class MultiDevice : public Device {
     return bvh_layout_mask;
   }
 
+  void set_scene_pixel_displacement(const bool enabled,
+                                    const float scale,
+                                    const float max_distance) override
+  {
+    for (SubDevice &sub : devices) {
+      sub.device->set_scene_pixel_displacement(enabled, scale, max_distance);
+    }
+  }
+
   bool load_kernels(const uint64_t kernel_features) override
   {
     for (SubDevice &sub : devices) {

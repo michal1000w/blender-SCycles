@@ -42,6 +42,10 @@
 
 #include "kernel/bake/bake.h"
 
+#ifdef __KERNEL_METAL__
+#  include "kernel/geom/pixel_displacement_shader.h"
+#endif
+
 #include "kernel/film/adaptive_sampling.h"
 #include "kernel/film/volume_guiding_denoise.h"
 

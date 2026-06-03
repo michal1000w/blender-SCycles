@@ -354,7 +354,7 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
   }
 
   /* metalrt options */
-  pipeline->use_metalrt = device->use_metalrt;
+  pipeline->use_metalrt = device->use_metalrt_for_current_scene();
   pipeline->kernel_features = device->kernel_features;
 
   {
@@ -513,6 +513,7 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   pipeline = best_pipeline->pipeline;
   pso_type = best_pipeline->pso_type;
   num_threads_per_block = best_pipeline->num_threads_per_block;
+  use_metalrt = best_pipeline->use_metalrt;
 
   /* Create the MTLIntersectionFunctionTables if needed. */
   if (best_pipeline->use_metalrt && device_kernel_has_intersection(best_pipeline->device_kernel)) {
@@ -544,6 +545,9 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
         metal_device->metal_mem_alloc(intersection_func_table[table]);
       }
     }
+  }
+  else {
+    free_intersection_function_tables();
   }
 
   return true;

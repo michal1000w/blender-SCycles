@@ -682,7 +682,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (shader->has_bump_from_surface) {
       flag |= SD_HAS_BUMP_FROM_SURFACE;
     }
-    if (shader->get_displacement_method() != DISPLACE_BUMP) {
+    if (shader->has_displacement && shader->get_displacement_method() != DISPLACE_BUMP) {
       flag |= SD_HAS_DISPLACEMENT;
     }
     if (shader->get_use_bump_map_correction()) {
