@@ -107,6 +107,7 @@ class MetalDispatchPipeline {
   MetalPipelineType pso_type;
   id<MTLComputePipelineState> pipeline = nil;
   int num_threads_per_block = 0;
+  bool use_metalrt = false;
 
   API_AVAILABLE(macos(11.0))
   id<MTLIntersectionFunctionTable> intersection_func_table[METALRT_TABLE_NUM] = {nil};

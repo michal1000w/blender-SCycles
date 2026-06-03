@@ -355,6 +355,10 @@ bool GeometryManager::displace(Device *device, Scene *scene, Mesh *mesh, Progres
     return false;
   }
 
+  if (mesh->use_pixel_displacement) {
+    return false;
+  }
+
   const size_t num_verts = mesh->num_verts();
   const size_t num_triangles = mesh->num_triangles();
 

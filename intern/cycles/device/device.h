@@ -169,6 +169,12 @@ class Device {
   virtual void const_copy_to(const char *name, void *host, const size_t size) = 0;
 
   /* load/compile kernels, must be called before adding tasks */
+  virtual void set_scene_pixel_displacement(const bool /*enabled*/,
+                                            const float /*scale*/,
+                                            const float /*max_distance*/)
+  {
+  }
+
   virtual bool load_kernels(uint /*kernel_features*/)
   {
     return true;

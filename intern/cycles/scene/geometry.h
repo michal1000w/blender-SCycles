@@ -113,6 +113,8 @@ class Geometry : public Node {
   /* Shader Properties */
   bool has_volume;         /* Set in the device_update_flags(). */
   bool has_surface_bssrdf; /* Set in the device_update_flags(). */
+  bool use_pixel_displacement;
+  float pixel_displacement_max_distance;
 
   /* Position attribute. */
   const packed_float3 *get_position() const;
