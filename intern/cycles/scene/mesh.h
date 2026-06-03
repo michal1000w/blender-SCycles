@@ -214,6 +214,7 @@ class Mesh : public Geometry {
 
   bool has_motion_blur() const override;
   PrimitiveType primitive_type() const override;
+  bool triangle_has_true_displacement(const size_t i) const;
 
   void tessellate(SubdParams &params);
 

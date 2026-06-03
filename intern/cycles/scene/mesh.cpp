@@ -922,6 +922,17 @@ bool Mesh::has_motion_blur() const
                                    subd_attr_P && subd_attr_P->has_motion()));
 }
 
+bool Mesh::triangle_has_true_displacement(const size_t i) const
+{
+  const int shader_index = (i < shader.size()) ? shader[i] : -1;
+  if (shader_index < 0 || static_cast<size_t>(shader_index) >= used_shaders.size()) {
+    return false;
+  }
+
+  const Shader *shader = static_cast<const Shader *>(used_shaders[shader_index]);
+  return shader->has_displacement && shader->get_displacement_method() != DISPLACE_BUMP;
+}
+
 PrimitiveType Mesh::primitive_type() const
 {
   return has_motion_blur() ? PRIMITIVE_MOTION_TRIANGLE : PRIMITIVE_TRIANGLE;
