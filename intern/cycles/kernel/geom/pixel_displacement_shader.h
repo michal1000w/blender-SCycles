@@ -278,21 +278,67 @@ ccl_device_inline bool pixel_displacement_bary_inside(const float2 bary, const f
   return bary.x >= -eps && bary.y >= -eps && bary.x + bary.y <= 1.0f + eps;
 }
 
-ccl_device_noinline bool pixel_displacement_height_residual(KernelGlobals kg,
-                                                            ccl_private const float3 verts[3],
-                                                            const int object,
-                                                            const int prim,
-                                                            const float time,
-                                                            const bool motion,
-                                                            const float3 ray_P,
-                                                            const float3 ray_D,
-                                                            const float3 Ng,
-                                                            const float origin_plane,
-                                                            const float dir_plane,
-                                                            const float t,
-                                                            const float bary_eps,
-                                                            ccl_private float *r_f,
-                                                            ccl_private float2 *r_bary)
+struct PixelDisplacementHeightSample {
+  float plane_distance;
+  float height;
+  float residual;
+  float2 bary;
+};
+
+ccl_device_inline bool pixel_displacement_clip_bounds_axis(const float origin,
+                                                           const float direction,
+                                                           const float lower,
+                                                           const float upper,
+                                                           ccl_private float *t0,
+                                                           ccl_private float *t1)
+{
+  if (fabsf(direction) < 1.0e-8f) {
+    return origin >= lower && origin <= upper;
+  }
+
+  float ta = (lower - origin) / direction;
+  float tb = (upper - origin) / direction;
+  if (ta > tb) {
+    const float tmp = ta;
+    ta = tb;
+    tb = tmp;
+  }
+
+  *t0 = max(*t0, ta);
+  *t1 = min(*t1, tb);
+  return *t1 >= *t0;
+}
+
+ccl_device_inline bool pixel_displacement_clip_bounds(const float3 bounds_min,
+                                                       const float3 bounds_max,
+                                                       const float3 ray_P,
+                                                       const float3 ray_D,
+                                                       ccl_private float *t0,
+                                                       ccl_private float *t1)
+{
+  return pixel_displacement_clip_bounds_axis(
+             ray_P.x, ray_D.x, bounds_min.x, bounds_max.x, t0, t1) &&
+         pixel_displacement_clip_bounds_axis(
+             ray_P.y, ray_D.y, bounds_min.y, bounds_max.y, t0, t1) &&
+         pixel_displacement_clip_bounds_axis(
+             ray_P.z, ray_D.z, bounds_min.z, bounds_max.z, t0, t1);
+}
+
+ccl_device_noinline bool pixel_displacement_height_sample(
+    KernelGlobals kg,
+    ccl_private const float3 verts[3],
+    const int object,
+    const int prim,
+    const float time,
+    const bool motion,
+    const float3 ray_P,
+    const float3 ray_D,
+    const float3 Ng,
+    const float origin_plane,
+    const float dir_plane,
+    const float t,
+    const float bary_eps,
+    ccl_private PixelDisplacementHeightSample *r_sample)
 {
   const float plane_distance = origin_plane + t * dir_plane;
   const float3 ray_point = ray_P + ray_D * t;
@@ -308,8 +354,150 @@ ccl_device_noinline bool pixel_displacement_height_residual(KernelGlobals kg,
 
   const float3 D = pixel_displacement_eval_object(
       kg, object, prim, bary.x, bary.y, time, motion, verts);
-  *r_f = plane_distance - dot(D, Ng);
-  *r_bary = bary;
+  const float height = dot(D, Ng);
+
+  r_sample->plane_distance = plane_distance;
+  r_sample->height = height;
+  r_sample->residual = plane_distance - height;
+  r_sample->bary = bary;
+  return true;
+}
+
+ccl_device_inline float2 pixel_displacement_clamp_bary(float2 bary)
+{
+  bary.x = max(bary.x, 0.0f);
+  bary.y = max(bary.y, 0.0f);
+  const float sum = bary.x + bary.y;
+  if (sum > 1.0f) {
+    bary /= sum;
+  }
+  return bary;
+}
+
+ccl_device_inline bool pixel_displacement_intersect_micro_triangle(
+    const float3 ray_P,
+    const float3 ray_D,
+    const float ray_tmin,
+    const float ray_tmax,
+    const float3 P0,
+    const float3 P1,
+    const float3 P2,
+    const float2 b0,
+    const float2 b1,
+    const float2 b2,
+    ccl_private float *r_t,
+    ccl_private float2 *r_bary)
+{
+  const float3 e1 = P1 - P0;
+  const float3 e2 = P2 - P0;
+  const float3 h = cross(ray_D, e2);
+  const float a = dot(e1, h);
+  if (fabsf(a) < 1.0e-7f) {
+    return false;
+  }
+
+  const float inv_a = 1.0f / a;
+  const float3 s = ray_P - P0;
+  const float u = inv_a * dot(s, h);
+  if (u < -5.0e-4f || u > 1.0f + 5.0e-4f) {
+    return false;
+  }
+
+  const float3 q = cross(s, e1);
+  const float v = inv_a * dot(ray_D, q);
+  if (v < -5.0e-4f || u + v > 1.0f + 5.0e-4f) {
+    return false;
+  }
+
+  const float t = inv_a * dot(e2, q);
+  if (!(t > ray_tmin && t < ray_tmax)) {
+    return false;
+  }
+
+  const float w = 1.0f - u - v;
+  const float2 bary = b0 * w + b1 * u + b2 * v;
+  if (!pixel_displacement_bary_inside(bary, 5.0e-4f)) {
+    return false;
+  }
+
+  *r_t = t;
+  *r_bary = pixel_displacement_clamp_bary(bary);
+  return true;
+}
+
+ccl_device_noinline bool pixel_displacement_intersect_micro_patch(
+    KernelGlobals kg,
+    const int object,
+    const int prim,
+    const float time,
+    const bool motion,
+    ccl_private const float3 verts[3],
+    const float3 ray_P,
+    const float3 ray_D,
+    const float ray_tmin,
+    const float ray_tmax,
+    const int steps,
+    ccl_private float *r_t,
+    ccl_private float2 *r_bary)
+{
+  bool hit = false;
+  float best_t = ray_tmax;
+  float2 best_bary = make_float2(0.0f, 0.0f);
+  const int grid = clamp(int(ceilf(sqrtf(float(max(steps, 1)))) + 2), 6, 14);
+  const float inv_grid = 1.0f / float(grid);
+
+  for (int i = 0; i < 14; i++) {
+    if (i >= grid) {
+      break;
+    }
+    for (int j = 0; j < 14; j++) {
+      if (i + j >= grid) {
+        break;
+      }
+
+      const float2 b00 = make_float2(float(i), float(j)) * inv_grid;
+      const float2 b10 = make_float2(float(i + 1), float(j)) * inv_grid;
+      const float2 b01 = make_float2(float(i), float(j + 1)) * inv_grid;
+      const float3 P00 = pixel_displacement_position(
+          kg, object, prim, b00.x, b00.y, time, motion, verts);
+      const float3 P10 = pixel_displacement_position(
+          kg, object, prim, b10.x, b10.y, time, motion, verts);
+      const float3 P01 = pixel_displacement_position(
+          kg, object, prim, b01.x, b01.y, time, motion, verts);
+
+      float t;
+      float2 bary;
+      if (pixel_displacement_intersect_micro_triangle(
+              ray_P, ray_D, ray_tmin, best_t, P00, P10, P01, b00, b10, b01, &t, &bary))
+      {
+        hit = true;
+        best_t = t;
+        best_bary = bary;
+      }
+
+      if (i + j + 2 > grid) {
+        continue;
+      }
+
+      const float2 b11 = make_float2(float(i + 1), float(j + 1)) * inv_grid;
+      const float3 P11 = pixel_displacement_position(
+          kg, object, prim, b11.x, b11.y, time, motion, verts);
+      if (pixel_displacement_intersect_micro_triangle(
+              ray_P, ray_D, ray_tmin, best_t, P10, P11, P01, b10, b11, b01, &t, &bary))
+      {
+        hit = true;
+        best_t = t;
+        best_bary = bary;
+      }
+    }
+  }
+
+  if (!hit) {
+    return false;
+  }
+
+  *r_t = best_t;
+  *r_bary = best_bary;
   return true;
 }
 
@@ -334,23 +522,34 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
 
   const float origin_plane = dot(ray_P - verts[0], Ng);
   const float dir_plane = dot(ray_D, Ng);
-  if (fabsf(dir_plane) < 1.0e-8f) {
+  const float abs_dir_plane = fabsf(dir_plane);
+
+  const float3 bounds_pad = make_float3(max_distance);
+  const float3 bounds_min = min(min(verts[0], verts[1]), verts[2]) - bounds_pad;
+  const float3 bounds_max = max(max(verts[0], verts[1]), verts[2]) + bounds_pad;
+  float bounds_t0 = ray_tmin;
+  float bounds_t1 = ray_tmax;
+  if (!pixel_displacement_clip_bounds(bounds_min, bounds_max, ray_P, ray_D, &bounds_t0, &bounds_t1)) {
     return false;
   }
 
-  float t0 = (max_distance - origin_plane) / dir_plane;
-  float t1 = (-max_distance - origin_plane) / dir_plane;
-  if (t0 > t1) {
-    const float tmp = t0;
-    t0 = t1;
-    t1 = tmp;
+  float t0 = ray_tmin;
+  float t1 = ray_tmax;
+  if (abs_dir_plane > 1.0e-8f) {
+    const float ta = (-max_distance - origin_plane) / dir_plane;
+    const float tb = (max_distance - origin_plane) / dir_plane;
+    t0 = max(t0, min(ta, tb));
+    t1 = min(t1, max(ta, tb));
+  }
+  else if (origin_plane < -max_distance || origin_plane > max_distance) {
+    return false;
   }
 
-  t0 = max(t0, ray_tmin);
-  t1 = min(t1, ray_tmax);
+  t0 = max(t0, bounds_t0);
+  t1 = min(t1, bounds_t1);
 
-  if (seed_t > ray_tmin) {
-    const float local_pad = 2.0f * max_distance / max(fabsf(dir_plane), 1.0e-6f);
+  if (seed_t > ray_tmin && abs_dir_plane > 1.0e-6f) {
+    const float local_pad = 2.0f * max_distance / abs_dir_plane;
     t0 = max(t0, max(ray_tmin, seed_t - local_pad));
     t1 = min(t1, seed_t + local_pad);
   }
@@ -398,7 +597,10 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
   }
 
   int steps = clamp(kernel_data.integrator.pixel_displacement_steps, 8, 128);
-  if (fabsf(dir_plane) < 0.2f) {
+  if (abs_dir_plane < 0.05f) {
+    steps = min(steps * 4, 128);
+  }
+  else if (abs_dir_plane < 0.2f) {
     steps = min(steps * 2, 128);
   }
   const float dt = (t1 - t0) / float(steps);
@@ -413,27 +615,27 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
     }
 
     const float t = (i == steps) ? t1 : (t0 + dt * float(i));
-    float f;
-    float2 bary;
-    if (!pixel_displacement_height_residual(kg,
-                                            verts,
-                                            object,
-                                            prim,
-                                            time,
-                                            motion,
-                                            ray_P,
-                                            ray_D,
-                                            Ng,
-                                            origin_plane,
-                                            dir_plane,
-                                            t,
-                                            bary_eps,
-                                            &f,
-                                            &bary))
+    PixelDisplacementHeightSample sample;
+    if (!pixel_displacement_height_sample(kg,
+                                          verts,
+                                          object,
+                                          prim,
+                                          time,
+                                          motion,
+                                          ray_P,
+                                          ray_D,
+                                          Ng,
+                                          origin_plane,
+                                          dir_plane,
+                                          t,
+                                          bary_eps,
+                                          &sample))
     {
       continue;
     }
 
+    const float f = sample.residual;
+    const float2 bary = sample.bary;
     const bool bracket = have_prev && ((prev_f <= 0.0f && f >= 0.0f) ||
                                        (prev_f >= 0.0f && f <= 0.0f));
     if (fabsf(f) <= 2.0e-4f || bracket) {
@@ -449,27 +651,27 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                           0.5f * (lo + hi);
         const float tm = clamp(secant_t, mix(lo, hi, 0.2f), mix(lo, hi, 0.8f));
 
-        float fm;
-        float2 bary_m;
-        if (!pixel_displacement_height_residual(kg,
-                                                verts,
-                                                object,
-                                                prim,
-                                                time,
-                                                motion,
-                                                ray_P,
-                                                ray_D,
-                                                Ng,
-                                                origin_plane,
-                                                dir_plane,
-                                                tm,
-                                                bary_eps,
-                                                &fm,
-                                                &bary_m))
+        PixelDisplacementHeightSample sample_m;
+        if (!pixel_displacement_height_sample(kg,
+                                              verts,
+                                              object,
+                                              prim,
+                                              time,
+                                              motion,
+                                              ray_P,
+                                              ray_D,
+                                              Ng,
+                                              origin_plane,
+                                              dir_plane,
+                                              tm,
+                                              bary_eps,
+                                              &sample_m))
         {
           break;
         }
 
+        const float fm = sample_m.residual;
+        const float2 bary_m = sample_m.bary;
         root_bary = bary_m;
         if ((flo <= 0.0f && fm >= 0.0f) || (flo >= 0.0f && fm <= 0.0f)) {
           hi = tm;
@@ -486,112 +688,136 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
       const float3 root_point = ray_P + ray_D * root_t;
       const float3 projected = root_point - plane_distance * Ng;
       root_bary = pixel_displacement_bary_from_point(verts, projected);
-      if (!pixel_displacement_bary_inside(root_bary, bary_eps)) {
-        root_bary = bary;
+      if (!pixel_displacement_bary_inside(root_bary, bary_final_eps)) {
+        have_prev = true;
+        prev_t = t;
+        prev_f = f;
+        continue;
       }
       root_bary.x = clamp(root_bary.x, 0.0f, 1.0f);
       root_bary.y = clamp(root_bary.y, 0.0f, 1.0f - root_bary.x);
 
-      if (root_t <= ray_tmin || root_t >= ray_tmax) {
-        return false;
-      }
+      if (root_t > ray_tmin && root_t < ray_tmax) {
+        float refined_t = root_t;
+        float2 refined_bary = root_bary;
+        const float residual_limit = max(7.5e-4f, max_distance * 0.05f);
+        bool use_refined = false;
 
-      float refined_t = root_t;
-      float2 refined_bary = root_bary;
-      const float residual_limit = max(7.5e-4f, max_distance * 0.05f);
-      bool use_refined = false;
+        for (int newton = 0; newton < 3; newton++) {
+          float3 surface_P;
+          float3 surface_Ng;
+          float3 surface_dPdu;
+          float3 surface_dPdv;
+          pixel_displacement_displaced_geometry(kg,
+                                                object,
+                                                prim,
+                                                refined_bary.x,
+                                                refined_bary.y,
+                                                time,
+                                                motion,
+                                                verts,
+                                                &surface_P,
+                                                &surface_Ng,
+                                                &surface_dPdu,
+                                                &surface_dPdv);
 
-      for (int newton = 0; newton < 3; newton++) {
-        float3 surface_P;
-        float3 surface_Ng;
-        float3 surface_dPdu;
-        float3 surface_dPdv;
-        pixel_displacement_displaced_geometry(kg,
-                                              object,
-                                              prim,
-                                              refined_bary.x,
-                                              refined_bary.y,
-                                              time,
-                                              motion,
-                                              verts,
-                                              &surface_P,
-                                              &surface_Ng,
-                                              &surface_dPdu,
-                                              &surface_dPdv);
+          (void)surface_Ng;
+          const float3 residual = ray_P + ray_D * refined_t - surface_P;
+          if (dot(residual, residual) <= residual_limit * residual_limit) {
+            use_refined = true;
+            break;
+          }
 
-        (void)surface_Ng;
-        const float3 residual = ray_P + ray_D * refined_t - surface_P;
-        if (dot(residual, residual) <= residual_limit * residual_limit) {
-          use_refined = true;
-          break;
+          const float3 c0 = ray_D;
+          const float3 c1 = -surface_dPdu;
+          const float3 c2 = -surface_dPdv;
+          const float det = dot(c0, cross(c1, c2));
+          if (fabsf(det) <= 1.0e-8f) {
+            break;
+          }
+
+          const float3 rhs = -residual;
+          const float delta_t = dot(rhs, cross(c1, c2)) / det;
+          const float delta_u = dot(c0, cross(rhs, c2)) / det;
+          const float delta_v = dot(c0, cross(c1, rhs)) / det;
+          const float max_t_step = max((hi - lo) * 0.75f, 0.02f + max_distance);
+          const float2 next_bary = refined_bary +
+                                    clamp(make_float2(delta_u, delta_v),
+                                          make_float2(-0.25f, -0.25f),
+                                          make_float2(0.25f, 0.25f));
+          if (!pixel_displacement_bary_inside(next_bary, bary_final_eps)) {
+            break;
+          }
+
+          refined_t = clamp(
+              refined_t + clamp(delta_t, -max_t_step, max_t_step), ray_tmin, ray_tmax);
+          refined_bary = next_bary;
+          refined_bary.x = clamp(refined_bary.x, 0.0f, 1.0f);
+          refined_bary.y = clamp(refined_bary.y, 0.0f, 1.0f - refined_bary.x);
         }
 
-        const float3 c0 = ray_D;
-        const float3 c1 = -surface_dPdu;
-        const float3 c2 = -surface_dPdv;
-        const float det = dot(c0, cross(c1, c2));
-        if (fabsf(det) <= 1.0e-8f) {
-          break;
+        if (!use_refined) {
+          float3 surface_P;
+          float3 surface_Ng;
+          float3 surface_dPdu;
+          float3 surface_dPdv;
+          pixel_displacement_displaced_geometry(kg,
+                                                object,
+                                                prim,
+                                                refined_bary.x,
+                                                refined_bary.y,
+                                                time,
+                                                motion,
+                                                verts,
+                                                &surface_P,
+                                                &surface_Ng,
+                                                &surface_dPdu,
+                                                &surface_dPdv);
+
+          (void)surface_Ng;
+          (void)surface_dPdu;
+          (void)surface_dPdv;
+          const float3 residual = ray_P + ray_D * refined_t - surface_P;
+          use_refined = dot(residual, residual) <= residual_limit * residual_limit;
         }
 
-        const float3 rhs = -residual;
-        const float delta_t = dot(rhs, cross(c1, c2)) / det;
-        const float delta_u = dot(c0, cross(rhs, c2)) / det;
-        const float delta_v = dot(c0, cross(c1, rhs)) / det;
-        const float max_t_step = max((hi - lo) * 0.75f, 0.02f + max_distance);
-        const float2 next_bary = refined_bary +
-                                  clamp(make_float2(delta_u, delta_v),
-                                        make_float2(-0.25f, -0.25f),
-                                        make_float2(0.25f, 0.25f));
-        if (!pixel_displacement_bary_inside(next_bary, bary_final_eps)) {
-          break;
+        if (use_refined && refined_t > ray_tmin && refined_t < ray_tmax) {
+          *r_t = refined_t;
+          *r_u = refined_bary.x;
+          *r_v = refined_bary.y;
+          return true;
         }
-
-        refined_t = clamp(
-            refined_t + clamp(delta_t, -max_t_step, max_t_step), ray_tmin, ray_tmax);
-        refined_bary = next_bary;
-        refined_bary.x = clamp(refined_bary.x, 0.0f, 1.0f);
-        refined_bary.y = clamp(refined_bary.y, 0.0f, 1.0f - refined_bary.x);
       }
 
-      if (!use_refined) {
-        float3 surface_P;
-        float3 surface_Ng;
-        float3 surface_dPdu;
-        float3 surface_dPdv;
-        pixel_displacement_displaced_geometry(kg,
-                                              object,
-                                              prim,
-                                              refined_bary.x,
-                                              refined_bary.y,
-                                              time,
-                                              motion,
-                                              verts,
-                                              &surface_P,
-                                              &surface_Ng,
-                                              &surface_dPdu,
-                                              &surface_dPdv);
-
-        (void)surface_Ng;
-        (void)surface_dPdu;
-        (void)surface_dPdv;
-        const float3 residual = ray_P + ray_D * refined_t - surface_P;
-        use_refined = dot(residual, residual) <= residual_limit * residual_limit;
-      }
-
-      if (!use_refined || refined_t <= ray_tmin || refined_t >= ray_tmax) {
-        return false;
-      }
-
-      *r_t = refined_t;
-      *r_u = refined_bary.x;
-      *r_v = refined_bary.y;
-      return true;
     }
 
     have_prev = true;
     prev_t = t;
     prev_f = f;
+  }
+
+  if (abs_dir_plane < 0.35f) {
+    float micro_t;
+    float2 micro_bary;
+    if (pixel_displacement_intersect_micro_patch(kg,
+                                                 object,
+                                                 prim,
+                                                 time,
+                                                 motion,
+                                                 verts,
+                                                 ray_P,
+                                                 ray_D,
+                                                 ray_tmin,
+                                                 ray_tmax,
+                                                 steps,
+                                                 &micro_t,
+                                                 &micro_bary))
+    {
+      *r_t = micro_t;
+      *r_u = micro_bary.x;
+      *r_v = micro_bary.y;
+      return true;
+    }
   }
 
   return false;
