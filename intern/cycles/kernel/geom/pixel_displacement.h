@@ -46,6 +46,64 @@ ccl_device_inline float3 pixel_displacement_face_normal(ccl_private const float3
   return normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
 }
 
+ccl_device_inline bool pixel_displacement_shared_edge_shadow_hit(
+    KernelGlobals kg,
+    const ccl_ray_data RaySelfPrimitives &self,
+    const int object,
+    const int prim,
+    const float u,
+    const float v)
+{
+  (void)u;
+  (void)v;
+
+  if (self.object != object || self.prim == PRIM_NONE || self.prim == prim) {
+    return false;
+  }
+
+  if (!pixel_displacement_active(kg, self.prim) || !pixel_displacement_active(kg, prim)) {
+    return false;
+  }
+
+  if (kernel_data_fetch(tri_shader, self.prim) != kernel_data_fetch(tri_shader, prim)) {
+    return false;
+  }
+
+  const uint3 self_tri = kernel_data_fetch(tri_vindex, self.prim);
+  const uint3 hit_tri = kernel_data_fetch(tri_vindex, prim);
+
+  const bool hit_x_shared = (hit_tri.x == self_tri.x) || (hit_tri.x == self_tri.y) ||
+                            (hit_tri.x == self_tri.z);
+  const bool hit_y_shared = (hit_tri.y == self_tri.x) || (hit_tri.y == self_tri.y) ||
+                            (hit_tri.y == self_tri.z);
+  const bool hit_z_shared = (hit_tri.z == self_tri.x) || (hit_tri.z == self_tri.y) ||
+                            (hit_tri.z == self_tri.z);
+  const int shared_count = int(hit_x_shared) + int(hit_y_shared) + int(hit_z_shared);
+  if (shared_count != 2) {
+    return false;
+  }
+
+  const int position_offset = kernel_data_fetch(objects, object).position_offset;
+  const float3 self_verts[3] = {
+      kernel_data_fetch(attributes_float3, position_offset + self_tri.x),
+      kernel_data_fetch(attributes_float3, position_offset + self_tri.y),
+      kernel_data_fetch(attributes_float3, position_offset + self_tri.z),
+  };
+  const float3 hit_verts[3] = {
+      kernel_data_fetch(attributes_float3, position_offset + hit_tri.x),
+      kernel_data_fetch(attributes_float3, position_offset + hit_tri.y),
+      kernel_data_fetch(attributes_float3, position_offset + hit_tri.z),
+  };
+  const uint object_flag = kernel_data_fetch(object_flag, object);
+  const float3 self_Ng = pixel_displacement_face_normal(self_verts, object_flag);
+  const float3 hit_Ng = pixel_displacement_face_normal(hit_verts, object_flag);
+  if (dot(self_Ng, hit_Ng) < 0.999f) {
+    return false;
+  }
+
+  return true;
+}
+
 ccl_device_inline float2 pixel_displacement_bary_from_point(ccl_private const float3 verts[3],
                                                             const float3 P)
 {
