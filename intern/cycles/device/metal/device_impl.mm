@@ -56,6 +56,8 @@ bool MetalDevice::use_metalrt_for_current_scene() const
   const bool use_pixel_displacement = scene_use_pixel_displacement &&
                                       scene_pixel_displacement_scale != 0.0f &&
                                       scene_pixel_displacement_max_distance > 0.0f;
+  /* Pixel displacement relies on Cycles' BVH2 software intersection refinement. MetalRT custom
+   * bounding-box intersection functions cannot safely replace that path without changing hits. */
   return !use_pixel_displacement;
 }
 
