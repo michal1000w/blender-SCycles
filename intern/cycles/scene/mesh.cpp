@@ -14,6 +14,7 @@
 #include "scene/object.h"
 #include "scene/scene.h"
 #include "scene/shader_graph.h"
+#include "scene/shader_nodes.h"
 
 #include "subd/split.h"
 
@@ -937,6 +938,112 @@ bool Mesh::triangle_has_true_displacement(const size_t i) const
 
   const Shader *shader = static_cast<const Shader *>(used_shaders[shader_index]);
   return shader->has_displacement && shader->get_displacement_method() != DISPLACE_BUMP;
+}
+
+static bool shader_has_normal_only_displacement(const Shader *shader)
+{
+  if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP ||
+      !shader->graph)
+  {
+    return false;
+  }
+
+  const OutputNode *output = static_cast<const OutputNode *>(shader->graph->nodes[0]);
+  const ShaderInput *displacement_input = nullptr;
+  for (const ShaderInput *input : output->inputs) {
+    if (input->name() == ustring("Displacement")) {
+      displacement_input = input;
+      break;
+    }
+  }
+  if (!displacement_input) {
+    return false;
+  }
+  if (!displacement_input->link) {
+    return false;
+  }
+
+  const ShaderNode *displacement_node = displacement_input->link->parent;
+  if (displacement_node->type != DisplacementNode::get_node_type()) {
+    return false;
+  }
+
+  const DisplacementNode *node = static_cast<const DisplacementNode *>(displacement_node);
+  const ShaderInput *normal_input = nullptr;
+  for (const ShaderInput *input : node->inputs) {
+    if (input->name() == ustring("Normal")) {
+      normal_input = input;
+      break;
+    }
+  }
+  return node->get_space() == NODE_NORMAL_MAP_OBJECT &&
+         !(normal_input && normal_input->link);
+}
+
+bool Mesh::triangle_has_normal_only_displacement(const size_t i) const
+{
+  const int shader_index = (i < shader.size()) ? shader[i] : -1;
+  if (shader_index < 0 || static_cast<size_t>(shader_index) >= used_shaders.size()) {
+    return false;
+  }
+
+  const Shader *shader = static_cast<const Shader *>(used_shaders[shader_index]);
+  return shader_has_normal_only_displacement(shader);
+}
+
+static float normal_cone_axis_bound(const float axis_component_abs,
+                                    const float cos_theta,
+                                    const float sin_theta)
+{
+  if (axis_component_abs >= cos_theta) {
+    return 1.0f;
+  }
+
+  return axis_component_abs * cos_theta +
+         sqrtf(max(0.0f, 1.0f - axis_component_abs * axis_component_abs)) * sin_theta;
+}
+
+bool Mesh::triangle_normal_displacement_bounds_pad(const size_t i,
+                                                   const float max_distance,
+                                                   float3 *r_pad) const
+{
+  if (max_distance <= 0.0f || has_motion_blur() || !triangle_has_normal_only_displacement(i)) {
+    return false;
+  }
+
+  const Attribute *attr_N = attributes.find(ATTR_STD_CORNER_NORMAL);
+  const bool use_corner_normals = attr_N != nullptr;
+  if (!attr_N) {
+    attr_N = attributes.find(ATTR_STD_VERTEX_NORMAL);
+  }
+  if (!attr_N) {
+    return false;
+  }
+
+  const Triangle tri = get_triangle(i);
+  const packed_float3 *verts = get_position();
+  const float3 face_N = tri.compute_normal(verts);
+  const packed_normal *normals = attr_N->data<packed_normal>();
+
+  float min_abs_dot = 1.0f;
+  for (int corner = 0; corner < 3; corner++) {
+    const int normal_index = use_corner_normals ? int(i * 3 + corner) : tri.v[corner];
+    const float3 N = normals[normal_index].decode();
+    if (!isfinite_safe(N)) {
+      return false;
+    }
+    min_abs_dot = min(min_abs_dot, fabsf(dot(N, face_N)));
+  }
+
+  const float cos_theta = clamp(min_abs_dot, 0.0f, 1.0f);
+  const float sin_theta = sqrtf(max(0.0f, 1.0f - cos_theta * cos_theta));
+  const float3 axis_abs = fabs(face_N);
+  const float3 cone_extent = make_float3(normal_cone_axis_bound(axis_abs.x, cos_theta, sin_theta),
+                                         normal_cone_axis_bound(axis_abs.y, cos_theta, sin_theta),
+                                         normal_cone_axis_bound(axis_abs.z, cos_theta, sin_theta));
+  const float safety = max(1.0e-6f, max_distance * 1.0e-5f);
+  *r_pad = min(make_float3(max_distance), cone_extent * max_distance + make_float3(safety));
+  return true;
 }
 
 PrimitiveType Mesh::primitive_type() const
