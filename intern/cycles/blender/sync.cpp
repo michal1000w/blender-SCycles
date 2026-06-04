@@ -395,7 +395,8 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
 
   if (integrator->use_pixel_displacement_is_modified() ||
       integrator->pixel_displacement_scale_is_modified() ||
-      integrator->pixel_displacement_max_distance_is_modified())
+      integrator->pixel_displacement_max_distance_is_modified() ||
+      integrator->pixel_displacement_steps_is_modified())
   {
     for (Geometry *geom : scene->geometry) {
       if (geom->has_true_displacement()) {

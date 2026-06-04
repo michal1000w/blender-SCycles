@@ -300,6 +300,11 @@ class GeometryManager {
 
   void device_update_mesh(Device *device, DeviceScene *dscene, Scene *scene, Progress &progress);
 
+  bool device_update_pixel_displacement_cache(Device *device,
+                                              DeviceScene *dscene,
+                                              Scene *scene,
+                                              Progress &progress);
+
   void device_update_attributes(Device *device,
                                 DeviceScene *dscene,
                                 Scene *scene,

@@ -652,6 +652,9 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     if (device_update_flags & DEVICE_MESH_DATA_NEEDS_REALLOC) {
       dscene->tri_vindex.tag_realloc();
       dscene->tri_shader.tag_realloc();
+      dscene->pixel_displacement_info.tag_realloc();
+      dscene->pixel_displacement_offset.tag_realloc();
+      dscene->pixel_displacement_data.tag_realloc();
     }
 
     if (device_update_flags & DEVICE_CURVE_DATA_NEEDS_REALLOC) {
@@ -723,6 +726,9 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     /* if anything else than vertices or shaders are modified, we would need to reallocate, so
      * these are the only arrays that can be updated */
     dscene->tri_shader.tag_modified();
+    dscene->pixel_displacement_info.tag_realloc();
+    dscene->pixel_displacement_offset.tag_realloc();
+    dscene->pixel_displacement_data.tag_realloc();
   }
 
   if (device_update_flags & DEVICE_CURVE_DATA_MODIFIED) {
@@ -1054,6 +1060,19 @@ void GeometryManager::device_update(Device *device,
     /* Copy constant data needed by shader evaluation. */
     device->const_copy_to("data", &dscene->data, sizeof(dscene->data));
 
+    if (use_pixel_displacement && true_displacement_used) {
+      const scoped_callback_timer timer([scene](double time) {
+        if (scene->update_stats) {
+          scene->update_stats->geometry.times.add_entry(
+              {"device_update (pixel displacement cache)", time});
+        }
+      });
+      device_update_pixel_displacement_cache(device, dscene, scene, progress);
+      if (progress.get_cancel()) {
+        return;
+      }
+    }
+
     const scoped_callback_timer timer([scene](double time) {
       if (scene->update_stats) {
         scene->update_stats->geometry.times.add_entry({"device_update (displacement)", time});
@@ -1252,6 +1271,9 @@ void GeometryManager::device_update(Device *device,
   dscene->tri_shader.clear_modified();
   dscene->tri_vindex.clear_modified();
   dscene->tri_verts.clear_modified();
+  dscene->pixel_displacement_info.clear_modified();
+  dscene->pixel_displacement_offset.clear_modified();
+  dscene->pixel_displacement_data.clear_modified();
   dscene->curves.clear_modified();
   dscene->curve_keys.clear_modified();
   dscene->curve_segments.clear_modified();
@@ -1279,6 +1301,9 @@ void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool forc
   dscene->tri_shader.free_if_need_realloc(force_free);
   dscene->tri_vindex.free_if_need_realloc(force_free);
   dscene->tri_verts.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_info.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_offset.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_data.free_if_need_realloc(force_free);
   dscene->curves.free_if_need_realloc(force_free);
   dscene->curve_keys.free_if_need_realloc(force_free);
   dscene->curve_segments.free_if_need_realloc(force_free);
