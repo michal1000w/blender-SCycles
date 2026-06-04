@@ -43,6 +43,13 @@ static void grow_pixel_displacement_bounds(const Mesh *mesh,
     return;
   }
 
+  float3 normal_pad;
+  if (mesh->triangle_normal_displacement_bounds_pad(triangle_index, pad, &normal_pad)) {
+    bounds.min -= normal_pad;
+    bounds.max += normal_pad;
+    return;
+  }
+
   bounds.grow(bounds.min, pad);
   bounds.grow(bounds.max, pad);
 }
