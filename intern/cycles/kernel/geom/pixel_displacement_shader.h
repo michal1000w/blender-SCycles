@@ -123,14 +123,15 @@ ccl_device_inline void pixel_displacement_setup_shader_data(KernelGlobals kg,
 #  endif
 }
 
-ccl_device_noinline float3 pixel_displacement_eval_object(KernelGlobals kg,
-                                                          const int object,
-                                                          const int prim,
-                                                          const float u,
-                                                          const float v,
-                                                          const float time,
-                                                          const bool motion,
-                                                          ccl_private const float3 verts[3])
+ccl_device_noinline float3 pixel_displacement_eval_object_direct(
+    KernelGlobals kg,
+    const int object,
+    const int prim,
+    const float u,
+    const float v,
+    const float time,
+    const bool motion,
+    ccl_private const float3 verts[3])
 {
   const int shader = kernel_data_fetch(tri_shader, prim);
   const uint object_flag = kernel_data_fetch(object_flag, object);
@@ -160,6 +161,113 @@ ccl_device_noinline float3 pixel_displacement_eval_object(KernelGlobals kg,
   }
 
   return ensure_finite(D);
+}
+
+ccl_device_inline int pixel_displacement_cache_sample_index(const int grid,
+                                                            const int u,
+                                                            const int v)
+{
+  return u * (grid + 1) - (u * (u - 1)) / 2 + v;
+}
+
+ccl_device_inline float3 pixel_displacement_cache_sample(const int offset,
+                                                         const int grid,
+                                                         const int u,
+                                                         const int v)
+{
+  const float4 D = kernel_data_fetch(
+      pixel_displacement_data, offset + pixel_displacement_cache_sample_index(grid, u, v));
+  return make_float3(D.x, D.y, D.z);
+}
+
+ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
+                                                       const int prim,
+                                                       const bool motion,
+                                                       ccl_private int *r_grid,
+                                                       ccl_private int *r_offset)
+{
+  if (motion) {
+    return false;
+  }
+
+  const int grid = int(kernel_data_fetch(pixel_displacement_info, 0));
+  if (grid <= 0) {
+    return false;
+  }
+
+  const int offset = kernel_data_fetch(pixel_displacement_offset, prim);
+  if (offset < 0) {
+    return false;
+  }
+
+  *r_grid = grid;
+  *r_offset = offset;
+  return true;
+}
+
+ccl_device_inline bool pixel_displacement_eval_object_cached(KernelGlobals kg,
+                                                             const int prim,
+                                                             const float u,
+                                                             const float v,
+                                                             const bool motion,
+                                                             ccl_private float3 *r_D)
+{
+  int grid, offset;
+  if (!pixel_displacement_cache_lookup(kg, prim, motion, &grid, &offset)) {
+    return false;
+  }
+
+  float cu = clamp(u, 0.0f, 1.0f);
+  float cv = clamp(v, 0.0f, 1.0f);
+  const float sum = cu + cv;
+  if (sum > 1.0f) {
+    cu /= sum;
+    cv /= sum;
+  }
+
+  const float fu = cu * float(grid);
+  const float fv = cv * float(grid);
+  int iu = min(int(floorf(fu)), grid);
+  int iv = min(int(floorf(fv)), grid - iu);
+
+  if (iu + iv >= grid) {
+    *r_D = pixel_displacement_cache_sample(offset, grid, iu, iv);
+    return true;
+  }
+
+  const float du = fu - float(iu);
+  const float dv = fv - float(iv);
+
+  if (du + dv <= 1.0f || iu + iv + 2 > grid) {
+    const float3 D00 = pixel_displacement_cache_sample(offset, grid, iu, iv);
+    const float3 D10 = pixel_displacement_cache_sample(offset, grid, iu + 1, iv);
+    const float3 D01 = pixel_displacement_cache_sample(offset, grid, iu, iv + 1);
+    *r_D = D00 * (1.0f - du - dv) + D10 * du + D01 * dv;
+    return true;
+  }
+
+  const float3 D10 = pixel_displacement_cache_sample(offset, grid, iu + 1, iv);
+  const float3 D11 = pixel_displacement_cache_sample(offset, grid, iu + 1, iv + 1);
+  const float3 D01 = pixel_displacement_cache_sample(offset, grid, iu, iv + 1);
+  *r_D = D10 * (1.0f - dv) + D11 * (du + dv - 1.0f) + D01 * (1.0f - du);
+  return true;
+}
+
+ccl_device_inline float3 pixel_displacement_eval_object(KernelGlobals kg,
+                                                        const int object,
+                                                        const int prim,
+                                                        const float u,
+                                                        const float v,
+                                                        const float time,
+                                                        const bool motion,
+                                                        ccl_private const float3 verts[3])
+{
+  float3 D;
+  if (pixel_displacement_eval_object_cached(kg, prim, u, v, motion, &D)) {
+    return D;
+  }
+
+  return pixel_displacement_eval_object_direct(kg, object, prim, u, v, time, motion, verts);
 }
 
 ccl_device_inline float3 pixel_displacement_position(KernelGlobals kg,
@@ -677,12 +785,28 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
     return false;
   }
 
+  int cache_grid, cache_offset;
+  const bool use_cache = pixel_displacement_cache_lookup(
+      kg, prim, motion, &cache_grid, &cache_offset);
+  (void)cache_offset;
+
   int steps = clamp(kernel_data.integrator.pixel_displacement_steps, 8, 128);
-  if (abs_dir_plane < 0.05f) {
-    steps = min(steps * 4, 128);
+  if (use_cache) {
+    steps = clamp(cache_grid * 2, 8, 32);
+    if (abs_dir_plane < 0.05f) {
+      steps = min(steps * 2, 48);
+    }
+    else if (abs_dir_plane < 0.2f) {
+      steps = min((steps * 3) / 2, 40);
+    }
   }
-  else if (abs_dir_plane < 0.2f) {
-    steps = min(steps * 2, 128);
+  else {
+    if (abs_dir_plane < 0.05f) {
+      steps = min(steps * 4, 128);
+    }
+    else if (abs_dir_plane < 0.2f) {
+      steps = min(steps * 2, 128);
+    }
   }
   const float dt = (t1 - t0) / float(steps);
 
@@ -726,7 +850,12 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
       float fhi = f;
       float2 root_bary = bary;
 
+      const int refine_steps = use_cache ? 5 : 8;
       for (int refine = 0; refine < 8; refine++) {
+        if (refine >= refine_steps) {
+          break;
+        }
+
         const float denom = fhi - flo;
         const float secant_t = (fabsf(denom) > 1.0e-7f) ? hi - fhi * (hi - lo) / denom :
                                                           0.5f * (lo + hi);
@@ -784,7 +913,12 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
         const float residual_limit = max(7.5e-4f, max_distance * 0.05f);
         bool use_refined = false;
 
+        const int newton_steps = use_cache ? 1 : 3;
         for (int newton = 0; newton < 3; newton++) {
+          if (newton >= newton_steps) {
+            break;
+          }
+
           float3 surface_P;
           float3 surface_Ng;
           float3 surface_dPdu;
