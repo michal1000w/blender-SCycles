@@ -187,7 +187,8 @@ class Device {
   /* load/compile kernels, must be called before adding tasks */
   virtual void set_scene_pixel_displacement(const bool /*enabled*/,
                                             const float /*scale*/,
-                                            const float /*max_distance*/)
+                                            const float /*max_distance*/,
+                                            const bool /*metalrt_compatible*/)
   {
   }
 
