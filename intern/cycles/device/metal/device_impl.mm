@@ -49,16 +49,10 @@ bool MetalDevice::is_device_cancelled(const int ID)
 
 bool MetalDevice::use_metalrt_for_current_scene() const
 {
-  if (!use_metalrt) {
-    return false;
-  }
-
   const bool use_pixel_displacement = scene_use_pixel_displacement &&
                                       scene_pixel_displacement_scale != 0.0f &&
                                       scene_pixel_displacement_max_distance > 0.0f;
-  /* Pixel displacement relies on Cycles' BVH2 software intersection refinement. MetalRT custom
-   * bounding-box intersection functions cannot safely replace that path without changing hits. */
-  return !use_pixel_displacement;
+  return use_metalrt && (!use_pixel_displacement || scene_pixel_displacement_metalrt_compatible);
 }
 
 BVHLayoutMask MetalDevice::get_bvh_layout_mask(uint /*kernel_features*/) const
@@ -256,11 +250,13 @@ bool MetalDevice::use_local_atomic_sort() const
 
 void MetalDevice::set_scene_pixel_displacement(const bool enabled,
                                                const float scale,
-                                               const float max_distance)
+                                               const float max_distance,
+                                               const bool metalrt_compatible)
 {
   scene_use_pixel_displacement = enabled;
   scene_pixel_displacement_scale = scale;
   scene_pixel_displacement_max_distance = max_distance;
+  scene_pixel_displacement_metalrt_compatible = metalrt_compatible;
 }
 
 string MetalDevice::preprocess_source(MetalPipelineType pso_type,
@@ -282,8 +278,7 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
     global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT__\n";
   }
   if (pso_type == PSO_SPECIALIZED_SHADE && scene_use_pixel_displacement &&
-      scene_pixel_displacement_scale != 0.0f &&
-      scene_pixel_displacement_max_distance > 0.0f)
+      scene_pixel_displacement_scale != 0.0f && scene_pixel_displacement_max_distance > 0.0f)
   {
     global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__\n";
   }
@@ -863,17 +858,15 @@ bool MetalDevice::is_ready(string &status) const
   {
     num_loaded = MetalDeviceKernels::get_loaded_kernel_count(this, PSO_SPECIALIZED_INTERSECT);
     if (num_loaded < DEVICE_KERNEL_NUM) {
-      status = string_printf("%d / %d pixel displacement intersection kernels loaded",
-                             num_loaded,
-                             DEVICE_KERNEL_NUM);
+      status = string_printf(
+          "%d / %d pixel displacement intersection kernels loaded", num_loaded, DEVICE_KERNEL_NUM);
       return false;
     }
 
     num_loaded = MetalDeviceKernels::get_loaded_kernel_count(this, PSO_SPECIALIZED_SHADE);
     if (num_loaded < DEVICE_KERNEL_NUM) {
-      status = string_printf("%d / %d pixel displacement shading kernels loaded",
-                             num_loaded,
-                             DEVICE_KERNEL_NUM);
+      status = string_printf(
+          "%d / %d pixel displacement shading kernels loaded", num_loaded, DEVICE_KERNEL_NUM);
       return false;
     }
   }
@@ -985,10 +978,9 @@ void MetalDevice::const_copy_to(const char *name, void *host, const size_t size)
     const bool use_pixel_displacement = scene_use_pixel_displacement &&
                                         scene_pixel_displacement_scale != 0.0f &&
                                         scene_pixel_displacement_max_distance > 0.0f;
-    const int specialization_level = use_pixel_displacement ?
-                                         max(int(kernel_specialization_level),
-                                             int(PSO_SPECIALIZED_SHADE)) :
-                                         int(kernel_specialization_level);
+    const int specialization_level = use_pixel_displacement ? max(int(kernel_specialization_level),
+                                                                  int(PSO_SPECIALIZED_SHADE)) :
+                                                              int(kernel_specialization_level);
     for (int level = 1; level <= specialization_level; level++) {
       refresh_source_and_kernels_md5(MetalPipelineType(level));
     }

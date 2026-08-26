@@ -346,7 +346,9 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   const float pixel_displacement_safe_max_distance = max(0.0f, pixel_displacement_max_distance);
   const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
       scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
-  kintegrator->use_pixel_displacement = use_pixel_displacement && bvh_layout == BVH_LAYOUT_BVH2 &&
+  const bool pixel_displacement_layout = bvh_layout == BVH_LAYOUT_BVH2 ||
+                                         bvh_layout == BVH_LAYOUT_METAL;
+  kintegrator->use_pixel_displacement = use_pixel_displacement && pixel_displacement_layout &&
                                         device_supports_pixel_displacement(device) &&
                                         pixel_displacement_scale != 0.0f &&
                                         pixel_displacement_safe_max_distance > 0.0f;

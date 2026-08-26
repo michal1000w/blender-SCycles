@@ -597,11 +597,15 @@ void MetalKernelPipeline::compile()
     auto add_intersection_functions = [&](int table_index,
                                           const char *tri_fn,
                                           const char *curve_fn = nullptr,
-                                          const char *point_fn = nullptr) {
+                                          const char *point_fn = nullptr,
+                                          const char *pixel_displacement_fn = nullptr) {
       table_functions[table_index] = [NSArray
           arrayWithObjects:make_intersection_function(tri_fn),
                            curve_fn ? make_intersection_function(curve_fn) : nil,
                            point_fn ? make_intersection_function(point_fn) : nil,
+                           pixel_displacement_fn ?
+                               make_intersection_function(pixel_displacement_fn) :
+                               nil,
                            nil];
 
       [unique_functions addObjectsFromArray:table_functions[table_index]];
@@ -610,15 +614,18 @@ void MetalKernelPipeline::compile()
     add_intersection_functions(METALRT_TABLE_DEFAULT,
                                "__intersection__tri",
                                "__intersection__curve",
-                               "__intersection__point");
+                               "__intersection__point",
+                               "__intersection__pixel_displacement");
     add_intersection_functions(METALRT_TABLE_SHADOW,
                                "__intersection__tri_shadow",
                                "__intersection__curve_shadow",
-                               "__intersection__point_shadow");
+                               "__intersection__point_shadow",
+                               "__intersection__pixel_displacement_shadow");
     add_intersection_functions(METALRT_TABLE_SHADOW_ALL,
                                "__intersection__tri_shadow_all",
                                "__intersection__curve_shadow_all",
-                               "__intersection__point_shadow_all");
+                               "__intersection__point_shadow_all",
+                               "__intersection__pixel_displacement_shadow_all");
     add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
     add_intersection_functions(METALRT_TABLE_LOCAL, "__intersection__local_tri");
     add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");

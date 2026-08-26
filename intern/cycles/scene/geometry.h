@@ -319,4 +319,6 @@ class GeometryManager {
   void device_update_volume_images(Device *device, Scene *scene, Progress &progress);
 };
 
+bool scene_allows_pixel_displacement_metalrt(const Scene *scene);
+
 CCL_NAMESPACE_END
