@@ -43,6 +43,7 @@ class MetalDevice : public Device {
   bool motion_blur = false;
   bool use_pcmi = false;
   bool scene_use_pixel_displacement = false;
+  bool scene_pixel_displacement_metalrt_compatible = false;
   float scene_pixel_displacement_scale = 1.0f;
   float scene_pixel_displacement_max_distance = 0.0f;
 
@@ -143,7 +144,8 @@ class MetalDevice : public Device {
 
   void set_scene_pixel_displacement(const bool enabled,
                                     const float scale,
-                                    const float max_distance) override;
+                                    const float max_distance,
+                                    const bool metalrt_compatible) override;
 
   void refresh_source_and_kernels_md5(MetalPipelineType pso_type);
 

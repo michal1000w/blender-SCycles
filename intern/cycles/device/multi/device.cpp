@@ -174,10 +174,11 @@ class MultiDevice : public Device {
 
   void set_scene_pixel_displacement(const bool enabled,
                                     const float scale,
-                                    const float max_distance) override
+                                    const float max_distance,
+                                    const bool metalrt_compatible) override
   {
     for (SubDevice &sub : devices) {
-      sub.device->set_scene_pixel_displacement(enabled, scale, max_distance);
+      sub.device->set_scene_pixel_displacement(enabled, scale, max_distance, metalrt_compatible);
     }
   }
 
