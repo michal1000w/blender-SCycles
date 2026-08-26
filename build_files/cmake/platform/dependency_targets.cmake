@@ -98,7 +98,13 @@ add_library(bf::dependencies::opencolorio ALIAS OpenColorIO::OpenColorIO)
 add_library(bf_deps_zlib INTERFACE)
 add_library(bf::dependencies::zlib ALIAS bf_deps_zlib)
 
-target_include_directories(bf_deps_zlib SYSTEM INTERFACE ${ZLIB_INCLUDE_DIRS})
+# System zlib headers are already found through the active SDK on Apple. Adding `/usr/include`
+# explicitly with `-isystem` puts SDK libc++ wrapper headers ahead of the compiler's own libc++
+# headers with recent Xcode versions, which breaks standard headers such as <cmath>. Preserve
+# explicit include directories for non-system/custom zlib installations.
+if(NOT (APPLE AND ZLIB_INCLUDE_DIRS STREQUAL "/usr/include"))
+  target_include_directories(bf_deps_zlib SYSTEM INTERFACE ${ZLIB_INCLUDE_DIRS})
+endif()
 target_link_libraries(bf_deps_zlib INTERFACE ${ZLIB_LIBRARIES})
 
 # -----------------------------------------------------------------------------

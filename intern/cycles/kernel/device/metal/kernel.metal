@@ -17,6 +17,9 @@
 /* The rest of the includes. */
 #include "kernel/bvh/intersect_filter.h"
 #include "kernel/geom/geom_intersect.h"
+#include "kernel/geom/motion_triangle.h"
+#include "kernel/geom/triangle.h"
+#include "util/math_intersect.h"
 
 /* MetalRT intersection handlers. */
 
@@ -273,6 +276,14 @@ __intersection__tri_shadow_all(constant KernelParamsMetal &launch_params_metal [
   uint prim = primitive_id + primitive_id_offset;
 
   PrimitiveIntersectionResult result;
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  MetalKernelContext context(launch_params_metal);
+  if (context.pixel_displacement_active(nullptr, prim)) {
+    result.accept = false;
+    result.continue_search = true;
+    return result;
+  }
+#  endif
   result.continue_search = metalrt_shadow_all_hit<METALRT_HIT_TRIANGLE>(
       launch_params_metal, payload, object, prim, uv, t);
   result.accept = !result.continue_search;
@@ -442,6 +453,14 @@ __intersection__tri(constant KernelParamsMetal &launch_params_metal [[buffer(1)]
   PrimitiveIntersectionResult result;
   result.continue_search = true;
 
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  MetalKernelContext context(launch_params_metal);
+  if (context.pixel_displacement_active(nullptr, primitive_id + primitive_id_offset)) {
+    result.accept = false;
+    return result;
+  }
+#  endif
+
   if ((kernel_data_fetch(objects, object).visibility & payload.visibility) == 0) {
     result.accept = false;
     return result;
@@ -464,9 +483,228 @@ __intersection__tri_shadow(constant KernelParamsMetal &launch_params_metal [[buf
                            const unsigned int primitive_id [[primitive_id]])
 {
   uint prim = primitive_id + primitive_id_offset;
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  MetalKernelContext context(launch_params_metal);
+  if (context.pixel_displacement_active(nullptr, prim)) {
+    PrimitiveIntersectionResult result;
+    result.accept = false;
+    result.continue_search = true;
+    return result;
+  }
+#  endif
   PrimitiveIntersectionResult result =
       metalrt_visibility_test_shadow<PrimitiveIntersectionResult, METALRT_HIT_TRIANGLE>(
           launch_params_metal, payload, object, prim, 0.0f);
+  return result;
+}
+
+/* Intersect a displaced triangle represented by a conservative MetalRT bounding box. The
+ * function reports the micromesh distance to MetalRT, so closest-hit ordering remains handled by
+ * hardware traversal. Base-triangle intersection functions above reject the same primitive to
+ * avoid exposing the undisplaced plane. */
+ccl_device_inline bool metalrt_pixel_displacement_intersect(
+    constant KernelParamsMetal &launch_params_metal,
+    const uint object,
+    const uint prim,
+    const float3 ray_origin,
+    const float3 ray_direction,
+    const float ray_tmin,
+    const float ray_tmax,
+    const float time,
+    thread float *r_u,
+    thread float *r_v,
+    thread float *r_t)
+{
+  KernelGlobals kg = nullptr;
+  MetalKernelContext context(launch_params_metal);
+  float3 verts[3];
+  bool motion = false;
+#  ifdef __OBJECT_MOTION__
+  motion = (kernel_data_fetch(objects, object).primitive_type == PRIMITIVE_MOTION_TRIANGLE);
+  if (motion) {
+    context.motion_triangle_vertices(kg, object, prim, time, verts);
+  }
+  else
+#  endif
+  {
+    context.triangle_vertices(kg, object, prim, verts);
+  }
+
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (context.pixel_displacement_active(kg, prim)) {
+    return context.pixel_displacement_intersect_cached_surface(kg,
+                                                               object,
+                                                               prim,
+                                                               motion,
+                                                               verts,
+                                                               ray_origin,
+                                                               ray_direction,
+                                                               ray_tmin,
+                                                               ray_tmax,
+                                                               r_u,
+                                                               r_v,
+                                                               r_t);
+  }
+#  endif
+
+  return context.ray_triangle_intersect(
+      ray_origin, ray_direction, ray_tmin, ray_tmax, verts[0], verts[1], verts[2], r_u, r_v, r_t);
+}
+
+[[intersection(bounding_box,
+               triangle_data,
+               curve_data,
+               METALRT_TAGS METALRT_LIMITS)]] BoundingBoxIntersectionResult
+__intersection__pixel_displacement(constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
+                                   ray_data MetalKernelContext::MetalRTIntersectionPayload &payload
+                                   [[payload]],
+                                   const uint object [[instance_id]],
+                                   const uint primitive_id [[primitive_id]],
+                                   const uint primitive_id_offset [[user_instance_id]],
+                                   const float3 ray_origin [[origin]],
+                                   const float3 ray_direction [[direction]],
+#  if defined(__METALRT_MOTION__)
+                                   const float time [[time]],
+#  endif
+                                   const float ray_tmin [[min_distance]],
+                                   const float ray_tmax [[max_distance]])
+{
+  const uint prim = primitive_id + primitive_id_offset;
+  BoundingBoxIntersectionResult result;
+  result.accept = false;
+  result.continue_search = true;
+  result.distance = ray_tmax;
+
+#  ifndef __METALRT_MOTION__
+  const float time = 0.0f;
+#  endif
+  float u, v, t;
+  if (metalrt_pixel_displacement_intersect(launch_params_metal,
+                                           object,
+                                           prim,
+                                           ray_origin,
+                                           ray_direction,
+                                           ray_tmin,
+                                           ray_tmax,
+                                           time,
+                                           &u,
+                                           &v,
+                                           &t))
+  {
+    result = metalrt_visibility_test<BoundingBoxIntersectionResult, METALRT_HIT_BOUNDING_BOX>(
+        launch_params_metal, payload, object, prim, u);
+    if (result.accept) {
+      result.distance = t;
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+      MetalKernelContext context(launch_params_metal);
+      if (context.pixel_displacement_active(nullptr, prim) && t < payload.pixel_displacement_t) {
+        payload.pixel_displacement_t = t;
+        payload.pixel_displacement_u = u;
+        payload.pixel_displacement_v = v;
+      }
+#  endif
+    }
+  }
+  return result;
+}
+
+[[intersection(bounding_box,
+               triangle_data,
+               curve_data,
+               METALRT_TAGS METALRT_LIMITS)]] BoundingBoxIntersectionResult
+__intersection__pixel_displacement_shadow(
+    constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
+    ray_data MetalKernelContext::MetalRTIntersectionShadowPayload &payload [[payload]],
+    const uint object [[instance_id]],
+    const uint primitive_id [[primitive_id]],
+    const uint primitive_id_offset [[user_instance_id]],
+    const float3 ray_origin [[origin]],
+    const float3 ray_direction [[direction]],
+#  if defined(__METALRT_MOTION__)
+    const float time [[time]],
+#  endif
+    const float ray_tmin [[min_distance]],
+    const float ray_tmax [[max_distance]])
+{
+  const uint prim = primitive_id + primitive_id_offset;
+  BoundingBoxIntersectionResult result;
+  result.accept = false;
+  result.continue_search = true;
+  result.distance = ray_tmax;
+
+#  ifndef __METALRT_MOTION__
+  const float time = 0.0f;
+#  endif
+  float u, v, t;
+  if (metalrt_pixel_displacement_intersect(launch_params_metal,
+                                           object,
+                                           prim,
+                                           ray_origin,
+                                           ray_direction,
+                                           ray_tmin,
+                                           ray_tmax,
+                                           time,
+                                           &u,
+                                           &v,
+                                           &t))
+  {
+    result =
+        metalrt_visibility_test_shadow<BoundingBoxIntersectionResult, METALRT_HIT_BOUNDING_BOX>(
+            launch_params_metal, payload, object, prim, u);
+    if (result.accept) {
+      result.distance = t;
+    }
+  }
+  return result;
+}
+
+[[intersection(bounding_box,
+               triangle_data,
+               curve_data,
+               METALRT_TAGS METALRT_LIMITS)]] BoundingBoxIntersectionResult
+__intersection__pixel_displacement_shadow_all(
+    constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
+    ray_data MetalKernelContext::BVHShadowAllPayload &payload [[payload]],
+    const uint object [[instance_id]],
+    const uint primitive_id [[primitive_id]],
+    const uint primitive_id_offset [[user_instance_id]],
+    const float3 ray_origin [[origin]],
+    const float3 ray_direction [[direction]],
+#  if defined(__METALRT_MOTION__)
+    const float time [[time]],
+#  endif
+    const float ray_tmin [[min_distance]],
+    const float ray_tmax [[max_distance]])
+{
+  const uint prim = primitive_id + primitive_id_offset;
+  BoundingBoxIntersectionResult result;
+  result.accept = false;
+  result.continue_search = true;
+  result.distance = ray_tmax;
+
+#  ifndef __METALRT_MOTION__
+  const float time = 0.0f;
+#  endif
+  float u, v, t;
+  if (metalrt_pixel_displacement_intersect(launch_params_metal,
+                                           object,
+                                           prim,
+                                           ray_origin,
+                                           ray_direction,
+                                           ray_tmin,
+                                           ray_tmax,
+                                           time,
+                                           &u,
+                                           &v,
+                                           &t))
+  {
+    result.continue_search = metalrt_shadow_all_hit<METALRT_HIT_BOUNDING_BOX>(
+        launch_params_metal, payload, object, prim, float2(u, v), t);
+    result.accept = !result.continue_search;
+    if (result.accept) {
+      result.distance = t;
+    }
+  }
   return result;
 }
 

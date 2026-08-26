@@ -56,7 +56,8 @@ static bool scene_uses_pixel_displacement(const Scene *scene,
                                           const Device *device,
                                           const BVHLayout bvh_layout)
 {
-  return scene->integrator->get_use_pixel_displacement() && bvh_layout == BVH_LAYOUT_BVH2 &&
+  const bool supported_layout = bvh_layout == BVH_LAYOUT_BVH2 || bvh_layout == BVH_LAYOUT_METAL;
+  return scene->integrator->get_use_pixel_displacement() && supported_layout &&
          device_supports_pixel_displacement(device) &&
          scene->integrator->get_pixel_displacement_scale() != 0.0f &&
          scene->integrator->get_pixel_displacement_max_distance() > 0.0f;
