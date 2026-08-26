@@ -11,12 +11,15 @@ def configure_cycles(samples, resolution):
     scene.render.engine = "CYCLES"
     scene.cycles.samples = samples
     scene.cycles.preview_samples = samples
+    scene.cycles.use_adaptive_sampling = False
     scene.cycles.use_denoising = False
-    scene.cycles.use_pixel_displacement = True
+    scene.cycles.use_pixel_displacement = os.environ.get(
+        "PIXEL_DISPLACEMENT_BENCH_ENABLED", "1"
+    ) not in {"0", "false", "False"}
     scene.cycles.pixel_displacement_scale = 1.0
     scene.cycles.pixel_displacement_max_distance = 0.12
     scene.cycles.pixel_displacement_steps = 32
-    scene.cycles.device = "GPU"
+    scene.cycles.device = os.environ.get("PIXEL_DISPLACEMENT_BENCH_DEVICE", "GPU")
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.look = "None"
     scene.render.resolution_x = resolution
@@ -25,6 +28,7 @@ def configure_cycles(samples, resolution):
 
     prefs = bpy.context.preferences.addons["cycles"].preferences
     try:
+        prefs.metalrt = os.environ.get("PIXEL_DISPLACEMENT_BENCH_METALRT", "ON")
         prefs.compute_device_type = "METAL"
         prefs.get_devices()
         for device in prefs.devices:

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 #include "device/device.h"
@@ -30,7 +31,16 @@ static int pixel_displacement_cache_sample_count(const int grid)
 
 static bool shader_allows_pixel_displacement_cache(const Shader *shader)
 {
+  /* Deterministic validation hook used by the visual regression tool to exercise the exact
+   * fallback with an otherwise identical material graph. */
+  if (getenv("CYCLES_PIXEL_DISPLACEMENT_DISABLE_CACHE") != nullptr) {
+    return false;
+  }
+
   if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP) {
+    return false;
+  }
+  if (shader->has_volume || shader->has_surface_bssrdf || shader->has_surface_raytrace) {
     return false;
   }
 
@@ -49,6 +59,9 @@ static bool shader_allows_pixel_displacement_cache(const Shader *shader)
       return false;
     }
 
+    if (node_name == ustring("vector_displacement")) {
+      return false;
+    }
     if (node_name == ustring("image_texture")) {
       const ImageTextureNode *image_node = static_cast<const ImageTextureNode *>(node);
       if (image_node->get_animated() || image_node->get_projection() != NODE_IMAGE_PROJ_FLAT) {
@@ -98,7 +111,7 @@ static const Object *single_object_for_mesh(const Scene *scene,
   return object;
 }
 
-static bool mesh_triangle_has_cacheable_uv_density(const Mesh *mesh, const int triangle, const int grid)
+static bool mesh_triangle_uv_extent(const Mesh *mesh, const int triangle, float *r_max_uv_edge)
 {
   const Attribute *uv_attr = mesh->attributes.find(ATTR_STD_UV);
   if (uv_attr == nullptr || uv_attr->type != TypeFloat2) {
@@ -136,96 +149,95 @@ static bool mesh_triangle_has_cacheable_uv_density(const Mesh *mesh, const int t
   const float2 e2 = uv[2] - uv[1];
   const float max_uv_edge = max(max(len(e0), len(e1)), len(e2));
 
-  /* Require a dense mesh in UV space. Large UV faces keep the exact path to preserve
-   * high-frequency displacement and side-view silhouettes. */
-  const float max_cached_uv_edge = max(1.0f / 64.0f, float(grid) / 256.0f);
-  return max_uv_edge <= max_cached_uv_edge;
+  *r_max_uv_edge = max_uv_edge;
+  return true;
 }
 
-static bool mesh_triangle_cacheable(const Scene *scene,
-                                    const Mesh *mesh,
-                                    const int triangle,
-                                    const int grid)
+static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const int triangle)
 {
-  if (!mesh->use_pixel_displacement) {
-    return false;
-  }
-
   const int shader_index = mesh->get_shader()[triangle];
   const array<Node *> &mesh_used_shaders = mesh->get_used_shaders();
   const Shader *shader = (shader_index < mesh_used_shaders.size()) ?
                              static_cast<const Shader *>(mesh_used_shaders[shader_index]) :
                              scene->default_surface;
 
-  return shader_allows_pixel_displacement_cache(shader) &&
-         mesh_triangle_has_cacheable_uv_density(mesh, triangle, grid);
-}
-
-static int pixel_displacement_cache_grid_for_scene(const Scene *scene,
-                                                   const size_t candidate_triangles)
-{
-  if (candidate_triangles == 0) {
+  if (!shader_allows_pixel_displacement_cache(shader)) {
     return 0;
   }
 
-  const int steps = clamp(scene->integrator->get_pixel_displacement_steps(), 8, 128);
-  int grid = clamp(steps, 16, 48);
-  const size_t max_cache_samples = 8 * 1024 * 1024;
-
-  while (grid > 6 &&
-         candidate_triangles * size_t(pixel_displacement_cache_sample_count(grid)) >
-             max_cache_samples)
-  {
-    grid -= 4;
+  const int resolution = clamp(scene->integrator->get_pixel_displacement_steps(), 8, 128);
+  float max_uv_edge;
+  if (!mesh_triangle_uv_extent(mesh, triangle, &max_uv_edge)) {
+    return resolution;
   }
 
-  if (candidate_triangles * size_t(pixel_displacement_cache_sample_count(grid)) >
-      max_cache_samples)
-  {
-    return 0;
-  }
-
-  return grid;
+  /* Interpret the quality setting as samples across the unit UV square, rather than samples per
+   * base triangle. This keeps the sampled surface invariant when the same UV domain is split into
+   * more or fewer triangles. A unit-square diagonal has length sqrt(2). */
+  const float scaled_resolution = float(resolution) * max_uv_edge * 0.7071067811865476f;
+  /* UVs produced by regular subdivisions should land on an integer resolution. Avoid ceilf()
+   * turning harmless float round-off (for example 8.000001) into a different micromesh density,
+   * which would make the rendered surface depend on the base mesh subdivision. */
+  return clamp(int(ceilf(scaled_resolution - 1.0e-5f)), 1, 128);
 }
 
-static size_t count_pixel_displacement_cache_candidate_triangles(const Scene *scene)
+bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
 {
-  size_t candidate_triangles = 0;
+  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
+  size_t total_samples = 0;
 
   for (const Geometry *geom : scene->geometry) {
-    if (!geom->is_mesh()) {
+    if (!geom->is_mesh() || !geom->has_true_displacement()) {
       continue;
     }
 
     const Mesh *mesh = static_cast<const Mesh *>(geom);
-    int object_index = OBJECT_NONE;
-    if (!mesh->use_pixel_displacement ||
-        single_object_for_mesh(scene, mesh, &object_index) == nullptr ||
-        object_index == OBJECT_NONE)
-    {
-      continue;
+    if (mesh->get_use_motion_blur()) {
+      return false;
+    }
+    if (single_object_for_mesh(scene, mesh, nullptr) == nullptr) {
+      return false;
     }
 
-    for (int i = 0; i < mesh->num_triangles(); i++) {
-      if (!mesh->use_pixel_displacement) {
+    const array<int> &triangle_shaders = mesh->get_shader();
+    const array<Node *> &used_shaders = mesh->get_used_shaders();
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int shader_index = triangle_shaders[triangle];
+      const Shader *shader = (shader_index < used_shaders.size()) ?
+                                 static_cast<const Shader *>(used_shaders[shader_index]) :
+                                 scene->default_surface;
+      /* The AABB path implements closest, shadow, and shadow-all queries. Meshes which need
+       * volume, subsurface, AO, or bevel local intersections retain the existing BVH2 path. This
+       * includes regular material slots because the whole Metal BLAS uses one geometry type. */
+      if (shader->has_volume || shader->has_surface_bssrdf || shader->has_surface_raytrace) {
+        return false;
+      }
+      if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP) {
         continue;
       }
 
-      const int shader_index = mesh->get_shader()[i];
-      const array<Node *> &mesh_used_shaders = mesh->get_used_shaders();
-      const Shader *shader = (shader_index < mesh_used_shaders.size()) ?
-                                 static_cast<const Shader *>(mesh_used_shaders[shader_index]) :
-                                 scene->default_surface;
-
-      candidate_triangles += shader_allows_pixel_displacement_cache(shader) ? 1 : 0;
+      const int grid = mesh_triangle_cache_grid(scene, mesh, triangle);
+      if (grid == 0) {
+        return false;
+      }
+      total_samples += size_t(pixel_displacement_cache_sample_count(grid));
+      if (total_samples > max_cache_samples) {
+        return false;
+      }
     }
   }
 
-  return candidate_triangles;
+  return true;
 }
 
-static size_t count_pixel_displacement_cacheable_triangles(const Scene *scene, const int grid)
+static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
+                                                      device_vector<uint> &cache_grid,
+                                                      device_vector<int> &cache_offset,
+                                                      size_t *r_cacheable_triangles)
 {
+  uint *grid_data = cache_grid.data();
+  int *offset_data = cache_offset.data();
+  size_t total_samples = 0;
   size_t cacheable_triangles = 0;
 
   for (const Geometry *geom : scene->geometry) {
@@ -234,27 +246,31 @@ static size_t count_pixel_displacement_cacheable_triangles(const Scene *scene, c
     }
 
     const Mesh *mesh = static_cast<const Mesh *>(geom);
-    int object_index = OBJECT_NONE;
-    if (!mesh->use_pixel_displacement ||
-        single_object_for_mesh(scene, mesh, &object_index) == nullptr ||
-        object_index == OBJECT_NONE)
-    {
+    if (!mesh->use_pixel_displacement || single_object_for_mesh(scene, mesh, nullptr) == nullptr) {
       continue;
     }
 
-    for (int i = 0; i < mesh->num_triangles(); i++) {
-      cacheable_triangles += mesh_triangle_cacheable(scene, mesh, i, grid) ? 1 : 0;
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int grid = mesh_triangle_cache_grid(scene, mesh, triangle);
+      if (grid == 0) {
+        continue;
+      }
+      const int prim = int(mesh->prim_offset) + triangle;
+      grid_data[prim] = uint(grid);
+      offset_data[prim] = int(total_samples);
+      total_samples += size_t(pixel_displacement_cache_sample_count(grid));
+      cacheable_triangles++;
     }
   }
 
-  return cacheable_triangles;
+  *r_cacheable_triangles = cacheable_triangles;
+  return total_samples;
 }
 
-static int fill_pixel_displacement_cache_input(
-    const Scene *scene,
-    const int grid,
-    device_vector<int> &pixel_displacement_offset,
-    device_vector<KernelShaderEvalInput> &d_input)
+static int fill_pixel_displacement_cache_input(const Scene *scene,
+                                               const device_vector<uint> &pixel_displacement_grid,
+                                               device_vector<int> &pixel_displacement_offset,
+                                               device_vector<KernelShaderEvalInput> &d_input)
 {
   KernelShaderEvalInput *d_input_data = d_input.data();
   int *offset_data = pixel_displacement_offset.data();
@@ -280,13 +296,16 @@ static int fill_pixel_displacement_cache_input(
     }
 
     for (int tri = 0; tri < mesh->num_triangles(); tri++) {
-      if (!mesh_triangle_cacheable(scene, mesh, tri, grid)) {
+      const int prim = int(mesh->prim_offset) + tri;
+      const int grid = int(pixel_displacement_grid.data()[prim]);
+      if (grid <= 0) {
         continue;
       }
 
-      const int prim = int(mesh->prim_offset) + tri;
-      const int sample_offset = input_size;
-      offset_data[prim] = sample_offset;
+      const int sample_offset = offset_data[prim];
+      if (sample_offset != input_size) {
+        return 0;
+      }
 
       for (int u = 0; u <= grid; u++) {
         for (int v = 0; v <= grid - u; v++) {
@@ -304,9 +323,12 @@ static int fill_pixel_displacement_cache_input(
   return input_size;
 }
 
-static void read_pixel_displacement_cache_output(const Scene *scene,
-                                                 device_vector<float4> &pixel_displacement_data,
-                                                 const device_vector<float> &d_output)
+static void read_pixel_displacement_cache_output(
+    Scene *scene,
+    const device_vector<uint> &pixel_displacement_grid,
+    const device_vector<int> &pixel_displacement_offset,
+    device_vector<float4> &pixel_displacement_data,
+    const device_vector<float> &d_output)
 {
   float4 *cache_data = pixel_displacement_data.data();
   const float *output_data = d_output.data();
@@ -326,6 +348,44 @@ static void read_pixel_displacement_cache_output(const Scene *scene,
 
     cache_data[i] = make_float4(D.x, D.y, D.z, 0.0f);
   }
+
+  /* Build tight bounds from the same piecewise-linear samples used by intersection. This avoids
+   * severe AABB overlap when the base mesh is highly subdivided. */
+  for (Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+    Mesh *mesh = static_cast<Mesh *>(geom);
+    mesh->pixel_displacement_bounds.resize(mesh->num_triangles());
+    const packed_float3 *verts = mesh->get_position();
+
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      BoundBox bounds = BoundBox::empty;
+      const int prim = int(mesh->prim_offset) + triangle;
+      const int grid = int(pixel_displacement_grid.data()[prim]);
+      const Mesh::Triangle tri = mesh->get_triangle(triangle);
+      const float3 p0 = float3(verts[tri.v[0]]);
+      const float3 p1 = float3(verts[tri.v[1]]);
+      const float3 p2 = float3(verts[tri.v[2]]);
+
+      if (grid > 0) {
+        int sample = pixel_displacement_offset.data()[prim];
+        for (int u = 0; u <= grid; u++) {
+          for (int v = 0; v <= grid - u; v++, sample++) {
+            const float fu = float(u) / float(grid);
+            const float fv = float(v) / float(grid);
+            bounds.grow(p0 + fu * (p1 - p0) + fv * (p2 - p0) + make_float3(cache_data[sample]));
+          }
+        }
+      }
+      else {
+        bounds.grow(p0);
+        bounds.grow(p1);
+        bounds.grow(p2);
+      }
+      mesh->pixel_displacement_bounds[triangle] = bounds;
+    }
+  }
 }
 
 bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
@@ -337,8 +397,10 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
   device_vector<int> &cache_offset = dscene->pixel_displacement_offset;
   device_vector<float4> &cache_data = dscene->pixel_displacement_data;
 
-  uint *info = cache_info.alloc(1);
-  info[0] = 0;
+  uint *info = cache_info.alloc(dscene->tri_shader.size());
+  for (int i = 0; i < cache_info.size(); i++) {
+    info[i] = 0;
+  }
 
   int *offsets = cache_offset.alloc(dscene->tri_shader.size());
   for (int i = 0; i < cache_offset.size(); i++) {
@@ -346,20 +408,28 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
   }
 
   cache_data.free();
+  for (Geometry *geom : scene->geometry) {
+    if (geom->is_mesh()) {
+      static_cast<Mesh *>(geom)->pixel_displacement_bounds.clear();
+    }
+  }
 
-  const size_t candidate_triangles = count_pixel_displacement_cache_candidate_triangles(scene);
-  const int grid = pixel_displacement_cache_grid_for_scene(scene, candidate_triangles);
-  const size_t cacheable_triangles = (grid > 0) ?
-                                         count_pixel_displacement_cacheable_triangles(scene, grid) :
-                                         0;
-  if (candidate_triangles == 0 || cacheable_triangles == 0 || grid == 0) {
+  size_t cacheable_triangles = 0;
+  const size_t total_samples = prepare_pixel_displacement_cache_layout(
+      scene, cache_info, cache_offset, &cacheable_triangles);
+  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
+  if (cacheable_triangles == 0 || total_samples == 0 || total_samples > max_cache_samples) {
+    for (int i = 0; i < cache_info.size(); i++) {
+      info[i] = 0;
+    }
+    for (int i = 0; i < cache_offset.size(); i++) {
+      offsets[i] = -1;
+    }
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
     return false;
   }
 
-  const int samples_per_triangle = pixel_displacement_cache_sample_count(grid);
-  const size_t total_samples = cacheable_triangles * size_t(samples_per_triangle);
   if (total_samples > size_t(std::numeric_limits<int>::max())) {
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
@@ -373,33 +443,46 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
     cache_data_ptr[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
   }
 
+  /* The displacement evaluation kernel uses the per-primitive grid to choose a topology-
+   * independent texture footprint. Make the layout visible before launching the bake. */
+  cache_info.copy_to_device();
+  cache_offset.copy_to_device();
+
   int actual_samples = 0;
   ShaderEval shader_eval(device, progress);
   const bool success = shader_eval.eval(
       SHADER_EVAL_DISPLACE,
       int(total_samples),
       3,
-      [scene, grid, &cache_offset, &actual_samples](
+      [scene, &cache_info, &cache_offset, &actual_samples](
           device_vector<KernelShaderEvalInput> &d_input) {
-        actual_samples = fill_pixel_displacement_cache_input(scene, grid, cache_offset, d_input);
+        actual_samples = fill_pixel_displacement_cache_input(
+            scene, cache_info, cache_offset, d_input);
         return actual_samples;
       },
-      [scene, &cache_data](const device_vector<float> &d_output) {
-        read_pixel_displacement_cache_output(scene, cache_data, d_output);
+      [scene, &cache_info, &cache_offset, &cache_data](const device_vector<float> &d_output) {
+        read_pixel_displacement_cache_output(
+            scene, cache_info, cache_offset, cache_data, d_output);
       });
 
   if (!success || actual_samples == 0 || progress.get_cancel()) {
-    info[0] = 0;
+    for (int i = 0; i < cache_info.size(); i++) {
+      info[i] = 0;
+    }
     for (int i = 0; i < cache_offset.size(); i++) {
       offsets[i] = -1;
     }
     cache_data.free();
+    for (Geometry *geom : scene->geometry) {
+      if (geom->is_mesh()) {
+        static_cast<Mesh *>(geom)->pixel_displacement_bounds.clear();
+      }
+    }
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
     return false;
   }
 
-  info[0] = uint(grid);
   cache_info.copy_to_device();
   cache_offset.copy_to_device();
   cache_data.copy_to_device();

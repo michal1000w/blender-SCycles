@@ -12,6 +12,7 @@ def configure_cycles(samples, resolution, preserve_displacement_settings):
     scene.render.engine = "CYCLES"
     scene.cycles.samples = samples
     scene.cycles.preview_samples = samples
+    scene.cycles.use_adaptive_sampling = False
     scene.cycles.use_denoising = False
     scene.cycles.use_pixel_displacement = True
     if not preserve_displacement_settings or "PIXEL_DISPLACEMENT_VISUAL_SCALE" in os.environ:
@@ -36,6 +37,7 @@ def configure_cycles(samples, resolution, preserve_displacement_settings):
 
     prefs = bpy.context.preferences.addons["cycles"].preferences
     try:
+        prefs.metalrt = os.environ.get("PIXEL_DISPLACEMENT_VISUAL_METALRT", "ON")
         prefs.compute_device_type = "METAL"
         prefs.get_devices()
         for device in prefs.devices:
@@ -47,17 +49,21 @@ def configure_cycles(samples, resolution, preserve_displacement_settings):
 def make_height_image(size):
     image = bpy.data.images.new("pixel_displacement_height", size, size, alpha=False, float_buffer=False)
     pixels = [0.0] * (size * size * 4)
+    height_mode = os.environ.get("PIXEL_DISPLACEMENT_VISUAL_HEIGHT_MODE", "waves")
     for y in range(size):
         fy = y / max(size - 1, 1)
         for x in range(size):
             fx = x / max(size - 1, 1)
-            h = (
-                0.50
-                + 0.24 * math.sin(fx * math.tau * 31.0)
-                + 0.16 * math.sin((fx + fy) * math.tau * 59.0)
-                + 0.10 * math.cos(fy * math.tau * 43.0)
-                + 0.05 * math.sin((fx * 13.0 - fy * 17.0) * math.tau)
-            )
+            if height_mode == "gradient":
+                h = fx
+            else:
+                h = (
+                    0.50
+                    + 0.24 * math.sin(fx * math.tau * 31.0)
+                    + 0.16 * math.sin((fx + fy) * math.tau * 59.0)
+                    + 0.10 * math.cos(fy * math.tau * 43.0)
+                    + 0.05 * math.sin((fx * 13.0 - fy * 17.0) * math.tau)
+                )
             h = max(0.0, min(1.0, h))
             offset = (y * size + x) * 4
             pixels[offset + 0] = h
@@ -117,6 +123,11 @@ def assign_material(obj, image):
     displacement = nodes.new("ShaderNodeDisplacement")
     displacement.inputs["Midlevel"].default_value = 0.5
     displacement.inputs["Scale"].default_value = 0.12
+    if os.environ.get("PIXEL_DISPLACEMENT_VISUAL_EMISSION", "0") in {"1", "true", "True"}:
+        emission = nodes.new("ShaderNodeEmission")
+        emission.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+        emission.inputs["Strength"].default_value = 1.0
+        mat.node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
     if bsdf:
         bsdf.inputs["Base Color"].default_value = (0.55, 0.58, 0.62, 1.0)
         bsdf.inputs["Roughness"].default_value = 0.62
@@ -221,6 +232,11 @@ def setup_camera(view_name):
 
 
 def load_scene(exact_reference):
+    if exact_reference:
+        os.environ["CYCLES_PIXEL_DISPLACEMENT_DISABLE_CACHE"] = "1"
+    else:
+        os.environ.pop("CYCLES_PIXEL_DISPLACEMENT_DISABLE_CACHE", None)
+
     blend = os.environ.get("PIXEL_DISPLACEMENT_VISUAL_BLEND", "")
     if blend:
         bpy.ops.wm.open_mainfile(filepath=blend)
@@ -268,6 +284,11 @@ def main():
 
     failures = 0
     threshold = float(os.environ.get("PIXEL_DISPLACEMENT_VISUAL_RMS_THRESHOLD", "0.015"))
+    cache_only = os.environ.get("PIXEL_DISPLACEMENT_VISUAL_CACHE_ONLY", "0") in {
+        "1",
+        "true",
+        "True",
+    }
     for view_name in views:
         view_name = view_name.strip()
         if not view_name:
@@ -275,6 +296,9 @@ def main():
 
         load_scene(exact_reference=False)
         cached, cached_path = render_pixels(output_dir, view_name, exact_reference=False)
+        if cache_only:
+            print(f"VISUAL_CACHED view={view_name} path={cached_path}")
+            continue
         load_scene(exact_reference=True)
         reference, reference_path = render_pixels(output_dir, view_name, exact_reference=True)
         rms, max_abs = compare_pixels(cached, reference)
