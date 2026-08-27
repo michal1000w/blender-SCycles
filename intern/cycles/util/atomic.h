@@ -107,6 +107,11 @@ template<class T> ccl_device_inline uint32_t atomic_fetch_and_or_uint32(device T
   return atomic_fetch_or_explicit((device metal::atomic_uint *)p, x, metal::memory_order_relaxed);
 }
 
+template<class T> ccl_device_inline uint32_t atomic_exchange_uint32(device T *p, const uint32_t x)
+{
+  return atomic_exchange_explicit((device atomic_uint *)p, x, memory_order_relaxed);
+}
+
 template<class T>
 ccl_device_inline uint32_t atomic_fetch_and_add_uint32(threadgroup T *p, const int x)
 {

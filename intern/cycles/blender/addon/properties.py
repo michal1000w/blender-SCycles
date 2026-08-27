@@ -662,6 +662,65 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    use_photon_mapping: BoolProperty(
+        name="Photon Mapping",
+        description="Use a progressive photon density estimate for difficult reflective and refractive caustics (Metal GPU only)",
+        default=False,
+    )
+
+    photon_count: IntProperty(
+        name="Photons",
+        description="Maximum number of light paths emitted for each photon-map update",
+        min=1024, max=4194304,
+        soft_min=16384, soft_max=1048576,
+        default=65536,
+    )
+
+    photon_radius: FloatProperty(
+        name="Initial Radius",
+        description="Initial world-space photon gather radius; smaller values are sharper but require more photons",
+        min=0.000001, max=1000.0,
+        soft_min=0.001, soft_max=10.0,
+        default=0.1,
+        subtype='DISTANCE',
+    )
+
+    photon_radius_decay: FloatProperty(
+        name="Radius Decay",
+        description="Progressively reduce the gather radius as rendering converges; 0 keeps a fixed radius and 0.5 reduces it fastest",
+        min=0.0, max=0.5,
+        default=0.25,
+    )
+
+    photon_max_bounces: IntProperty(
+        name="Max Bounces",
+        description="Maximum number of surface interactions along each photon path",
+        min=1, max=64,
+        default=8,
+    )
+
+    photon_gather_max: IntProperty(
+        name="Gather Limit",
+        description="Target maximum number of nearby photons evaluated at one shading point; dense neighborhoods are sampled without losing energy",
+        min=1, max=1024,
+        soft_max=256,
+        default=64,
+    )
+
+    photon_roughness_threshold: FloatProperty(
+        name="Specular Threshold",
+        description="Maximum roughness treated as a caustic-forming specular interaction",
+        min=0.0, max=1.0,
+        default=0.1,
+    )
+
+    photon_normal_threshold: FloatProperty(
+        name="Normal Similarity",
+        description="Minimum normal similarity for photons contributing across nearby surfaces",
+        min=-1.0, max=1.0,
+        default=0.5,
+    )
+
     blur_glossy: FloatProperty(
         name="Filter Glossy",
         description="Adaptively blur glossy shaders and image textures after blurry bounces, "

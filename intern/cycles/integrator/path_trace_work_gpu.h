@@ -55,6 +55,8 @@ class PathTraceWorkGPU : public PathTraceWork {
   void alloc_integrator_queue();
   void alloc_integrator_sorting();
   void alloc_integrator_path_split();
+  void alloc_photon_mapping();
+  void enqueue_photon_mapping(int start_sample);
 
   /* Returns DEVICE_KERNEL_NUM if there are no scheduled kernels. */
   DeviceKernel get_most_queued_kernel() const;
@@ -149,6 +151,12 @@ class PathTraceWorkGPU : public PathTraceWork {
 
   /* Temporary buffer for passing work tiles to kernel. */
   device_vector<KernelWorkTile> work_tiles_;
+
+  /* Optional Metal photon map. Hash heads and the stored counter are cleared for every map; photon
+   * records are overwritten before they become reachable and need no separate clear. */
+  device_only_memory<KernelPhoton> photons_;
+  device_only_memory<uint> photon_hash_;
+  device_vector<uint> photon_stored_;
 
   /* Temporary buffer used by the copy_to_display() whenever graphics interoperability is not
    * available. Is allocated on-demand. */

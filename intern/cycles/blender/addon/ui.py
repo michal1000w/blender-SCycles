@@ -698,6 +698,34 @@ class CYCLES_RENDER_PT_light_paths_caustics(CyclesButtonsPanel, Panel):
         col.prop(cscene, "caustics_refractive", text="Refractive")
 
 
+class CYCLES_RENDER_PT_light_paths_photon_mapping(CyclesButtonsPanel, Panel):
+    bl_label = "Photon Mapping"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_photon_mapping", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cscene = context.scene.cycles
+        layout.active = cscene.use_photon_mapping
+
+        col = layout.column(align=True)
+        col.prop(cscene, "photon_count")
+        col.prop(cscene, "photon_radius")
+        col.prop(cscene, "photon_radius_decay")
+
+        col = layout.column(align=True)
+        col.prop(cscene, "photon_max_bounces")
+        col.prop(cscene, "photon_gather_max")
+        col.prop(cscene, "photon_roughness_threshold")
+        col.prop(cscene, "photon_normal_threshold")
+
+
 class CYCLES_RENDER_PT_light_paths_fast_gi(CyclesButtonsPanel, Panel):
     bl_label = "Fast GI Approximation"
     bl_options = {'DEFAULT_CLOSED'}
@@ -2610,6 +2638,7 @@ classes = (
     CYCLES_RENDER_PT_light_paths_max_bounces,
     CYCLES_RENDER_PT_light_paths_clamping,
     CYCLES_RENDER_PT_light_paths_caustics,
+    CYCLES_RENDER_PT_light_paths_photon_mapping,
     CYCLES_RENDER_PT_light_paths_fast_gi,
     CYCLES_RENDER_PT_volumes,
     CYCLES_RENDER_PT_subdivision,
