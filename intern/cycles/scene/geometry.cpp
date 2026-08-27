@@ -652,6 +652,8 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
       dscene->pixel_displacement_info.tag_realloc();
       dscene->pixel_displacement_offset.tag_realloc();
       dscene->pixel_displacement_data.tag_realloc();
+      dscene->pixel_displacement_bvh_offset.tag_realloc();
+      dscene->pixel_displacement_bvh_nodes.tag_realloc();
     }
 
     if (device_update_flags & DEVICE_CURVE_DATA_NEEDS_REALLOC) {
@@ -723,6 +725,8 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     dscene->pixel_displacement_info.tag_realloc();
     dscene->pixel_displacement_offset.tag_realloc();
     dscene->pixel_displacement_data.tag_realloc();
+    dscene->pixel_displacement_bvh_offset.tag_realloc();
+    dscene->pixel_displacement_bvh_nodes.tag_realloc();
   }
 
   if (device_update_flags & DEVICE_CURVE_DATA_MODIFIED) {
@@ -1269,6 +1273,8 @@ void GeometryManager::device_update(Device *device,
   dscene->pixel_displacement_info.clear_modified();
   dscene->pixel_displacement_offset.clear_modified();
   dscene->pixel_displacement_data.clear_modified();
+  dscene->pixel_displacement_bvh_offset.clear_modified();
+  dscene->pixel_displacement_bvh_nodes.clear_modified();
   dscene->curves.clear_modified();
   dscene->curve_segments.clear_modified();
   dscene->points_shader.clear_modified();
@@ -1296,6 +1302,8 @@ void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool forc
   dscene->pixel_displacement_info.free_if_need_realloc(force_free);
   dscene->pixel_displacement_offset.free_if_need_realloc(force_free);
   dscene->pixel_displacement_data.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_bvh_offset.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_bvh_nodes.free_if_need_realloc(force_free);
   dscene->curves.free_if_need_realloc(force_free);
   dscene->curve_segments.free_if_need_realloc(force_free);
   dscene->points_shader.free_if_need_realloc(force_free);
