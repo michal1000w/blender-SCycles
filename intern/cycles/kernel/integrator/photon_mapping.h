@@ -92,7 +92,7 @@ ccl_device_inline Spectrum photon_eval_triangle_emission(KernelGlobals kg,
       kg, sd, P, Ng, -D, shader, object, prim, u, v, 0.0f, time, false, false);
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT>(
       kg, state, sd, nullptr, PATH_RAY_VISIBILITY_NONE, PATH_RAY_EMISSION);
-  return (sd->flag & SD_CACHE_MISS) ? zero_spectrum() : surface_shader_emission(sd);
+  return (sd->runtime_flag & SR_CACHE_MISS) ? zero_spectrum() : surface_shader_emission(sd);
 }
 
 /* Sample an emitted ray and its total flux divided by the emitter-selection and ray PDFs. */
@@ -389,7 +389,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     shader_setup_from_ray(kg, &sd, &ray, &isect);
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
         kg, state, &sd, nullptr, path_visibility, INTEGRATOR_STATE(state, path, flag));
-    if (sd.flag & SD_CACHE_MISS) {
+    if (sd.runtime_flag & SR_CACHE_MISS) {
       return;
     }
     surface_shader_prepare_closures(kg, state, &sd, path_visibility);
@@ -417,8 +417,18 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     float2 sampled_roughness;
     sampled_roughness = one_float2();
     float eta = 1.0f;
+    float avg_roughness_squared = 0.0f;
     const int label = surface_shader_bsdf_sample_closure(
-        kg, &sd, sc, rand_bsdf, &eval, &wo, &pdf, &sampled_roughness, &eta);
+        kg,
+        &sd,
+        sc,
+        rand_bsdf,
+        &eval,
+        &wo,
+        &pdf,
+        &sampled_roughness,
+        &eta,
+        avg_roughness_squared);
     if (!(pdf > 0.0f) || bsdf_eval_is_zero(&eval)) {
       return;
     }
@@ -427,7 +437,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       return;
     }
 
-    path_state_next(kg, state, label, sd.flag);
+    path_state_next(kg, state, label, sd.runtime_flag);
 
     if (!(label & LABEL_TRANSPARENT)) {
       if (((label & LABEL_REFLECT) && !kernel_data.integrator.caustics_reflective) ||
