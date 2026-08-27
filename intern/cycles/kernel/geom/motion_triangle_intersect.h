@@ -121,26 +121,10 @@ ccl_device_inline bool motion_triangle_intersect_local(KernelGlobals kg,
   float t;
   float u;
   float v;
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  bool use_pixel_displacement = false;
-#endif
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (pixel_displacement_active(kg, prim)) {
-    if (!pixel_displacement_intersect_displaced_surface(
-            kg, P, dir, tmin, tmax, time, object, prim, true, verts, &u, &v, &t))
-    {
-      return false;
-    }
-    use_pixel_displacement = true;
+  /* See triangle_intersect_local(). Local shading effects use the animated base surface. */
+  if (!ray_triangle_intersect(P, dir, tmin, tmax, verts[0], verts[1], verts[2], &u, &v, &t)) {
+    return false;
   }
-  else {
-#endif
-    if (!ray_triangle_intersect(P, dir, tmin, tmax, verts[0], verts[1], verts[2], &u, &v, &t)) {
-      return false;
-    }
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  }
-#endif
 
   /* If no actual hit information is requested, just return here. */
   if (max_hits == 0) {
@@ -162,17 +146,7 @@ ccl_device_inline bool motion_triangle_intersect_local(KernelGlobals kg,
   isect->type = PRIMITIVE_MOTION_TRIANGLE;
 
   /* Record geometric normal. */
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (use_pixel_displacement) {
-    const uint object_flag = kernel_data_fetch(object_flag, object);
-    local_isect->Ng[hit_index] = pixel_displacement_face_normal(verts, object_flag);
-  }
-  else {
-#endif
-    local_isect->Ng[hit_index] = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  }
-#endif
+  local_isect->Ng[hit_index] = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
 
   return false;
 }
