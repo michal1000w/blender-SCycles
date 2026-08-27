@@ -37,6 +37,8 @@ static int pixel_displacement_cache_sample_index(const int grid, const int u, co
 }
 
 constexpr uint PIXEL_DISPLACEMENT_CACHE_BVH_FLAG = (1u << 31);
+constexpr uint PIXEL_DISPLACEMENT_CACHE_OPEN_SURFACE_FLAG = (1u << 30);
+constexpr uint PIXEL_DISPLACEMENT_CACHE_GRID_MASK = (1u << 30) - 1;
 constexpr int PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE = 2;
 
 struct PixelDisplacementBVHBlock {
@@ -53,6 +55,33 @@ struct PixelDisplacementBVHNode {
   int v;
   bool leaf;
 };
+
+static bool mesh_is_closed_surface(const Mesh *mesh)
+{
+  vector<uint64_t> edges;
+  edges.reserve(mesh->num_triangles() * 3);
+  for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+    const Mesh::Triangle tri = mesh->get_triangle(triangle);
+    for (int edge = 0; edge < 3; edge++) {
+      const uint v0 = uint(min(tri.v[edge], tri.v[(edge + 1) % 3]));
+      const uint v1 = uint(max(tri.v[edge], tri.v[(edge + 1) % 3]));
+      edges.push_back((uint64_t(v0) << 32) | uint64_t(v1));
+    }
+  }
+
+  std::sort(edges.begin(), edges.end());
+  for (size_t begin = 0; begin < edges.size();) {
+    size_t end = begin + 1;
+    while (end < edges.size() && edges[end] == edges[begin]) {
+      end++;
+    }
+    if (end - begin != 2) {
+      return false;
+    }
+    begin = end;
+  }
+  return !edges.empty();
+}
 
 static int build_pixel_displacement_bvh_recursive(std::vector<PixelDisplacementBVHBlock> &blocks,
                                                   const int begin,
@@ -104,7 +133,7 @@ static bool shader_allows_pixel_displacement_cache(const Shader *shader)
   if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP) {
     return false;
   }
-  if (shader->has_volume || shader->has_surface_bssrdf || shader->has_surface_raytrace) {
+  if (shader->has_volume || shader->has_surface_raytrace) {
     return false;
   }
 
@@ -265,10 +294,10 @@ bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
       const Shader *shader = (shader_index < used_shaders.size()) ?
                                  static_cast<const Shader *>(used_shaders[shader_index]) :
                                  scene->default_surface;
-      /* The AABB path implements closest, shadow, and shadow-all queries. Meshes which need
-       * volume, subsurface, AO, or bevel local intersections retain the existing BVH2 path. This
+      /* The AABB path implements closest, shadow, shadow-all, and subsurface local queries.
+       * Meshes which need volume, AO, or bevel local intersections retain the BVH2 path. This
        * includes regular material slots because the whole Metal BLAS uses one geometry type. */
-      if (shader->has_volume || shader->has_surface_bssrdf || shader->has_surface_raytrace) {
+      if (shader->has_volume || shader->has_surface_raytrace) {
         return false;
       }
       if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP) {
@@ -308,6 +337,9 @@ static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
     if (!mesh->use_pixel_displacement || single_object_for_mesh(scene, mesh, nullptr) == nullptr) {
       continue;
     }
+    const uint surface_flag = mesh_is_closed_surface(mesh) ?
+                                  0u :
+                                  PIXEL_DISPLACEMENT_CACHE_OPEN_SURFACE_FLAG;
 
     for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
       const int grid = mesh_triangle_cache_grid(scene, mesh, triangle);
@@ -315,7 +347,7 @@ static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
         continue;
       }
       const int prim = int(mesh->prim_offset) + triangle;
-      grid_data[prim] = uint(grid);
+      grid_data[prim] = uint(grid) | surface_flag;
       offset_data[prim] = int(total_samples);
       total_samples += size_t(pixel_displacement_cache_sample_count(grid));
       cacheable_triangles++;
@@ -356,7 +388,8 @@ static int fill_pixel_displacement_cache_input(const Scene *scene,
 
     for (int tri = 0; tri < mesh->num_triangles(); tri++) {
       const int prim = int(mesh->prim_offset) + tri;
-      const int grid = int(pixel_displacement_grid.data()[prim]);
+      const int grid = int(pixel_displacement_grid.data()[prim] &
+                           PIXEL_DISPLACEMENT_CACHE_GRID_MASK);
       if (grid <= 0) {
         continue;
       }
@@ -424,7 +457,8 @@ static void read_pixel_displacement_cache_output(
     for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
       BoundBox bounds = BoundBox::empty;
       const int prim = int(mesh->prim_offset) + triangle;
-      const int grid = int(pixel_displacement_grid.data()[prim]);
+      const int grid = int(pixel_displacement_grid.data()[prim] &
+                           PIXEL_DISPLACEMENT_CACHE_GRID_MASK);
       const Mesh::Triangle tri = mesh->get_triangle(triangle);
       const float3 p0 = float3(verts[tri.v[0]]);
       const float3 p1 = float3(verts[tri.v[1]]);

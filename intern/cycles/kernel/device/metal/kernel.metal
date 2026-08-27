@@ -551,6 +551,90 @@ ccl_device_inline bool metalrt_pixel_displacement_intersect(
       ray_origin, ray_direction, ray_tmin, ray_tmax, verts[0], verts[1], verts[2], r_u, r_v, r_t);
 }
 
+#  ifdef __BVH_LOCAL__
+[[intersection(bounding_box, triangle_data, curve_data)]] BoundingBoxIntersectionResult
+__intersection__local_pixel_displacement_single_hit(
+    constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
+    ray_data MetalKernelContext::MetalRTIntersectionLocalPayload_single_hit &payload [[payload]],
+    const uint primitive_id [[primitive_id]],
+    const float3 ray_origin [[origin]],
+    const float3 ray_direction [[direction]],
+    const float ray_tmin [[min_distance]],
+    const float ray_tmax [[max_distance]])
+{
+  BoundingBoxIntersectionResult result;
+  result.accept = false;
+  result.continue_search = true;
+  result.distance = ray_tmax;
+
+  if (payload.self_prim == primitive_id) {
+    return result;
+  }
+
+  const uint prim = primitive_id + payload.primitive_id_offset;
+  float u, v, t;
+  if (metalrt_pixel_displacement_intersect(launch_params_metal,
+                                           payload.object,
+                                           prim,
+                                           ray_origin,
+                                           ray_direction,
+                                           ray_tmin,
+                                           ray_tmax,
+                                           0.0f,
+                                           &u,
+                                           &v,
+                                           &t))
+  {
+    result.accept = true;
+    result.distance = t;
+    if (t < payload.pixel_displacement_t) {
+      payload.pixel_displacement_t = t;
+      payload.pixel_displacement_u = u;
+      payload.pixel_displacement_v = v;
+    }
+  }
+  return result;
+}
+
+[[intersection(bounding_box, triangle_data, curve_data)]] BoundingBoxIntersectionResult
+__intersection__local_pixel_displacement(
+    constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
+    ray_data MetalKernelContext::MetalRTIntersectionLocalPayload &payload [[payload]],
+    const uint primitive_id [[primitive_id]],
+    const float3 ray_origin [[origin]],
+    const float3 ray_direction [[direction]],
+    const float ray_tmin [[min_distance]],
+    const float ray_tmax [[max_distance]])
+{
+  BoundingBoxIntersectionResult result;
+  result.accept = false;
+  result.continue_search = true;
+  result.distance = ray_tmax;
+
+  const uint prim = primitive_id + payload.primitive_id_offset;
+  float u, v, t;
+  if (metalrt_pixel_displacement_intersect(launch_params_metal,
+                                           payload.object,
+                                           prim,
+                                           ray_origin,
+                                           ray_direction,
+                                           ray_tmin,
+                                           ray_tmax,
+                                           0.0f,
+                                           &u,
+                                           &v,
+                                           &t))
+  {
+    result = metalrt_local_hit<BoundingBoxIntersectionResult, METALRT_HIT_BOUNDING_BOX>(
+        launch_params_metal, payload, primitive_id, float2(u, v), t);
+    if (result.accept) {
+      result.distance = t;
+    }
+  }
+  return result;
+}
+#  endif /* __BVH_LOCAL__ */
+
 [[intersection(bounding_box,
                triangle_data,
                curve_data,
