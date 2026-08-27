@@ -180,30 +180,6 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
                                                        ccl_private ShaderData *sd,
                                                        const PathRayVisibility path_visibility)
 {
-#if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT__) || \
-    defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)
-  /* Virtual per-pixel displacement is a surface heightfield, not a closed volume suitable for
-   * local subsurface intersection queries. Convert BSSRDF lobes to the same-weight diffuse
-   * fallback used by bssrdf_setup() when a BSSRDF cannot be sampled. This avoids long-running
-   * local micromesh queries that can trigger the macOS GPU watchdog. */
-  if (kernel_data.integrator.use_pixel_displacement &&
-      pixel_displacement_active(kg, sd->prim))
-  {
-    bool converted_bssrdf = false;
-    for (int i = 0; i < sd->num_closure; i++) {
-      ccl_private ShaderClosure *sc = &sd->closure[i];
-      if (CLOSURE_IS_BSSRDF(sc->type)) {
-        sc->type = CLOSURE_BSDF_DIFFUSE_ID;
-        converted_bssrdf = true;
-      }
-    }
-    if (converted_bssrdf) {
-      sd->runtime_flag &= ~SR_BSSRDF;
-      sd->runtime_flag |= (SR_BSDF | SR_BSDF_HAS_EVAL);
-    }
-  }
-#endif
-
   /* Filter out closures. */
   if (kernel_data.integrator.filter_closures) {
     const int filter_closures = kernel_data.integrator.filter_closures;
