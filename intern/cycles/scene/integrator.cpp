@@ -4,6 +4,8 @@
 
 #include "device/device.h"
 
+#include "bvh/params.h"
+
 #include "scene/background.h"
 #include "scene/bake.h"
 #include "scene/camera.h"
@@ -25,6 +27,24 @@
 #include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
+
+static bool device_supports_pixel_displacement(const Device *device)
+{
+  if (device->info.type == DEVICE_METAL) {
+    return true;
+  }
+
+  if (device->info.type == DEVICE_MULTI) {
+    for (const DeviceInfo &subdevice : device->info.multi_devices) {
+      if (subdevice.type != DEVICE_METAL) {
+        return false;
+      }
+    }
+    return !device->info.multi_devices.empty();
+  }
+
+  return false;
+}
 
 /* Halton sequence generator using only integer numbers.
  * See https://doi.org/10.1016/0010-4655(91)90064-R for details. */
@@ -161,6 +181,12 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(use_custom_pixel_jitter_sample, "Use custom pixel jitter sample value", false);
   SOCKET_FLOAT_ARRAY(
       custom_pixel_jitter_sample, "Custom pixel jitter sample overwrite value", array<float>());
+
+  SOCKET_BOOLEAN(use_pixel_displacement, "Pixel Level Displacement", true);
+  SOCKET_FLOAT(pixel_displacement_scale, "Pixel Displacement Scale", 1.0f);
+  SOCKET_FLOAT(pixel_displacement_max_distance, "Pixel Displacement Max Distance", 0.1f);
+  SOCKET_INT(pixel_displacement_resolution, "Pixel Displacement Micromesh Resolution", 1024);
+  SOCKET_INT(pixel_displacement_steps, "Pixel Displacement Steps", 32);
 
   static NodeEnum denoiser_type_enum;
   denoiser_type_enum.insert("none", DENOISER_NONE);
@@ -317,6 +343,20 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   kintegrator->sampling_pattern = sampling_pattern;
   kintegrator->scrambling_distance = scrambling_distance;
+
+  const float pixel_displacement_safe_max_distance = max(0.0f, pixel_displacement_max_distance);
+  const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
+      scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
+  const bool pixel_displacement_layout = bvh_layout == BVH_LAYOUT_BVH2 ||
+                                         bvh_layout == BVH_LAYOUT_METAL;
+  kintegrator->use_pixel_displacement = use_pixel_displacement && pixel_displacement_layout &&
+                                        device_supports_pixel_displacement(device) &&
+                                        pixel_displacement_scale != 0.0f &&
+                                        pixel_displacement_safe_max_distance > 0.0f;
+  kintegrator->pixel_displacement_scale = pixel_displacement_scale;
+  kintegrator->pixel_displacement_max_distance = pixel_displacement_safe_max_distance;
+  kintegrator->pixel_displacement_steps = clamp(pixel_displacement_steps, 4, 128);
+
   kintegrator->sobol_index_mask = reverse_integer_bits(next_power_of_two(clamped_aa_samples - 1) -
                                                        1);
   kintegrator->blue_noise_sequence_length = clamped_aa_samples;

@@ -21,6 +21,11 @@ struct MetalRTIntersectionPayload {
   int self_prim;
   int self_object;
   uint visibility;
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  float pixel_displacement_t;
+  float pixel_displacement_u;
+  float pixel_displacement_v;
+#endif
 };
 
 struct MetalRTIntersectionLocalPayload_single_hit {
@@ -28,6 +33,11 @@ struct MetalRTIntersectionLocalPayload_single_hit {
 #if defined(__METALRT_MOTION__)
   int self_object;
 #endif
+  int object;
+  uint primitive_id_offset;
+  float pixel_displacement_t;
+  float pixel_displacement_u;
+  float pixel_displacement_v;
 };
 
 struct MetalRTLocalHit {
@@ -44,6 +54,8 @@ struct MetalRTIntersectionLocalPayload {
 #if defined(__METALRT_MOTION__)
   int self_object;
 #endif
+  int object;
+  uint primitive_id_offset;
 
   uint lcg_state;
   MetalRTLocalHit hits[LOCAL_MAX_HITS];
@@ -177,8 +189,9 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
       metal::raytracing::geometry_type::triangle |
       (kernel_data.bvh.have_curves ? metal::raytracing::geometry_type::curve :
                                      metal::raytracing::geometry_type::none) |
-      (kernel_data.bvh.have_points ? metal::raytracing::geometry_type::bounding_box :
-                                     metal::raytracing::geometry_type::none));
+      ((kernel_data.bvh.have_points || kernel_data.integrator.use_pixel_displacement) ?
+           metal::raytracing::geometry_type::bounding_box :
+           metal::raytracing::geometry_type::none));
 
   typename metalrt_intersector_type::result_type intersection;
 
@@ -186,6 +199,11 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
   payload.self_prim = ray->self.prim;
   payload.self_object = ray->self.object;
   payload.visibility = visibility;
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  payload.pixel_displacement_t = ray->tmax;
+  payload.pixel_displacement_u = 0.0f;
+  payload.pixel_displacement_v = 0.0f;
+#endif
 
   uint ray_mask = visibility & 0xFF;
   if (0 == ray_mask && (visibility & ~0xFF) != 0) {
@@ -241,21 +259,68 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
     }
   }
 #endif /* __HAIR__ */
-#ifdef __POINTCLOUD__
-  else if (kernel_data.bvh.have_points && intersection.type == intersection_type::bounding_box) {
+  else if (intersection.type == intersection_type::bounding_box) {
     const int object = intersection.instance_id;
     const uint prim = intersection.primitive_id + intersection.user_instance_id;
     const int prim_type = kernel_data_fetch(objects, object).primitive_type;
 
     if (!(kernel_data_fetch(object_flag, object) & SD_OBJECT_TRANSFORM_APPLIED)) {
       float3 idir;
-#  if defined(__METALRT_MOTION__)
+#if defined(__METALRT_MOTION__)
       bvh_instance_motion_push(nullptr, object, ray, &r.origin, &r.direction, &idir);
-#  else
+#else
       bvh_instance_push(nullptr, object, ray, &r.origin, &r.direction, &idir);
-#  endif
+#endif
     }
 
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+    if (pixel_displacement_active(kg, prim)) {
+      isect->prim = prim;
+      isect->type = prim_type;
+      isect->u = payload.pixel_displacement_u;
+      isect->v = payload.pixel_displacement_v;
+      isect->t = intersection.distance;
+      return true;
+    }
+#endif
+
+    /* A mesh using the custom AABB descriptor may contain regular material slots as well. */
+    {
+      float3 verts[3];
+      bool motion = false;
+#ifdef __OBJECT_MOTION__
+      motion = (prim_type == PRIMITIVE_MOTION_TRIANGLE);
+      if (motion) {
+        motion_triangle_vertices(kg, object, prim, ray->time, verts);
+      }
+      else
+#endif
+      {
+        triangle_vertices(kg, object, prim, verts);
+      }
+
+      float t, u, v;
+      if (ray_triangle_intersect(r.origin,
+                                 r.direction,
+                                 ray->tmin,
+                                 ray->tmax,
+                                 verts[0],
+                                 verts[1],
+                                 verts[2],
+                                 &u,
+                                 &v,
+                                 &t))
+      {
+        isect->prim = prim;
+        isect->type = prim_type;
+        isect->u = u;
+        isect->v = v;
+        isect->t = t;
+        return true;
+      }
+    }
+
+#ifdef __POINTCLOUD__
     if (prim_type & PRIMITIVE_POINT) {
       if (!point_intersect(nullptr,
                            isect,
@@ -276,8 +341,8 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
       }
       return true;
     }
-  }
 #endif /* __POINTCLOUD__ */
+  }
 
   return true;
 }
@@ -293,8 +358,9 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
       metal::raytracing::geometry_type::triangle |
       (kernel_data.bvh.have_curves ? metal::raytracing::geometry_type::curve :
                                      metal::raytracing::geometry_type::none) |
-      (kernel_data.bvh.have_points ? metal::raytracing::geometry_type::bounding_box :
-                                     metal::raytracing::geometry_type::none));
+      ((kernel_data.bvh.have_points || kernel_data.integrator.use_pixel_displacement) ?
+           metal::raytracing::geometry_type::bounding_box :
+           metal::raytracing::geometry_type::none));
 
   typename metalrt_intersector_type::result_type intersection;
 
@@ -324,6 +390,46 @@ ccl_device_intersect bool scene_intersect_shadow(KernelGlobals kg,
 }
 
 #ifdef __BVH_LOCAL__
+ccl_device_forceinline float3 metalrt_local_hit_normal(KernelGlobals kg,
+                                                       const int object,
+                                                       const int prim,
+                                                       const float u,
+                                                       const float v,
+                                                       const float time)
+{
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (pixel_displacement_active(kg, prim)) {
+    float3 verts[3];
+    bool motion = false;
+#    ifdef __OBJECT_MOTION__
+    motion = (kernel_data_fetch(objects, object).primitive_type == PRIMITIVE_MOTION_TRIANGLE);
+    if (motion) {
+      motion_triangle_vertices(kg, object, prim, time, verts);
+    }
+    else
+#    endif
+    {
+      triangle_vertices(kg, object, prim, verts);
+    }
+
+    float3 P, Ng, dPdu, dPdv;
+    pixel_displacement_displaced_geometry(
+        kg, object, prim, u, v, time, motion, verts, &P, &Ng, &dPdu, &dPdv);
+    return Ng;
+  }
+#  endif
+
+  const int position_offset = kernel_data_fetch(objects, object).position_offset;
+  const packed_uint3 tri_vindex = kernel_data_fetch(tri_vindex, prim);
+  const float3 tri_a = float3(
+      kernel_data_fetch(attributes_float3, position_offset + tri_vindex.x));
+  const float3 tri_b = float3(
+      kernel_data_fetch(attributes_float3, position_offset + tri_vindex.y));
+  const float3 tri_c = float3(
+      kernel_data_fetch(attributes_float3, position_offset + tri_vindex.z));
+  return normalize(cross(tri_b - tri_a, tri_c - tri_a));
+}
+
 template<bool single_hit = false>
 ccl_device_intersect bool scene_intersect_local(KernelGlobals kg,
                                                 const ccl_private Ray *ray,
@@ -351,11 +457,20 @@ ccl_device_intersect bool scene_intersect_local(KernelGlobals kg,
   }
 #  endif
 
-  metalrt_intersect.assume_geometry_type(metal::raytracing::geometry_type::triangle);
+  metalrt_intersect.assume_geometry_type(
+      metal::raytracing::geometry_type::triangle |
+      (kernel_data.integrator.use_pixel_displacement ?
+           metal::raytracing::geometry_type::bounding_box :
+           metal::raytracing::geometry_type::none));
 
   if (single_hit) {
     MetalRTIntersectionLocalPayload_single_hit payload;
     payload.self_prim = ray->self.prim - primitive_id_offset;
+    payload.object = local_object;
+    payload.primitive_id_offset = primitive_id_offset;
+    payload.pixel_displacement_t = ray->tmax;
+    payload.pixel_displacement_u = 0.0f;
+    payload.pixel_displacement_v = 0.0f;
 
 #  if defined(__METALRT_MOTION__)
     /* We can't skip over the top-level BVH in the motion blur case, so still need to do
@@ -393,24 +508,28 @@ ccl_device_intersect bool scene_intersect_local(KernelGlobals kg,
     local_isect->hits[0].prim = prim;
     local_isect->hits[0].type = prim_type;
     local_isect->hits[0].object = local_object;
-    local_isect->hits[0].u = intersection.triangle_barycentric_coord.x;
-    local_isect->hits[0].v = intersection.triangle_barycentric_coord.y;
+    if (intersection.type == intersection_type::bounding_box) {
+      local_isect->hits[0].u = payload.pixel_displacement_u;
+      local_isect->hits[0].v = payload.pixel_displacement_v;
+    }
+    else {
+      local_isect->hits[0].u = intersection.triangle_barycentric_coord.x;
+      local_isect->hits[0].v = intersection.triangle_barycentric_coord.y;
+    }
     local_isect->hits[0].t = intersection.distance;
-
-    const int position_offset = kernel_data_fetch(objects, local_object).position_offset;
-    const packed_uint3 tri_vindex = kernel_data_fetch(tri_vindex, prim);
-    const float3 tri_a = float3(
-        kernel_data_fetch(attributes_float3, position_offset + tri_vindex.x));
-    const float3 tri_b = float3(
-        kernel_data_fetch(attributes_float3, position_offset + tri_vindex.y));
-    const float3 tri_c = float3(
-        kernel_data_fetch(attributes_float3, position_offset + tri_vindex.z));
-    local_isect->Ng[0] = normalize(cross(tri_b - tri_a, tri_c - tri_a));
+    local_isect->Ng[0] = metalrt_local_hit_normal(kg,
+                                                  local_object,
+                                                  prim,
+                                                  local_isect->hits[0].u,
+                                                  local_isect->hits[0].v,
+                                                  ray->time);
     return true;
   }
   else {
     MetalRTIntersectionLocalPayload payload;
     payload.self_prim = ray->self.prim - primitive_id_offset;
+    payload.object = local_object;
+    payload.primitive_id_offset = primitive_id_offset;
     payload.max_hits = max_hits;
     payload.num_hits = 0;
     if (lcg_state) {
@@ -469,15 +588,12 @@ ccl_device_intersect bool scene_intersect_local(KernelGlobals kg,
         local_isect->hits[hit].object = local_object;
         local_isect->hits[hit].type = prim_type;
 
-        const int position_offset = kernel_data_fetch(objects, local_object).position_offset;
-        const packed_uint3 tri_vindex = kernel_data_fetch(tri_vindex, prim);
-        const float3 tri_a = float3(
-            kernel_data_fetch(attributes_float3, position_offset + tri_vindex.x));
-        const float3 tri_b = float3(
-            kernel_data_fetch(attributes_float3, position_offset + tri_vindex.y));
-        const float3 tri_c = float3(
-            kernel_data_fetch(attributes_float3, position_offset + tri_vindex.z));
-        local_isect->Ng[hit] = normalize(cross(tri_b - tri_a, tri_c - tri_a));
+        local_isect->Ng[hit] = metalrt_local_hit_normal(kg,
+                                                       local_object,
+                                                       prim,
+                                                       payload.hits[hit].u,
+                                                       payload.hits[hit].v,
+                                                       ray->time);
       }
     }
     return num_hits > 0;
@@ -496,8 +612,9 @@ ccl_device_intersect void scene_intersect_shadow_all_metalrt(
       metal::raytracing::geometry_type::triangle |
       (kernel_data.bvh.have_curves ? metal::raytracing::geometry_type::curve :
                                      metal::raytracing::geometry_type::none) |
-      (kernel_data.bvh.have_points ? metal::raytracing::geometry_type::bounding_box :
-                                     metal::raytracing::geometry_type::none));
+      ((kernel_data.bvh.have_points || kernel_data.integrator.use_pixel_displacement) ?
+           metal::raytracing::geometry_type::bounding_box :
+           metal::raytracing::geometry_type::none));
 
   uint ray_mask = payload.base.ray_visibility & 0xFF;
   if (0 == ray_mask && (payload.base.ray_visibility & ~0xFF) != 0) {

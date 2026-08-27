@@ -38,6 +38,16 @@
 
 CCL_NAMESPACE_BEGIN
 
+static bool scene_has_true_displacement(const Scene *scene)
+{
+  for (const Geometry *geom : scene->geometry) {
+    if (geom->has_true_displacement()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 Scene ::Scene(const SceneParams &params_, Device *device)
     : name("Scene"),
       default_surface(nullptr),
@@ -223,6 +233,12 @@ void Scene::device_update(Device *device_, Progress &progress)
 
     /* Update kernel features. After shaders and passes since those affect features. */
     update_kernel_features();
+
+    device->set_scene_pixel_displacement(integrator->get_use_pixel_displacement() &&
+                                             scene_has_true_displacement(this),
+                                         integrator->get_pixel_displacement_scale(),
+                                         integrator->get_pixel_displacement_max_distance(),
+                                         scene_allows_pixel_displacement_metalrt(this));
 
     /* Load render kernels, before uploading most data to the GPU, and before displacement and
      * background light need to run kernels.

@@ -18,6 +18,8 @@ GENERATOR="$REQUESTED_GENERATOR"
 CLEAN_RELEASE=0
 PACKAGE_ARCHIVE=0
 SMOKE_TEST=1
+RUN_APP=0
+RUN_FILE=""
 EXTRA_CMAKE_ARGS=()
 
 usage() {
@@ -37,6 +39,8 @@ Options:
   --clean-release           Remove ./Release before installing.
   --package                 Also build Blender's package_archive target and copy zips to ./Release.
   --no-smoke-test           Skip the final background --version run.
+  --run                     Launch a new instance of the freshly installed app after building.
+  --open FILE               Launch a new instance and open FILE after building.
   -h, --help                Show this help.
 
 Environment:
@@ -45,6 +49,8 @@ Environment:
 
 Examples:
   ./compile.sh
+  ./compile.sh --run
+  ./compile.sh --open /path/to/scene.blend
   ./compile.sh -j 8 --no-fetch-libraries
   ./compile.sh -- -DWITH_TRACY=OFF
 EOF
@@ -116,6 +122,16 @@ while [ "$#" -gt 0 ]; do
     --no-smoke-test)
       SMOKE_TEST=0
       shift
+      ;;
+    --run)
+      RUN_APP=1
+      shift
+      ;;
+    --open)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      RUN_APP=1
+      RUN_FILE="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -324,6 +340,50 @@ copy_package_archives() {
   fi
 }
 
+verify_installed_cycles_sources() {
+  local installed_source
+  local relative_path
+  local source_file
+  local installed_file
+  local runtime_sources
+
+  installed_source="$(find "${RELEASE_DIR}/Blender.app/Contents/Resources" \
+    -type d -path '*/scripts/addons_core/cycles/source' -print -quit)"
+  [ -n "$installed_source" ] || die "Installed Cycles source directory was not found in Blender.app."
+
+  runtime_sources=(
+    kernel/device/metal/bvh.h
+    kernel/device/metal/kernel.metal
+    kernel/geom/pixel_displacement_shader.h
+    kernel/integrator/subsurface.h
+  )
+
+  for relative_path in "${runtime_sources[@]}"; do
+    source_file="${ROOT_DIR}/intern/cycles/${relative_path}"
+    installed_file="${installed_source}/${relative_path}"
+    [ -f "$installed_file" ] || die "Installed Cycles runtime source is missing: ${installed_file}"
+    cmp -s "$source_file" "$installed_file" || die \
+      "Installed Cycles runtime source is stale: ${relative_path}"
+  done
+
+  installed_file="${installed_source}/kernel/integrator/subsurface.h"
+  grep -Fq 'defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)' "$installed_file" || die \
+    "Installed Cycles runtime is missing pixel-displacement support in Metal shading kernels."
+}
+
+launch_fresh_app() {
+  [ "$RUN_APP" -eq 1 ] || return 0
+
+  require_command open
+  log "Launching a fresh Blender instance"
+  if [ -n "$RUN_FILE" ]; then
+    [ -f "$RUN_FILE" ] || die "Blend file does not exist: ${RUN_FILE}"
+    open -n -a "${RELEASE_DIR}/Blender.app" "$RUN_FILE"
+  else
+    open -n "${RELEASE_DIR}/Blender.app"
+  fi
+}
+
 if [ -z "$JOBS" ]; then
   JOBS="$(detect_jobs)"
 fi
@@ -382,6 +442,9 @@ copy_package_archives
 BLENDER_BIN="${RELEASE_DIR}/Blender.app/Contents/MacOS/Blender"
 [ -x "$BLENDER_BIN" ] || die "Expected Blender executable was not created: ${BLENDER_BIN}"
 
+log "Verifying installed Cycles runtime sources"
+verify_installed_cycles_sources
+
 if [ "$SMOKE_TEST" -eq 1 ]; then
   log "Running smoke test"
   "$BLENDER_BIN" --background --factory-startup --version >/dev/null
@@ -390,3 +453,9 @@ fi
 log "Done"
 printf 'Blender app: %s\n' "${RELEASE_DIR}/Blender.app"
 printf 'Blender bin: %s\n' "$BLENDER_BIN"
+if [ "$RUN_APP" -eq 0 ]; then
+  printf 'Fresh launch: ./compile.sh --run\n'
+  printf 'Note: plain macOS open may reactivate an older running Blender instance.\n'
+fi
+
+launch_fresh_app

@@ -16,6 +16,7 @@
 #include "scene/camera.h"
 #include "scene/curves.h"
 #include "scene/film.h"
+#include "scene/geometry.h"
 #include "scene/integrator.h"
 #include "scene/light.h"
 #include "scene/mesh.h"
@@ -383,6 +384,27 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
 
   integrator->set_use_pixel_jitter(get_boolean(cscene, "use_pixel_jitter"));
+  integrator->set_use_pixel_displacement(get_boolean(cscene, "use_pixel_displacement"));
+  integrator->set_pixel_displacement_scale(get_float(cscene, "pixel_displacement_scale"));
+  integrator->set_pixel_displacement_max_distance(
+      get_float(cscene, "pixel_displacement_max_distance"));
+  integrator->set_pixel_displacement_resolution(get_int(cscene, "pixel_displacement_resolution"));
+  integrator->set_pixel_displacement_steps(get_int(cscene, "pixel_displacement_steps"));
+
+  if (integrator->use_pixel_displacement_is_modified() ||
+      integrator->pixel_displacement_scale_is_modified() ||
+      integrator->pixel_displacement_max_distance_is_modified() ||
+      integrator->pixel_displacement_resolution_is_modified() ||
+      integrator->pixel_displacement_steps_is_modified())
+  {
+    for (Geometry *geom : scene->geometry) {
+      if (geom->has_true_displacement()) {
+        geom->tag_modified();
+        geom->tag_update(scene, true);
+      }
+    }
+    scene->geometry_manager->tag_update(scene, GeometryManager::UPDATE_ALL);
+  }
 
   bool use_custom_pixel_jitter_sample = false;
   blender::PropertyRNA *override_pixel_jitter_sample_prop = RNA_struct_find_property(

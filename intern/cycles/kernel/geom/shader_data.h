@@ -92,11 +92,25 @@ ccl_device_inline
     if (sd->type == PRIMITIVE_TRIANGLE) {
       /* static triangle */
       triangle_shader_setup(kg, sd);
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__
+      if (pixel_displacement_active(kg, sd->prim)) {
+        float3 verts[3];
+        triangle_vertices(kg, sd->object, sd->prim, verts);
+        pixel_displacement_shader_setup(kg, sd, 0.5f, false, verts);
+      }
+#endif
     }
     else {
       kernel_assert(sd->type == PRIMITIVE_MOTION_TRIANGLE);
       /* motion triangle */
       motion_triangle_shader_setup(kg, sd);
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__
+      if (pixel_displacement_active(kg, sd->prim)) {
+        float3 verts[3];
+        motion_triangle_vertices(kg, sd->object, sd->prim, sd->time, verts);
+        pixel_displacement_shader_setup(kg, sd, sd->time, true, verts);
+      }
+#endif
     }
 
     if (!(sd->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {

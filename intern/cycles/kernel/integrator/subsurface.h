@@ -100,7 +100,19 @@ ccl_device int subsurface_bounce(KernelGlobals kg,
   const PathRayVisibility path_visibility = (INTEGRATOR_STATE(state, path, visibility) &
                                              ~PATH_RAY_VISIBILITY_CAMERA);
   uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-  if (sc->type == CLOSURE_BSSRDF_BURLEY_ID) {
+  bool use_disk = (sc->type == CLOSURE_BSSRDF_BURLEY_ID);
+#  if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT__) || \
+      defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)
+  /* A per-pixel displaced triangle is an open heightfield, not a closed volume. Random Walk
+   * cannot robustly define or efficiently trace an interior there: every volume bounce would
+   * need another virtual-micromesh intersection, and same-base-triangle exits conflict with the
+   * self-intersection rule. Burley diffusion is defined on the surface, works for an open quad,
+   * and preserves the intended SSS appearance with a single local intersection query. */
+  use_disk |= kernel_data.integrator.use_pixel_displacement &&
+              pixel_displacement_active(kg, sd->prim) &&
+              pixel_displacement_cache_is_open_surface(kg, sd->prim);
+#  endif
+  if (use_disk) {
     /* We should never have two consecutive BSSRDF bounces, the second one should
      * be converted to a diffuse BSDF to avoid this. */
     kernel_assert(!(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_DIFFUSE_ANCESTOR));

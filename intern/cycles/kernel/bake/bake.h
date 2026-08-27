@@ -31,6 +31,24 @@ ccl_device void kernel_displace_evaluate(KernelGlobals kg,
   ShaderData sd;
   shader_setup_from_displace(kg, &sd, in.object, in.prim, in.u, in.v);
 
+#ifdef __RAY_DIFFERENTIALS__
+  /* Pixel-displacement cache entries sample a micromesh, not a single vertex per base triangle.
+   * Filter over one micromesh cell so texture LOD is independent of how the UV domain happens to
+   * be split into base faces. The cache layout is uploaded before this evaluation. */
+  const int pixel_displacement_grid = kernel_data.integrator.use_pixel_displacement ?
+                                          int(kernel_data_fetch(pixel_displacement_info, in.prim) &
+                                              0x7fffffffu) :
+                                          0;
+  if (pixel_displacement_grid > 0) {
+    const float inv_grid = 1.0f / float(pixel_displacement_grid);
+    sd.du.dx = inv_grid;
+    sd.du.dy = 0.0f;
+    sd.dv.dx = 0.0f;
+    sd.dv.dy = inv_grid;
+    sd.dP *= inv_grid;
+  }
+#endif
+
   /* Evaluate displacement shader. */
   ConstIntegratorBakeState state;
   const float3 P = sd.P;

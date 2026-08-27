@@ -499,7 +499,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     int ancillary_index = 0;
     write_resource(ancillary_args, metal_device_->image_bindings, ancillary_index++);
 
-    if (metal_device_->use_metalrt) {
+    if (active_pipeline.use_metalrt) {
       write_resource(ancillary_args, metal_device_->accel_struct, ancillary_index++);
       write_resource(ancillary_args, metal_device_->blas_buffer, ancillary_index++);
 
@@ -512,7 +512,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     }
 
     /* Encode ancillaries */
-    if (metal_device_->use_metalrt) {
+    if (active_pipeline.use_metalrt) {
       for (int table = 0; table < METALRT_TABLE_NUM; table++) {
         if (active_pipeline.intersection_func_table[table]) {
           [active_pipeline.intersection_func_table[table]
@@ -529,7 +529,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     [mtlComputeCommandEncoder setBuffer:metal_device_->launch_params_buffer offset:0 atIndex:1];
     [mtlComputeCommandEncoder setBytes:ancillary_args length:sizeof(ancillary_args) atIndex:2];
 
-    if (metal_device_->use_metalrt && device_kernel_has_intersection(kernel)) {
+    if (active_pipeline.use_metalrt && device_kernel_has_intersection(kernel)) {
       if (@available(macos 12.0, *)) {
 
         if (id<MTLAccelerationStructure> accel_struct = metal_device_->accel_struct) {

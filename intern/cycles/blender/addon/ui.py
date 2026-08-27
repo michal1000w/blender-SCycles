@@ -552,6 +552,32 @@ class CYCLES_RENDER_PT_subdivision(CyclesButtonsPanel, Panel):
         col.prop(cscene, "dicing_camera")
 
 
+class CYCLES_RENDER_PT_pixel_displacement(CyclesButtonsPanel, Panel):
+    bl_label = "Pixel Level Displacement"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        scene = context.scene
+        cscene = scene.cycles
+        self.layout.prop(cscene, "use_pixel_displacement", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        scene = context.scene
+        cscene = scene.cycles
+
+        layout.active = cscene.use_pixel_displacement
+
+        col = layout.column(align=True)
+        col.prop(cscene, "pixel_displacement_scale")
+        col.prop(cscene, "pixel_displacement_max_distance")
+        col.prop(cscene, "pixel_displacement_resolution")
+        col.prop(cscene, "pixel_displacement_steps")
+
+
 class CYCLES_RENDER_PT_curves(CyclesButtonsPanel, Panel):
     bl_label = "Curves"
     bl_options = {'DEFAULT_CLOSED'}
@@ -2598,6 +2624,7 @@ classes = (
     CYCLES_RENDER_PT_light_paths_fast_gi,
     CYCLES_RENDER_PT_volumes,
     CYCLES_RENDER_PT_subdivision,
+    CYCLES_RENDER_PT_pixel_displacement,
     CYCLES_RENDER_PT_curves,
     CYCLES_RENDER_PT_curves_viewport_display,
     CYCLES_RENDER_PT_simplify,

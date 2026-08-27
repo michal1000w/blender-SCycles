@@ -2,18 +2,704 @@
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+#include <vector>
+
 #include "device/device.h"
 
 #include "integrator/shader_eval.h"
 
+#include "scene/attribute.h"
+#include "scene/devicescene.h"
+#include "scene/integrator.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
+#include "scene/shader_graph.h"
+#include "scene/shader_nodes.h"
 
 #include "util/progress.h"
 
 CCL_NAMESPACE_BEGIN
+
+static int pixel_displacement_cache_sample_count(const int grid)
+{
+  return (grid + 1) * (grid + 2) / 2;
+}
+
+static int pixel_displacement_cache_sample_index(const int grid, const int u, const int v)
+{
+  return u * (grid + 1) - (u * (u - 1)) / 2 + v;
+}
+
+constexpr uint PIXEL_DISPLACEMENT_CACHE_BVH_FLAG = (1u << 31);
+constexpr uint PIXEL_DISPLACEMENT_CACHE_OPEN_SURFACE_FLAG = (1u << 30);
+constexpr uint PIXEL_DISPLACEMENT_CACHE_GRID_MASK = (1u << 30) - 1;
+constexpr int PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE = 2;
+
+struct PixelDisplacementBVHBlock {
+  BoundBox bounds;
+  int u;
+  int v;
+};
+
+struct PixelDisplacementBVHNode {
+  BoundBox bounds;
+  int child0;
+  int child1;
+  int u;
+  int v;
+  bool leaf;
+};
+
+static bool mesh_is_closed_surface(const Mesh *mesh)
+{
+  vector<uint64_t> edges;
+  edges.reserve(mesh->num_triangles() * 3);
+  for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+    const Mesh::Triangle tri = mesh->get_triangle(triangle);
+    for (int edge = 0; edge < 3; edge++) {
+      const uint v0 = uint(min(tri.v[edge], tri.v[(edge + 1) % 3]));
+      const uint v1 = uint(max(tri.v[edge], tri.v[(edge + 1) % 3]));
+      edges.push_back((uint64_t(v0) << 32) | uint64_t(v1));
+    }
+  }
+
+  std::sort(edges.begin(), edges.end());
+  for (size_t begin = 0; begin < edges.size();) {
+    size_t end = begin + 1;
+    while (end < edges.size() && edges[end] == edges[begin]) {
+      end++;
+    }
+    if (end - begin != 2) {
+      return false;
+    }
+    begin = end;
+  }
+  return !edges.empty();
+}
+
+static int build_pixel_displacement_bvh_recursive(std::vector<PixelDisplacementBVHBlock> &blocks,
+                                                  const int begin,
+                                                  const int end,
+                                                  std::vector<PixelDisplacementBVHNode> &nodes)
+{
+  BoundBox bounds = BoundBox::empty;
+  BoundBox centroids = BoundBox::empty;
+  for (int i = begin; i < end; i++) {
+    bounds.grow(blocks[i].bounds);
+    centroids.grow(blocks[i].bounds.center());
+  }
+
+  const int node_index = int(nodes.size());
+  nodes.push_back({bounds, -1, -1, 0, 0, false});
+  if (end - begin == 1) {
+    nodes[node_index].u = blocks[begin].u;
+    nodes[node_index].v = blocks[begin].v;
+    nodes[node_index].leaf = true;
+    return node_index;
+  }
+
+  const float3 extent = centroids.max - centroids.min;
+  const int axis = (extent.x >= extent.y && extent.x >= extent.z) ? 0 :
+                   (extent.y >= extent.z)                         ? 1 :
+                                                                    2;
+  const int middle = (begin + end) / 2;
+  std::nth_element(blocks.begin() + begin,
+                   blocks.begin() + middle,
+                   blocks.begin() + end,
+                   [axis](const PixelDisplacementBVHBlock &a, const PixelDisplacementBVHBlock &b) {
+                     return a.bounds.center()[axis] < b.bounds.center()[axis];
+                   });
+  const int child0 = build_pixel_displacement_bvh_recursive(blocks, begin, middle, nodes);
+  const int child1 = build_pixel_displacement_bvh_recursive(blocks, middle, end, nodes);
+  nodes[node_index].child0 = child0;
+  nodes[node_index].child1 = child1;
+  return node_index;
+}
+
+static bool shader_allows_pixel_displacement_cache(const Shader *shader)
+{
+  /* Deterministic validation hook used by the visual regression tool to exercise the exact
+   * fallback with an otherwise identical material graph. */
+  if (getenv("CYCLES_PIXEL_DISPLACEMENT_DISABLE_CACHE") != nullptr) {
+    return false;
+  }
+
+  if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP) {
+    return false;
+  }
+  if (shader->has_volume || shader->has_surface_raytrace) {
+    return false;
+  }
+
+  for (const ShaderNode *node : shader->graph->nodes) {
+    const ustring node_name = node->type->name;
+
+    if (node->special_type == SHADER_SPECIAL_TYPE_OSL ||
+        node->special_type == SHADER_SPECIAL_TYPE_LIGHT_PATH ||
+        node->special_type == SHADER_SPECIAL_TYPE_SCENE_TIME)
+    {
+      return false;
+    }
+
+    /* Per-object/path/time inputs can vary outside primitive barycentrics. */
+    if (node_name == ustring("object_info")) {
+      return false;
+    }
+
+    if (node_name == ustring("vector_displacement")) {
+      return false;
+    }
+    if (node_name == ustring("image_texture")) {
+      const ImageTextureNode *image_node = static_cast<const ImageTextureNode *>(node);
+      if (image_node->get_animated() || image_node->get_projection() != NODE_IMAGE_PROJ_FLAT) {
+        return false;
+      }
+      continue;
+    }
+
+    /* Static procedural textures are deterministic functions of the shading coordinates and can
+     * be sampled into the same piecewise-linear micromesh as image textures. The user-controlled
+     * micromesh resolution is the spatial bandwidth limit; inputs which can change with the ray,
+     * object, or time are rejected above. */
+  }
+
+  return true;
+}
+
+static const Object *single_object_for_mesh(const Scene *scene,
+                                            const Mesh *mesh,
+                                            int *r_object_index)
+{
+  const Object *object = nullptr;
+  int object_index = OBJECT_NONE;
+
+  for (int i = 0; i < int(scene->objects.size()); i++) {
+    const Object *candidate = scene->objects[i];
+    if (candidate->get_geometry() != mesh) {
+      continue;
+    }
+
+    if (object != nullptr) {
+      return nullptr;
+    }
+    object = candidate;
+    object_index = i;
+  }
+
+  if (r_object_index) {
+    *r_object_index = object_index;
+  }
+
+  return object;
+}
+
+static bool mesh_triangle_uv_extent(const Mesh *mesh, const int triangle, float *r_max_uv_edge)
+{
+  const Attribute *uv_attr = mesh->attributes.find(ATTR_STD_UV);
+  if (uv_attr == nullptr || uv_attr->type != TypeFloat2) {
+    return false;
+  }
+
+  float2 uv[3];
+  if (uv_attr->element == ATTR_ELEMENT_CORNER) {
+    if (triangle * 3 + 2 >= uv_attr->size) {
+      return false;
+    }
+
+    const float2 *uv_data = uv_attr->data<float2>();
+    uv[0] = uv_data[triangle * 3 + 0];
+    uv[1] = uv_data[triangle * 3 + 1];
+    uv[2] = uv_data[triangle * 3 + 2];
+  }
+  else if (uv_attr->element == ATTR_ELEMENT_VERTEX) {
+    const Mesh::Triangle tri = mesh->get_triangle(triangle);
+    if (tri.v[0] >= uv_attr->size || tri.v[1] >= uv_attr->size || tri.v[2] >= uv_attr->size) {
+      return false;
+    }
+
+    const float2 *uv_data = uv_attr->data<float2>();
+    uv[0] = uv_data[tri.v[0]];
+    uv[1] = uv_data[tri.v[1]];
+    uv[2] = uv_data[tri.v[2]];
+  }
+  else {
+    return false;
+  }
+
+  const float2 e0 = uv[1] - uv[0];
+  const float2 e1 = uv[2] - uv[0];
+  const float2 e2 = uv[2] - uv[1];
+  const float max_uv_edge = max(max(len(e0), len(e1)), len(e2));
+
+  *r_max_uv_edge = max_uv_edge;
+  return true;
+}
+
+static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const int triangle)
+{
+  const int shader_index = mesh->get_shader()[triangle];
+  const array<Node *> &mesh_used_shaders = mesh->get_used_shaders();
+  const Shader *shader = (shader_index < mesh_used_shaders.size()) ?
+                             static_cast<const Shader *>(mesh_used_shaders[shader_index]) :
+                             scene->default_surface;
+
+  if (!shader_allows_pixel_displacement_cache(shader)) {
+    return 0;
+  }
+
+  const int resolution = clamp(scene->integrator->get_pixel_displacement_resolution(), 64, 2048);
+  float max_uv_edge;
+  if (!mesh_triangle_uv_extent(mesh, triangle, &max_uv_edge)) {
+    return resolution;
+  }
+
+  /* Interpret the quality setting as samples across the unit UV square, rather than samples per
+   * base triangle. This keeps the sampled surface invariant when the same UV domain is split into
+   * more or fewer triangles. A unit-square diagonal has length sqrt(2). */
+  const float scaled_resolution = float(resolution) * max_uv_edge * 0.7071067811865476f;
+  /* UVs produced by regular subdivisions should land on an integer resolution. Avoid ceilf()
+   * turning harmless float round-off (for example 8.000001) into a different micromesh density,
+   * which would make the rendered surface depend on the base mesh subdivision. */
+  return clamp(int(ceilf(scaled_resolution - 1.0e-5f)), 1, 2048);
+}
+
+bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
+{
+  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
+  size_t total_samples = 0;
+
+  for (const Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh() || !geom->has_true_displacement()) {
+      continue;
+    }
+
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    if (mesh->get_use_motion_blur()) {
+      return false;
+    }
+    if (single_object_for_mesh(scene, mesh, nullptr) == nullptr) {
+      return false;
+    }
+
+    const array<int> &triangle_shaders = mesh->get_shader();
+    const array<Node *> &used_shaders = mesh->get_used_shaders();
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int shader_index = triangle_shaders[triangle];
+      const Shader *shader = (shader_index < used_shaders.size()) ?
+                                 static_cast<const Shader *>(used_shaders[shader_index]) :
+                                 scene->default_surface;
+      /* The AABB path implements closest, shadow, shadow-all, and subsurface local queries.
+       * Meshes which need volume, AO, or bevel local intersections retain the BVH2 path. This
+       * includes regular material slots because the whole Metal BLAS uses one geometry type. */
+      if (shader->has_volume || shader->has_surface_raytrace) {
+        return false;
+      }
+      if (!shader->has_displacement || shader->get_displacement_method() == DISPLACE_BUMP) {
+        continue;
+      }
+
+      const int grid = mesh_triangle_cache_grid(scene, mesh, triangle);
+      if (grid == 0) {
+        return false;
+      }
+      total_samples += size_t(pixel_displacement_cache_sample_count(grid));
+      if (total_samples > max_cache_samples) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
+                                                      device_vector<uint> &cache_grid,
+                                                      device_vector<int> &cache_offset,
+                                                      size_t *r_cacheable_triangles)
+{
+  uint *grid_data = cache_grid.data();
+  int *offset_data = cache_offset.data();
+  size_t total_samples = 0;
+  size_t cacheable_triangles = 0;
+
+  for (const Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    if (!mesh->use_pixel_displacement || single_object_for_mesh(scene, mesh, nullptr) == nullptr) {
+      continue;
+    }
+    const uint surface_flag = mesh_is_closed_surface(mesh) ?
+                                  0u :
+                                  PIXEL_DISPLACEMENT_CACHE_OPEN_SURFACE_FLAG;
+
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int grid = mesh_triangle_cache_grid(scene, mesh, triangle);
+      if (grid == 0) {
+        continue;
+      }
+      const int prim = int(mesh->prim_offset) + triangle;
+      grid_data[prim] = uint(grid) | surface_flag;
+      offset_data[prim] = int(total_samples);
+      total_samples += size_t(pixel_displacement_cache_sample_count(grid));
+      cacheable_triangles++;
+    }
+  }
+
+  *r_cacheable_triangles = cacheable_triangles;
+  return total_samples;
+}
+
+static int fill_pixel_displacement_cache_input(const Scene *scene,
+                                               const device_vector<uint> &pixel_displacement_grid,
+                                               device_vector<int> &pixel_displacement_offset,
+                                               device_vector<KernelShaderEvalInput> &d_input)
+{
+  KernelShaderEvalInput *d_input_data = d_input.data();
+  int *offset_data = pixel_displacement_offset.data();
+  int input_size = 0;
+
+  for (const Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    if (!mesh->use_pixel_displacement) {
+      continue;
+    }
+
+    int object_index = OBJECT_NONE;
+    const Object *object = single_object_for_mesh(scene, mesh, &object_index);
+    if (object == nullptr) {
+      continue;
+    }
+    if (object_index == OBJECT_NONE) {
+      continue;
+    }
+
+    for (int tri = 0; tri < mesh->num_triangles(); tri++) {
+      const int prim = int(mesh->prim_offset) + tri;
+      const int grid = int(pixel_displacement_grid.data()[prim] &
+                           PIXEL_DISPLACEMENT_CACHE_GRID_MASK);
+      if (grid <= 0) {
+        continue;
+      }
+
+      const int sample_offset = offset_data[prim];
+      if (sample_offset != input_size) {
+        return 0;
+      }
+
+      for (int u = 0; u <= grid; u++) {
+        for (int v = 0; v <= grid - u; v++) {
+          KernelShaderEvalInput in;
+          in.object = object_index;
+          in.prim = prim;
+          in.u = float(u) / float(grid);
+          in.v = float(v) / float(grid);
+          d_input_data[input_size++] = in;
+        }
+      }
+    }
+  }
+
+  return input_size;
+}
+
+static void read_pixel_displacement_cache_output(
+    Scene *scene,
+    device_vector<uint> &pixel_displacement_grid,
+    const device_vector<int> &pixel_displacement_offset,
+    device_vector<float4> &pixel_displacement_data,
+    device_vector<int> &pixel_displacement_bvh_offset,
+    device_vector<float4> &pixel_displacement_bvh_nodes,
+    const device_vector<float> &d_output)
+{
+  float4 *cache_data = pixel_displacement_data.data();
+  const float *output_data = d_output.data();
+  const float scale = scene->integrator->get_pixel_displacement_scale();
+  const float max_distance = max(0.0f, scene->integrator->get_pixel_displacement_max_distance());
+
+  const int num_samples = min(int(pixel_displacement_data.size()), int(d_output.size() / 3));
+  std::vector<PixelDisplacementBVHNode> bvh_nodes;
+
+  for (int i = 0; i < num_samples; i++) {
+    float3 D = make_float3(output_data[i * 3 + 0], output_data[i * 3 + 1], output_data[i * 3 + 2]);
+    D = ensure_finite(D) * scale;
+
+    const float distance = len(D);
+    if (distance > max_distance && distance > 0.0f) {
+      D *= max_distance / distance;
+    }
+
+    cache_data[i] = make_float4(D.x, D.y, D.z, 0.0f);
+  }
+
+  /* Build tight bounds from the same piecewise-linear samples used by intersection. This avoids
+   * severe AABB overlap when the base mesh is highly subdivided. */
+  for (Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+    Mesh *mesh = static_cast<Mesh *>(geom);
+    mesh->pixel_displacement_bounds.resize(mesh->num_triangles());
+    const packed_float3 *verts = mesh->get_position();
+
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      BoundBox bounds = BoundBox::empty;
+      const int prim = int(mesh->prim_offset) + triangle;
+      const int grid = int(pixel_displacement_grid.data()[prim] &
+                           PIXEL_DISPLACEMENT_CACHE_GRID_MASK);
+      const Mesh::Triangle tri = mesh->get_triangle(triangle);
+      const float3 p0 = float3(verts[tri.v[0]]);
+      const float3 p1 = float3(verts[tri.v[1]]);
+      const float3 p2 = float3(verts[tri.v[2]]);
+
+      if (grid > 0) {
+        int sample = pixel_displacement_offset.data()[prim];
+        const int sample_offset = sample;
+        const float3 face_normal = safe_normalize(cross(p1 - p0, p2 - p0));
+        float min_height = std::numeric_limits<float>::infinity();
+        float max_height = -std::numeric_limits<float>::infinity();
+        float max_tangent_squared = 0.0f;
+        for (int u = 0; u <= grid; u++) {
+          for (int v = 0; v <= grid - u; v++, sample++) {
+            const float fu = float(u) / float(grid);
+            const float fv = float(v) / float(grid);
+            const float3 displacement = make_float3(cache_data[sample]);
+            bounds.grow(p0 + fu * (p1 - p0) + fv * (p2 - p0) + displacement);
+            const float height = dot(displacement, face_normal);
+            min_height = min(min_height, height);
+            max_height = max(max_height, height);
+            max_tangent_squared = max(max_tangent_squared,
+                                      len_squared(displacement - height * face_normal));
+          }
+        }
+        /* The fourth component is unused by displacement vectors. Keep tight height bounds in the
+         * first two samples so intersection can clip the ray slab without another device array. */
+        constexpr float height_epsilon = 1.0e-6f;
+        cache_data[sample_offset].w = min_height - height_epsilon;
+        cache_data[sample_offset + 1].w = max_height + height_epsilon;
+
+        /* Grid DDA is exact only when displacement is parallel to the base-triangle normal. On
+         * smooth or curved geometry the shading normal moves microtriangles tangentially, so build
+         * an object-space block BVH and intersect the actual displaced microtriangles instead. */
+        /* Shader evaluation and normal transforms can leave sub-ULP tangential residue even when
+         * the displacement is mathematically parallel to the face. Keep that numerical noise on
+         * the DDA path; meaningful smooth-normal displacement is orders of magnitude larger. */
+        const float tangent_epsilon = max(1.0e-5f, max_distance * 1.0e-4f);
+        if (max_tangent_squared > sqr(tangent_epsilon)) {
+          std::vector<PixelDisplacementBVHBlock> blocks;
+          for (int block_u = 0; block_u < grid; block_u += PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE) {
+            for (int block_v = 0; block_u + block_v < grid;
+                 block_v += PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE)
+            {
+              BoundBox block_bounds = BoundBox::empty;
+              const int end_u = min(block_u + PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE, grid);
+              for (int u = block_u; u <= end_u; u++) {
+                const int end_v = min(block_v + PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE, grid - u);
+                for (int v = block_v; v <= end_v; v++) {
+                  const float fu = float(u) / float(grid);
+                  const float fv = float(v) / float(grid);
+                  const int index = sample_offset +
+                                    pixel_displacement_cache_sample_index(grid, u, v);
+                  block_bounds.grow(p0 + fu * (p1 - p0) + fv * (p2 - p0) +
+                                    make_float3(cache_data[index]));
+                }
+              }
+              block_bounds.grow(block_bounds.min, 1.0e-6f);
+              block_bounds.grow(block_bounds.max, 1.0e-6f);
+              blocks.push_back({block_bounds, block_u, block_v});
+            }
+          }
+
+          if (!blocks.empty()) {
+            pixel_displacement_bvh_offset.data()[prim] = int(bvh_nodes.size());
+            build_pixel_displacement_bvh_recursive(blocks, 0, int(blocks.size()), bvh_nodes);
+            pixel_displacement_grid.data()[prim] |= PIXEL_DISPLACEMENT_CACHE_BVH_FLAG;
+          }
+        }
+
+        constexpr int block_size = 8;
+        if (grid >= block_size) {
+          for (int block_u = 0; block_u < grid; block_u += block_size) {
+            for (int block_v = 0; block_u + block_v < grid; block_v += block_size) {
+              float block_min_height = std::numeric_limits<float>::infinity();
+              float block_max_height = -std::numeric_limits<float>::infinity();
+              const int end_u = min(block_u + block_size, grid);
+              for (int u = block_u; u <= end_u; u++) {
+                const int end_v = min(block_v + block_size, grid - u);
+                for (int v = block_v; v <= end_v; v++) {
+                  const int index = sample_offset +
+                                    pixel_displacement_cache_sample_index(grid, u, v);
+                  const float height = dot(make_float3(cache_data[index]), face_normal);
+                  block_min_height = min(block_min_height, height);
+                  block_max_height = max(block_max_height, height);
+                }
+              }
+
+              const int bounds_index = (block_u == 0 && block_v == 0) ?
+                                           sample_offset + 2 :
+                                           sample_offset + pixel_displacement_cache_sample_index(
+                                                               grid, block_u, block_v);
+              cache_data[bounds_index].w = block_min_height - height_epsilon;
+              cache_data[bounds_index + 1].w = block_max_height + height_epsilon;
+            }
+          }
+        }
+      }
+      else {
+        bounds.grow(p0);
+        bounds.grow(p1);
+        bounds.grow(p2);
+      }
+      mesh->pixel_displacement_bounds[triangle] = bounds;
+    }
+  }
+
+  pixel_displacement_bvh_nodes.free();
+  if (!bvh_nodes.empty()) {
+    float4 *serialized = pixel_displacement_bvh_nodes.alloc(bvh_nodes.size() * 2);
+    for (int i = 0; i < int(bvh_nodes.size()); i++) {
+      const PixelDisplacementBVHNode &node = bvh_nodes[i];
+      const uint meta0 = node.leaf ? (PIXEL_DISPLACEMENT_CACHE_BVH_FLAG | uint(node.u)) :
+                                     uint(node.child0);
+      const uint meta1 = node.leaf ? uint(node.v) : uint(node.child1);
+      serialized[i * 2] = make_float4(
+          node.bounds.min.x, node.bounds.min.y, node.bounds.min.z, __uint_as_float(meta0));
+      serialized[i * 2 + 1] = make_float4(
+          node.bounds.max.x, node.bounds.max.y, node.bounds.max.z, __uint_as_float(meta1));
+    }
+  }
+}
+
+bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
+                                                             DeviceScene *dscene,
+                                                             Scene *scene,
+                                                             Progress &progress)
+{
+  device_vector<uint> &cache_info = dscene->pixel_displacement_info;
+  device_vector<int> &cache_offset = dscene->pixel_displacement_offset;
+  device_vector<float4> &cache_data = dscene->pixel_displacement_data;
+  device_vector<int> &bvh_offset = dscene->pixel_displacement_bvh_offset;
+  device_vector<float4> &bvh_nodes = dscene->pixel_displacement_bvh_nodes;
+
+  uint *info = cache_info.alloc(dscene->tri_shader.size());
+  for (int i = 0; i < cache_info.size(); i++) {
+    info[i] = 0;
+  }
+
+  int *offsets = cache_offset.alloc(dscene->tri_shader.size());
+  for (int i = 0; i < cache_offset.size(); i++) {
+    offsets[i] = -1;
+  }
+
+  int *bvh_offsets = bvh_offset.alloc(dscene->tri_shader.size());
+  for (int i = 0; i < bvh_offset.size(); i++) {
+    bvh_offsets[i] = -1;
+  }
+
+  cache_data.free();
+  bvh_nodes.free();
+  for (Geometry *geom : scene->geometry) {
+    if (geom->is_mesh()) {
+      Mesh *mesh = static_cast<Mesh *>(geom);
+      mesh->pixel_displacement_bounds.clear();
+    }
+  }
+
+  size_t cacheable_triangles = 0;
+  const size_t total_samples = prepare_pixel_displacement_cache_layout(
+      scene, cache_info, cache_offset, &cacheable_triangles);
+  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
+  if (cacheable_triangles == 0 || total_samples == 0 || total_samples > max_cache_samples) {
+    for (int i = 0; i < cache_info.size(); i++) {
+      info[i] = 0;
+    }
+    for (int i = 0; i < cache_offset.size(); i++) {
+      offsets[i] = -1;
+    }
+    cache_info.copy_to_device();
+    cache_offset.copy_to_device();
+    bvh_offset.copy_to_device();
+    return false;
+  }
+
+  if (total_samples > size_t(std::numeric_limits<int>::max())) {
+    cache_info.copy_to_device();
+    cache_offset.copy_to_device();
+    bvh_offset.copy_to_device();
+    return false;
+  }
+
+  progress.set_status("Updating Mesh", "Computing Pixel Displacement Cache");
+
+  float4 *cache_data_ptr = cache_data.alloc(total_samples);
+  for (size_t i = 0; i < total_samples; i++) {
+    cache_data_ptr[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+  }
+
+  /* The displacement evaluation kernel uses the per-primitive grid to choose a topology-
+   * independent texture footprint. Make the layout visible before launching the bake. */
+  cache_info.copy_to_device();
+  cache_offset.copy_to_device();
+
+  int actual_samples = 0;
+  ShaderEval shader_eval(device, progress);
+  const bool success = shader_eval.eval(
+      SHADER_EVAL_DISPLACE,
+      int(total_samples),
+      3,
+      [scene, &cache_info, &cache_offset, &actual_samples](
+          device_vector<KernelShaderEvalInput> &d_input) {
+        actual_samples = fill_pixel_displacement_cache_input(
+            scene, cache_info, cache_offset, d_input);
+        return actual_samples;
+      },
+      [scene, &cache_info, &cache_offset, &cache_data, &bvh_offset, &bvh_nodes](
+          const device_vector<float> &d_output) {
+        read_pixel_displacement_cache_output(
+            scene, cache_info, cache_offset, cache_data, bvh_offset, bvh_nodes, d_output);
+      });
+
+  if (!success || actual_samples == 0 || progress.get_cancel()) {
+    for (int i = 0; i < cache_info.size(); i++) {
+      info[i] = 0;
+    }
+    for (int i = 0; i < cache_offset.size(); i++) {
+      offsets[i] = -1;
+    }
+    cache_data.free();
+    bvh_nodes.free();
+    for (Geometry *geom : scene->geometry) {
+      if (geom->is_mesh()) {
+        Mesh *mesh = static_cast<Mesh *>(geom);
+        mesh->pixel_displacement_bounds.clear();
+      }
+    }
+    cache_info.copy_to_device();
+    cache_offset.copy_to_device();
+    bvh_offset.copy_to_device();
+    return false;
+  }
+
+  cache_info.copy_to_device();
+  cache_offset.copy_to_device();
+  cache_data.copy_to_device();
+  bvh_offset.copy_to_device();
+  bvh_nodes.copy_to_device();
+
+  return true;
+}
 
 /* Fill in coordinates for mesh displacement shader evaluation on device. */
 static int fill_shader_input(const Scene *scene,
@@ -352,6 +1038,10 @@ bool GeometryManager::displace(Device *device, Scene *scene, Mesh *mesh, Progres
 {
   /* verify if we have a displacement shader */
   if (!mesh->has_true_displacement()) {
+    return false;
+  }
+
+  if (mesh->use_pixel_displacement) {
     return false;
   }
 

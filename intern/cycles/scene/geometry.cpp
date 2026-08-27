@@ -10,6 +10,7 @@
 #include "scene/camera.h"
 #include "scene/geometry.h"
 #include "scene/hair.h"
+#include "scene/integrator.h"
 #include "scene/light.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
@@ -32,6 +33,35 @@
 #include "util/task.h"
 
 CCL_NAMESPACE_BEGIN
+
+static bool device_supports_pixel_displacement(const Device *device)
+{
+  if (device->info.type == DEVICE_METAL) {
+    return true;
+  }
+
+  if (device->info.type == DEVICE_MULTI) {
+    for (const DeviceInfo &subdevice : device->info.multi_devices) {
+      if (subdevice.type != DEVICE_METAL) {
+        return false;
+      }
+    }
+    return !device->info.multi_devices.empty();
+  }
+
+  return false;
+}
+
+static bool scene_uses_pixel_displacement(const Scene *scene,
+                                          const Device *device,
+                                          const BVHLayout bvh_layout)
+{
+  const bool supported_layout = bvh_layout == BVH_LAYOUT_BVH2 || bvh_layout == BVH_LAYOUT_METAL;
+  return scene->integrator->get_use_pixel_displacement() && supported_layout &&
+         device_supports_pixel_displacement(device) &&
+         scene->integrator->get_pixel_displacement_scale() != 0.0f &&
+         scene->integrator->get_pixel_displacement_max_distance() > 0.0f;
+}
 
 /* Geometry */
 
@@ -61,6 +91,8 @@ Geometry::Geometry(const NodeType *node_type, const Type type)
 
   has_volume = false;
   has_surface_bssrdf = false;
+  use_pixel_displacement = false;
+  pixel_displacement_max_distance = 0.0f;
 
   attr_map_offset = 0;
   prim_offset = 0;
@@ -80,6 +112,8 @@ void Geometry::clear(bool preserve_shaders)
   transform_applied = false;
   transform_negative_scaled = false;
   transform_normal = transform_identity();
+  use_pixel_displacement = false;
+  pixel_displacement_max_distance = 0.0f;
   tag_modified();
 }
 
@@ -615,6 +649,11 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     if (device_update_flags & DEVICE_MESH_DATA_NEEDS_REALLOC) {
       dscene->tri_vindex.tag_realloc();
       dscene->tri_shader.tag_realloc();
+      dscene->pixel_displacement_info.tag_realloc();
+      dscene->pixel_displacement_offset.tag_realloc();
+      dscene->pixel_displacement_data.tag_realloc();
+      dscene->pixel_displacement_bvh_offset.tag_realloc();
+      dscene->pixel_displacement_bvh_nodes.tag_realloc();
     }
 
     if (device_update_flags & DEVICE_CURVE_DATA_NEEDS_REALLOC) {
@@ -683,6 +722,11 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     /* if anything else than vertices or shaders are modified, we would need to reallocate, so
      * these are the only arrays that can be updated */
     dscene->tri_shader.tag_modified();
+    dscene->pixel_displacement_info.tag_realloc();
+    dscene->pixel_displacement_offset.tag_realloc();
+    dscene->pixel_displacement_data.tag_realloc();
+    dscene->pixel_displacement_bvh_offset.tag_realloc();
+    dscene->pixel_displacement_bvh_nodes.tag_realloc();
   }
 
   if (device_update_flags & DEVICE_CURVE_DATA_MODIFIED) {
@@ -793,6 +837,10 @@ void GeometryManager::device_update(Device *device,
 
   LOG_INFO << "Total " << scene->geometry.size() << " meshes.";
 
+  const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
+      scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
+  const bool use_pixel_displacement = scene_uses_pixel_displacement(scene, device, bvh_layout);
+
   bool true_displacement_used = false;
   bool curve_need_update_shadow_transparency = false;
   size_t num_tessellation = 0;
@@ -805,6 +853,9 @@ void GeometryManager::device_update(Device *device,
     });
 
     for (Geometry *geom : scene->geometry) {
+      geom->use_pixel_displacement = false;
+      geom->pixel_displacement_max_distance = 0.0f;
+
       if (geom->is_modified()) {
         if (geom->is_mesh() || geom->is_volume()) {
           Mesh *mesh = static_cast<Mesh *>(geom);
@@ -828,6 +879,11 @@ void GeometryManager::device_update(Device *device,
           /* Test if we need displacement. */
           if (mesh->has_true_displacement()) {
             true_displacement_used = true;
+            if (use_pixel_displacement) {
+              mesh->use_pixel_displacement = true;
+              mesh->pixel_displacement_max_distance =
+                  scene->integrator->get_pixel_displacement_max_distance();
+            }
           }
         }
       }
@@ -918,8 +974,11 @@ void GeometryManager::device_update(Device *device,
     }
 
     /* Apply tangents for generated and UVs (if any need them) or remove if not needed */
+    if (mesh->use_pixel_displacement) {
+      mesh->add_undisplaced(scene);
+    }
     mesh->update_tangents(scene, true);
-    if (!mesh->has_true_displacement()) {
+    if (!mesh->has_true_displacement() || mesh->use_pixel_displacement) {
       mesh->update_tangents(scene, false);
     }
   });
@@ -943,8 +1002,6 @@ void GeometryManager::device_update(Device *device,
   /* Device update. */
   device_free(device, dscene, false);
 
-  const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
-      scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
   geom_calc_offset(scene, bvh_layout);
   if (true_displacement_used || curve_need_update_shadow_transparency) {
     const scoped_callback_timer timer([scene](double time) {
@@ -1000,6 +1057,19 @@ void GeometryManager::device_update(Device *device,
   {
     /* Copy constant data needed by shader evaluation. */
     device->const_copy_to("data", &dscene->data, sizeof(dscene->data));
+
+    if (use_pixel_displacement && true_displacement_used) {
+      const scoped_callback_timer timer([scene](double time) {
+        if (scene->update_stats) {
+          scene->update_stats->geometry.times.add_entry(
+              {"device_update (pixel displacement cache)", time});
+        }
+      });
+      device_update_pixel_displacement_cache(device, dscene, scene, progress);
+      if (progress.get_cancel()) {
+        return;
+      }
+    }
 
     const scoped_callback_timer timer([scene](double time) {
       if (scene->update_stats) {
@@ -1200,6 +1270,11 @@ void GeometryManager::device_update(Device *device,
   dscene->prim_time.clear_modified();
   dscene->tri_shader.clear_modified();
   dscene->tri_vindex.clear_modified();
+  dscene->pixel_displacement_info.clear_modified();
+  dscene->pixel_displacement_offset.clear_modified();
+  dscene->pixel_displacement_data.clear_modified();
+  dscene->pixel_displacement_bvh_offset.clear_modified();
+  dscene->pixel_displacement_bvh_nodes.clear_modified();
   dscene->curves.clear_modified();
   dscene->curve_segments.clear_modified();
   dscene->points_shader.clear_modified();
@@ -1224,6 +1299,11 @@ void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool forc
   dscene->prim_time.free_if_need_realloc(force_free);
   dscene->tri_shader.free_if_need_realloc(force_free);
   dscene->tri_vindex.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_info.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_offset.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_data.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_bvh_offset.free_if_need_realloc(force_free);
+  dscene->pixel_displacement_bvh_nodes.free_if_need_realloc(force_free);
   dscene->curves.free_if_need_realloc(force_free);
   dscene->curve_segments.free_if_need_realloc(force_free);
   dscene->points_shader.free_if_need_realloc(force_free);

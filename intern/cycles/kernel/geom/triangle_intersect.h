@@ -14,6 +14,7 @@
 
 #include "kernel/geom/geom_intersect.h"
 #include "kernel/geom/object.h"
+#include "kernel/geom/pixel_displacement.h"
 #include "kernel/geom/triangle.h"
 
 #include "util/math_float3.h"
@@ -37,6 +38,33 @@ ccl_device_inline bool triangle_intersect(KernelGlobals kg,
   const float3 tri_a = kernel_data_fetch(attributes_float3, position_offset + tri_vindex.x);
   const float3 tri_b = kernel_data_fetch(attributes_float3, position_offset + tri_vindex.y);
   const float3 tri_c = kernel_data_fetch(attributes_float3, position_offset + tri_vindex.z);
+
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (pixel_displacement_active(kg, prim)) {
+#ifdef __VISIBILITY_FLAG__
+    if (!(kernel_data_fetch(prim_visibility, prim_addr) & visibility)) {
+      return false;
+    }
+#endif
+
+    float t;
+    float u;
+    float v;
+    const float3 verts[3] = {tri_a, tri_b, tri_c};
+    if (pixel_displacement_intersect_displaced_surface(
+            kg, P, dir, tmin, tmax, 0.5f, object, prim, false, verts, &u, &v, &t))
+    {
+      isect->object = object;
+      isect->prim = prim;
+      isect->type = PRIMITIVE_TRIANGLE;
+      isect->u = u;
+      isect->v = v;
+      isect->t = t;
+      return true;
+    }
+    return false;
+  }
+#endif
 
   float t;
   float u;
@@ -88,9 +116,27 @@ ccl_device_inline bool triangle_intersect_local(KernelGlobals kg,
   float t;
   float u;
   float v;
-  if (!ray_triangle_intersect(P, dir, tmin, tmax, tri_a, tri_b, tri_c, &u, &v, &t)) {
-    return false;
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  bool use_pixel_displacement = false;
+#endif
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (pixel_displacement_active(kg, prim)) {
+    const float3 verts[3] = {tri_a, tri_b, tri_c};
+    if (!pixel_displacement_intersect_displaced_surface(
+            kg, P, dir, tmin, tmax, 0.5f, object, prim, false, verts, &u, &v, &t))
+    {
+      return false;
+    }
+    use_pixel_displacement = true;
   }
+  else {
+#endif
+    if (!ray_triangle_intersect(P, dir, tmin, tmax, tri_a, tri_b, tri_c, &u, &v, &t)) {
+      return false;
+    }
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  }
+#endif
 
   /* If no actual hit information is requested, just return here. */
   if (max_hits == 0) {
@@ -112,7 +158,20 @@ ccl_device_inline bool triangle_intersect_local(KernelGlobals kg,
   isect->t = t;
 
   /* Record geometric normal. */
-  local_isect->Ng[hit_index] = normalize(cross(tri_b - tri_a, tri_c - tri_a));
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (use_pixel_displacement) {
+    const float3 verts[3] = {tri_a, tri_b, tri_c};
+    float3 hit_P, hit_Ng, dPdu, dPdv;
+    pixel_displacement_displaced_geometry(
+        kg, object, prim, u, v, 0.5f, false, verts, &hit_P, &hit_Ng, &dPdu, &dPdv);
+    local_isect->Ng[hit_index] = hit_Ng;
+  }
+  else {
+#endif
+    local_isect->Ng[hit_index] = normalize(cross(tri_b - tri_a, tri_c - tri_a));
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  }
+#endif
 
   return false;
 }

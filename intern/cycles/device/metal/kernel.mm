@@ -354,7 +354,7 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
   }
 
   /* metalrt options */
-  pipeline->use_metalrt = device->use_metalrt;
+  pipeline->use_metalrt = device->use_metalrt_for_current_scene();
   pipeline->kernel_features = device->kernel_features;
 
   {
@@ -500,6 +500,7 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   pipeline = best_pipeline->pipeline;
   pso_type = best_pipeline->pso_type;
   num_threads_per_block = best_pipeline->num_threads_per_block;
+  use_metalrt = best_pipeline->use_metalrt;
 
   /* Create the MTLIntersectionFunctionTables if needed. */
   if (best_pipeline->use_metalrt && device_kernel_has_intersection(best_pipeline->device_kernel)) {
@@ -516,12 +517,19 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
         /* Finally write the function handles into this pipeline's table */
         int size = int([best_pipeline->table_functions[table] count]);
         for (int i = 0; i < size; i++) {
+          id table_function = best_pipeline->table_functions[table][i];
+          if (table_function == [NSNull null]) {
+            continue;
+          }
           id<MTLFunctionHandle> handle = [pipeline
-              functionHandleWithFunction:best_pipeline->table_functions[table][i]];
+              functionHandleWithFunction:table_function];
           [intersection_func_table[table] setFunction:handle atIndex:i];
         }
       }
     }
+  }
+  else {
+    free_intersection_function_tables();
   }
 
   return true;
@@ -593,35 +601,67 @@ void MetalKernelPipeline::compile()
     auto add_intersection_functions = [&](int table_index,
                                           const char *tri_fn,
                                           const char *curve_fn = nullptr,
-                                          const char *point_fn = nullptr) {
-      table_functions[table_index] = [NSArray
-          arrayWithObjects:make_intersection_function(tri_fn),
-                           curve_fn ? make_intersection_function(curve_fn) : nil,
-                           point_fn ? make_intersection_function(point_fn) : nil,
-                           nil];
+                                          const char *point_fn = nullptr,
+                                          const char *pixel_displacement_fn = nullptr) {
+      const char *function_names[] = {tri_fn, curve_fn, point_fn, pixel_displacement_fn};
+      int function_count = 4;
+      while (function_count > 0 && function_names[function_count - 1] == nullptr) {
+        function_count--;
+      }
 
-      [unique_functions addObjectsFromArray:table_functions[table_index]];
+      NSMutableArray *functions = [NSMutableArray arrayWithCapacity:function_count];
+      for (int i = 0; i < function_count; i++) {
+        if (function_names[i]) {
+          id<MTLFunction> intersection_function = make_intersection_function(function_names[i]);
+          [functions addObject:intersection_function];
+          [unique_functions addObject:intersection_function];
+        }
+        else {
+          /* Keep the slot empty so geometry intersectionFunctionTableOffset values continue to
+           * address the same function kind. NSArray's variadic constructor cannot represent this:
+           * its first nil argument terminates the array and used to silently discard slot 3. */
+          [functions addObject:[NSNull null]];
+        }
+      }
+      table_functions[table_index] = functions;
     };
 
     add_intersection_functions(METALRT_TABLE_DEFAULT,
                                "__intersection__tri",
                                "__intersection__curve",
-                               "__intersection__point");
+                               "__intersection__point",
+                               "__intersection__pixel_displacement");
     add_intersection_functions(METALRT_TABLE_SHADOW,
                                "__intersection__tri_shadow",
                                "__intersection__curve_shadow",
-                               "__intersection__point_shadow");
+                               "__intersection__point_shadow",
+                               "__intersection__pixel_displacement_shadow");
     add_intersection_functions(METALRT_TABLE_SHADOW_ALL,
                                "__intersection__tri_shadow_all",
                                "__intersection__curve_shadow_all",
-                               "__intersection__point_shadow_all");
+                               "__intersection__point_shadow_all",
+                               "__intersection__pixel_displacement_shadow_all");
     add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
-    add_intersection_functions(METALRT_TABLE_LOCAL, "__intersection__local_tri");
+    add_intersection_functions(METALRT_TABLE_LOCAL,
+                               "__intersection__local_tri",
+                               nullptr,
+                               nullptr,
+                               "__intersection__local_pixel_displacement");
     add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");
     add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT,
-                               "__intersection__local_tri_single_hit");
+                               "__intersection__local_tri_single_hit",
+                               nullptr,
+                               nullptr,
+                               "__intersection__local_pixel_displacement_single_hit");
     add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT_MBLUR,
                                "__intersection__local_tri_single_hit_mblur");
+
+    for (const int table : {METALRT_TABLE_LOCAL, METALRT_TABLE_LOCAL_SINGLE_HIT}) {
+      if (table_functions[table].count <= 3 || table_functions[table][3] == [NSNull null]) {
+        metal_printf("MetalRT pixel-displacement local intersection table is incomplete");
+        return;
+      }
+    }
 
     linked_functions = [[NSArray arrayWithArray:[unique_functions allObjects]]
         sortedArrayUsingComparator:^NSComparisonResult(id<MTLFunction> f1, id<MTLFunction> f2) {

@@ -118,6 +118,12 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, use_custom_pixel_jitter_sample);
   NODE_SOCKET_API_ARRAY(array<float>, custom_pixel_jitter_sample);
   HaltonSequence pixel_jitter_state;
+
+  NODE_SOCKET_API(bool, use_pixel_displacement)
+  NODE_SOCKET_API(float, pixel_displacement_scale)
+  NODE_SOCKET_API(float, pixel_displacement_max_distance)
+  NODE_SOCKET_API(int, pixel_displacement_resolution)
+  NODE_SOCKET_API(int, pixel_displacement_steps)
   int pixel_jitter_frame = 0;
 
   NODE_SOCKET_API(bool, use_denoise);

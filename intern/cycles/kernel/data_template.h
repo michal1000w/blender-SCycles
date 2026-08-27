@@ -211,6 +211,11 @@ KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, sobol_index_mask)
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, blue_noise_sequence_length)
+/* Pixel-level shader displacement. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_pixel_displacement)
+KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_steps)
+KERNEL_STRUCT_MEMBER(integrator, float, pixel_displacement_scale)
+KERNEL_STRUCT_MEMBER(integrator, float, pixel_displacement_max_distance)
 /* Volume render. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_volumes)
 KERNEL_STRUCT_MEMBER(integrator, int, volume_ray_marching)
