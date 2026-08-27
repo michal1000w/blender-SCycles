@@ -214,7 +214,7 @@ ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
   }
 
   const uint info = kernel_data_fetch(pixel_displacement_info, prim);
-  const int grid = int(info & 0x7fffffffu);
+  const int grid = int(info & 0x3fffffffu);
   if (grid <= 0) {
     return false;
   }
@@ -232,6 +232,11 @@ ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
 ccl_device_inline bool pixel_displacement_cache_uses_bvh(KernelGlobals kg, const int prim)
 {
   return (kernel_data_fetch(pixel_displacement_info, prim) & 0x80000000u) != 0;
+}
+
+ccl_device_inline bool pixel_displacement_cache_is_open_surface(KernelGlobals kg, const int prim)
+{
+  return (kernel_data_fetch(pixel_displacement_info, prim) & 0x40000000u) != 0;
 }
 
 ccl_device_inline bool pixel_displacement_eval_object_cached(KernelGlobals kg,
