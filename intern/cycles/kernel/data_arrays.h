@@ -35,6 +35,11 @@ KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)
 KERNEL_DATA_ARRAY(uint, tri_shader)
 KERNEL_DATA_ARRAY(packed_uint3, tri_vindex)
 KERNEL_DATA_ARRAY(packed_float3, tri_verts)
+KERNEL_DATA_ARRAY(uint, pixel_displacement_info)
+KERNEL_DATA_ARRAY(int, pixel_displacement_offset)
+KERNEL_DATA_ARRAY(float4, pixel_displacement_data)
+KERNEL_DATA_ARRAY(int, pixel_displacement_bvh_offset)
+KERNEL_DATA_ARRAY(float4, pixel_displacement_bvh_nodes)
 
 /* curves */
 KERNEL_DATA_ARRAY(KernelCurve, curves)

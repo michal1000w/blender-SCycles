@@ -113,6 +113,8 @@ class Geometry : public Node {
   /* Shader Properties */
   bool has_volume;         /* Set in the device_update_flags(). */
   bool has_surface_bssrdf; /* Set in the device_update_flags(). */
+  bool use_pixel_displacement;
+  float pixel_displacement_max_distance;
 
   /* Position attribute. */
   const packed_float3 *get_position() const;
@@ -298,6 +300,11 @@ class GeometryManager {
 
   void device_update_mesh(Device *device, DeviceScene *dscene, Scene *scene, Progress &progress);
 
+  bool device_update_pixel_displacement_cache(Device *device,
+                                              DeviceScene *dscene,
+                                              Scene *scene,
+                                              Progress &progress);
+
   void device_update_attributes(Device *device,
                                 DeviceScene *dscene,
                                 Scene *scene,
@@ -309,5 +316,7 @@ class GeometryManager {
 
   void device_update_volume_images(Device *device, Scene *scene, Progress &progress);
 };
+
+bool scene_allows_pixel_displacement_metalrt(const Scene *scene);
 
 CCL_NAMESPACE_END

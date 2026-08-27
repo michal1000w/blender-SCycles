@@ -47,9 +47,17 @@ bool MetalDevice::is_device_cancelled(const int ID)
   return get_device_by_ID(ID, lock) == nullptr;
 }
 
+bool MetalDevice::use_metalrt_for_current_scene() const
+{
+  const bool use_pixel_displacement = scene_use_pixel_displacement &&
+                                      scene_pixel_displacement_scale != 0.0f &&
+                                      scene_pixel_displacement_max_distance > 0.0f;
+  return use_metalrt && (!use_pixel_displacement || scene_pixel_displacement_metalrt_compatible);
+}
+
 BVHLayoutMask MetalDevice::get_bvh_layout_mask(const uint64_t /*kernel_features*/) const
 {
-  return use_metalrt ? BVH_LAYOUT_METAL : BVH_LAYOUT_BVH2;
+  return use_metalrt_for_current_scene() ? BVH_LAYOUT_METAL : BVH_LAYOUT_BVH2;
 }
 
 void MetalDevice::set_error(const string &error)
@@ -338,6 +346,17 @@ bool MetalDevice::use_local_atomic_sort() const
   return DebugFlags().metal.use_local_atomic_sort;
 }
 
+void MetalDevice::set_scene_pixel_displacement(const bool enabled,
+                                               const float scale,
+                                               const float max_distance,
+                                               const bool metalrt_compatible)
+{
+  scene_use_pixel_displacement = enabled;
+  scene_pixel_displacement_scale = scale;
+  scene_pixel_displacement_max_distance = max_distance;
+  scene_pixel_displacement_metalrt_compatible = metalrt_compatible;
+}
+
 string MetalDevice::preprocess_source(MetalPipelineType pso_type,
                                       const uint64_t kernel_features,
                                       string *source)
@@ -351,7 +370,18 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
     global_defines += "#define __KERNEL_LOCAL_ATOMIC_SORT__\n";
   }
 
-  if (use_metalrt) {
+  if (pso_type == PSO_SPECIALIZED_INTERSECT && scene_use_pixel_displacement &&
+      scene_pixel_displacement_scale != 0.0f && scene_pixel_displacement_max_distance > 0.0f)
+  {
+    global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT__\n";
+  }
+  if (pso_type == PSO_SPECIALIZED_SHADE && scene_use_pixel_displacement &&
+      scene_pixel_displacement_scale != 0.0f && scene_pixel_displacement_max_distance > 0.0f)
+  {
+    global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__\n";
+  }
+
+  if (use_metalrt_for_current_scene()) {
     global_defines += "#define __KERNEL_METALRT__\n";
     if (motion_blur) {
       global_defines += "#define __METALRT_MOTION__\n";
@@ -522,7 +552,7 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
   MD5Hash md5;
   md5.append(constant_values);
   md5.append(source[pso_type]);
-  if (use_metalrt) {
+  if (use_metalrt_for_current_scene()) {
     md5.append(string_printf("metalrt_features=%llu", kernel_features & METALRT_FEATURE_MASK));
   }
   if (pso_type != PSO_GENERIC) {
@@ -923,6 +953,24 @@ bool MetalDevice::is_ready(string &status) const
     return false;
   }
 
+  if (scene_use_pixel_displacement && scene_pixel_displacement_scale != 0.0f &&
+      scene_pixel_displacement_max_distance > 0.0f)
+  {
+    num_loaded = MetalDeviceKernels::get_loaded_kernel_count(this, PSO_SPECIALIZED_INTERSECT);
+    if (num_loaded < DEVICE_KERNEL_NUM) {
+      status = string_printf(
+          "%d / %d pixel displacement intersection kernels loaded", num_loaded, DEVICE_KERNEL_NUM);
+      return false;
+    }
+
+    num_loaded = MetalDeviceKernels::get_loaded_kernel_count(this, PSO_SPECIALIZED_SHADE);
+    if (num_loaded < DEVICE_KERNEL_NUM) {
+      status = string_printf(
+          "%d / %d pixel displacement shading kernels loaded", num_loaded, DEVICE_KERNEL_NUM);
+      return false;
+    }
+  }
+
   if (int num_requests = MetalDeviceKernels::num_incomplete_specialization_requests()) {
     status = string_printf("%d kernels to optimize", num_requests);
   }
@@ -968,8 +1016,16 @@ bool MetalDevice::set_bvh_limits(size_t instance_count, size_t max_prim_count)
 void MetalDevice::optimize_for_scene(Scene *scene)
 {
   MetalPipelineType specialization_level = kernel_specialization_level;
+  const bool use_pixel_displacement = scene_use_pixel_displacement &&
+                                      scene_pixel_displacement_scale != 0.0f &&
+                                      scene_pixel_displacement_max_distance > 0.0f;
 
-  if (!scene->params.background) {
+  if (use_pixel_displacement) {
+    specialization_level = (MetalPipelineType)max(int(specialization_level),
+                                                  int(PSO_SPECIALIZED_SHADE));
+  }
+
+  if (!scene->params.background && !use_pixel_displacement) {
     /* In live viewport, don't specialize beyond intersection kernels for responsiveness. */
     specialization_level = (MetalPipelineType)min(specialization_level, PSO_SPECIALIZED_INTERSECT);
   }
@@ -997,7 +1053,9 @@ void MetalDevice::optimize_for_scene(Scene *scene)
   }
 
   if (specialize_in_background) {
-    if (MetalDeviceKernels::num_incomplete_specialization_requests() == 0) {
+    if (use_pixel_displacement ||
+        MetalDeviceKernels::num_incomplete_specialization_requests() == 0)
+    {
       dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
                      specialize_kernels_fn);
     }
@@ -1017,7 +1075,13 @@ void MetalDevice::const_copy_to(const char *name, void *host, const size_t size)
     memcpy((uint8_t *)&launch_params->data, host, sizeof(KernelData));
 
     /* Refresh the kernels_md5 checksums for specialized kernel sets. */
-    for (int level = 1; level <= int(kernel_specialization_level); level++) {
+    const bool use_pixel_displacement = scene_use_pixel_displacement &&
+                                        scene_pixel_displacement_scale != 0.0f &&
+                                        scene_pixel_displacement_max_distance > 0.0f;
+    const int specialization_level = use_pixel_displacement ? max(int(kernel_specialization_level),
+                                                                  int(PSO_SPECIALIZED_SHADE)) :
+                                                              int(kernel_specialization_level);
+    for (int level = 1; level <= specialization_level; level++) {
       refresh_source_and_kernels_md5(MetalPipelineType(level));
     }
     return;

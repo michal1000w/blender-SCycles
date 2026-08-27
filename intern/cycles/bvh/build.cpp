@@ -28,6 +28,32 @@
 
 CCL_NAMESPACE_BEGIN
 
+static void grow_pixel_displacement_bounds(const Mesh *mesh,
+                                           const size_t triangle_index,
+                                           BoundBox &bounds)
+{
+  if (!bounds.valid() || !mesh->use_pixel_displacement ||
+      !mesh->triangle_has_true_displacement(triangle_index))
+  {
+    return;
+  }
+
+  const float pad = mesh->pixel_displacement_max_distance;
+  if (pad <= 0.0f) {
+    return;
+  }
+
+  float3 normal_pad;
+  if (mesh->triangle_normal_displacement_bounds_pad(triangle_index, pad, &normal_pad)) {
+    bounds.min -= normal_pad;
+    bounds.max += normal_pad;
+    return;
+  }
+
+  bounds.grow(bounds.min, pad);
+  bounds.grow(bounds.max, pad);
+}
+
 /* Constructor / Destructor */
 
 BVHBuild::BVHBuild(const vector<Object *> &objects_,
@@ -69,6 +95,7 @@ void BVHBuild::add_reference_triangles(BoundBox &root,
     if (!has_motion) {
       BoundBox bounds = BoundBox::empty;
       t.bounds_grow(verts, bounds);
+      grow_pixel_displacement_bounds(mesh, j, bounds);
       if (bounds.valid() && t.valid(verts)) {
         references.push_back(BVHReference(bounds, j, object_index, primitive_type));
         root.grow(bounds);
@@ -85,6 +112,7 @@ void BVHBuild::add_reference_triangles(BoundBox &root,
       for (int attr_step = 0; attr_step < attr_P->num_motion_steps(); attr_step++) {
         t.bounds_grow(attr_P->data<packed_float3>(attr_step), bounds);
       }
+      grow_pixel_displacement_bounds(mesh, j, bounds);
       if (bounds.valid()) {
         references.push_back(BVHReference(bounds, j, object_index, primitive_type));
         root.grow(bounds);
@@ -120,6 +148,7 @@ void BVHBuild::add_reference_triangles(BoundBox &root,
         curr_bounds.grow(curr_verts[2]);
         BoundBox bounds = prev_bounds;
         bounds.grow(curr_bounds);
+        grow_pixel_displacement_bounds(mesh, j, bounds);
         if (bounds.valid()) {
           const float prev_time = (float)(bvh_step - 1) * num_bvh_steps_inv_1;
           references.push_back(

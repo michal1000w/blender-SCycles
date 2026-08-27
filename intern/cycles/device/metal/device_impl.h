@@ -42,6 +42,10 @@ class MetalDevice : public Device {
   bool use_metalrt_extended_limits = false;
   bool motion_blur = false;
   bool use_pcmi = false;
+  bool scene_use_pixel_displacement = false;
+  bool scene_pixel_displacement_metalrt_compatible = false;
+  float scene_pixel_displacement_scale = 1.0f;
+  float scene_pixel_displacement_max_distance = 0.0f;
 
   id<MTLBuffer> blas_buffer = nil;
 
@@ -132,9 +136,16 @@ class MetalDevice : public Device {
 
   bool use_local_atomic_sort() const;
 
+  bool use_metalrt_for_current_scene() const;
+
   string preprocess_source(MetalPipelineType pso_type,
                            uint64_t kernel_features,
                            string *source = nullptr);
+
+  void set_scene_pixel_displacement(const bool enabled,
+                                    const float scale,
+                                    const float max_distance,
+                                    const bool metalrt_compatible) override;
 
   void refresh_source_and_kernels_md5(MetalPipelineType pso_type);
 

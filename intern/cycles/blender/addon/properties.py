@@ -902,6 +902,54 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    use_pixel_displacement: BoolProperty(
+        name="Pixel Level Displacement",
+        description="Evaluate shader displacement per ray hit instead of modifying mesh geometry before rendering",
+        default=True,
+        update=update_render_passes,
+    )
+
+    pixel_displacement_scale: FloatProperty(
+        name="Scale",
+        description="Multiplier applied to shader displacement when using pixel level displacement",
+        min=0.0,
+        soft_max=10.0,
+        default=1.0,
+    )
+
+    pixel_displacement_max_distance: FloatProperty(
+        name="Max Distance",
+        description="Conservative object-space distance used to expand displaced triangle bounds",
+        min=0.0,
+        soft_min=0.0,
+        soft_max=1.0,
+        default=0.1,
+        unit='LENGTH',
+    )
+
+    pixel_displacement_steps: IntProperty(
+        name="Steps",
+        description="Resolution of the per-hit displaced surface search",
+        min=4,
+        max=128,
+        soft_min=8,
+        soft_max=64,
+        default=32,
+    )
+
+    pixel_displacement_resolution: IntProperty(
+        name="Micromesh Resolution",
+        description=(
+            "Maximum cached displacement samples across one UV tile; this controls visible "
+            "microtriangle detail independently of the base mesh subdivision"
+        ),
+        min=64,
+        max=2048,
+        soft_min=256,
+        soft_max=2048,
+        default=1024,
+    )
+
     seed: IntProperty(
         name="Seed",
         description="Seed value for integrator to get different noise patterns",

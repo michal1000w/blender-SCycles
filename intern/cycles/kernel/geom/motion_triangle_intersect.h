@@ -21,6 +21,7 @@
 #include "kernel/geom/geom_intersect.h"
 #include "kernel/geom/motion_triangle.h"
 #include "kernel/geom/object.h"
+#include "kernel/geom/pixel_displacement.h"
 
 #include "util/math_intersect.h"
 
@@ -45,6 +46,32 @@ ccl_device_inline bool motion_triangle_intersect(KernelGlobals kg,
   /* Get vertex locations for intersection. */
   float3 verts[3];
   motion_triangle_vertices(kg, object, prim, time, verts);
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (pixel_displacement_active(kg, prim)) {
+#ifdef __VISIBILITY_FLAG__
+    if (!(kernel_data_fetch(prim_visibility, prim_addr) & visibility)) {
+      return false;
+    }
+#endif
+
+    float t;
+    float u;
+    float v;
+    if (pixel_displacement_intersect_displaced_surface(
+            kg, P, dir, tmin, tmax, time, object, prim, true, verts, &u, &v, &t))
+    {
+      isect->t = t;
+      isect->u = u;
+      isect->v = v;
+      isect->prim = prim;
+      isect->object = object;
+      isect->type = PRIMITIVE_MOTION_TRIANGLE;
+      return true;
+    }
+    return false;
+  }
+#endif
+
   /* Ray-triangle intersection, unoptimized. */
   float t;
   float u;
@@ -94,9 +121,26 @@ ccl_device_inline bool motion_triangle_intersect_local(KernelGlobals kg,
   float t;
   float u;
   float v;
-  if (!ray_triangle_intersect(P, dir, tmin, tmax, verts[0], verts[1], verts[2], &u, &v, &t)) {
-    return false;
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  bool use_pixel_displacement = false;
+#endif
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (pixel_displacement_active(kg, prim)) {
+    if (!pixel_displacement_intersect_displaced_surface(
+            kg, P, dir, tmin, tmax, time, object, prim, true, verts, &u, &v, &t))
+    {
+      return false;
+    }
+    use_pixel_displacement = true;
   }
+  else {
+#endif
+    if (!ray_triangle_intersect(P, dir, tmin, tmax, verts[0], verts[1], verts[2], &u, &v, &t)) {
+      return false;
+    }
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  }
+#endif
 
   /* If no actual hit information is requested, just return here. */
   if (max_hits == 0) {
@@ -118,7 +162,17 @@ ccl_device_inline bool motion_triangle_intersect_local(KernelGlobals kg,
   isect->type = PRIMITIVE_MOTION_TRIANGLE;
 
   /* Record geometric normal. */
-  local_isect->Ng[hit_index] = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  if (use_pixel_displacement) {
+    const uint object_flag = kernel_data_fetch(object_flag, object);
+    local_isect->Ng[hit_index] = pixel_displacement_face_normal(verts, object_flag);
+  }
+  else {
+#endif
+    local_isect->Ng[hit_index] = normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+  }
+#endif
 
   return false;
 }

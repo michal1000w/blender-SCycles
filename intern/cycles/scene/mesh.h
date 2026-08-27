@@ -172,6 +172,10 @@ class Mesh : public Geometry {
   size_t face_offset;
   size_t corner_offset;
 
+  /* Tight render-time bounds of cached pixel-displacement micromeshes. Not serialized and only
+   * consumed by hardware ray-tracing backends while building acceleration structures. */
+  array<BoundBox> pixel_displacement_bounds;
+
  private:
   size_t num_subd_added_verts;
   size_t num_subd_faces;
@@ -214,6 +218,11 @@ class Mesh : public Geometry {
 
   bool has_motion_blur() const override;
   PrimitiveType primitive_type() const override;
+  bool triangle_has_true_displacement(const size_t i) const;
+  bool triangle_has_normal_only_displacement(const size_t i) const;
+  bool triangle_normal_displacement_bounds_pad(const size_t i,
+                                               const float max_distance,
+                                               float3 *r_pad) const;
 
   void tessellate(SubdParams &params);
 
