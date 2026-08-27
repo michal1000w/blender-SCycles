@@ -10,11 +10,14 @@
 #include "scene/bake.h"
 #include "scene/camera.h"
 #include "scene/film.h"
+#include "scene/geometry.h"
 #include "scene/integrator.h"
 #include "scene/light.h"
 #include "scene/object.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
+#include "scene/shader_graph.h"
+#include "scene/shader_nodes.h"
 #include "scene/stats.h"
 #include "scene/tabulated_sobol.h"
 #include "scene/volume.h"
@@ -49,6 +52,87 @@ static bool device_supports_metal_features(const Device *device)
 bool Integrator::use_photon_mapping_on_device(const Device *device) const
 {
   return get_use_photon_mapping() && device_supports_metal_features(device);
+}
+
+static bool photon_input_is_varying(ShaderNode *node, const char *name)
+{
+  const ShaderInput *input = node->input(name);
+  return input && input->link;
+}
+
+static bool photon_roughness_can_be_sharp(ShaderNode *node,
+                                          const float roughness,
+                                          const float threshold)
+{
+  return photon_input_is_varying(node, "Roughness") || roughness <= 1.0e-6f ||
+         roughness < threshold;
+}
+
+/* Conservative host-side identification of objects worth targeting with photons. This only
+ * changes the emission PDF: a full-scene component remains in the mixture, so procedural or OSL
+ * shaders which cannot be classified here are never excluded. */
+static bool shader_can_form_photon_caustics(Shader *shader, const float roughness_threshold)
+{
+  if (!shader || !shader->graph) {
+    return false;
+  }
+
+  for (ShaderNode *node : shader->graph->nodes) {
+    if (node->type == GlassBsdfNode::get_node_type()) {
+      const GlassBsdfNode *bsdf = static_cast<const GlassBsdfNode *>(node);
+      if (photon_roughness_can_be_sharp(node, bsdf->get_roughness(), roughness_threshold)) {
+        return true;
+      }
+    }
+    else if (node->type == RefractionBsdfNode::get_node_type()) {
+      const RefractionBsdfNode *bsdf = static_cast<const RefractionBsdfNode *>(node);
+      if (photon_roughness_can_be_sharp(node, bsdf->get_roughness(), roughness_threshold)) {
+        return true;
+      }
+    }
+    else if (node->type == GlossyBsdfNode::get_node_type()) {
+      const GlossyBsdfNode *bsdf = static_cast<const GlossyBsdfNode *>(node);
+      if (photon_roughness_can_be_sharp(node, bsdf->get_roughness(), roughness_threshold)) {
+        return true;
+      }
+    }
+    else if (node->type == MetallicBsdfNode::get_node_type()) {
+      const MetallicBsdfNode *bsdf = static_cast<const MetallicBsdfNode *>(node);
+      if (photon_roughness_can_be_sharp(node, bsdf->get_roughness(), roughness_threshold)) {
+        return true;
+      }
+    }
+    else if (node->type == PrincipledBsdfNode::get_node_type()) {
+      const PrincipledBsdfNode *bsdf = static_cast<const PrincipledBsdfNode *>(node);
+      if (!photon_roughness_can_be_sharp(node, bsdf->get_roughness(), roughness_threshold)) {
+        continue;
+      }
+      const bool transmission = photon_input_is_varying(node, "Transmission Weight") ||
+                                bsdf->get_transmission_weight() > CLOSURE_WEIGHT_CUTOFF;
+      const bool metallic = photon_input_is_varying(node, "Metallic") ||
+                            bsdf->get_metallic() > CLOSURE_WEIGHT_CUTOFF;
+      const bool sharp_dielectric = bsdf->get_roughness() < min(roughness_threshold, 0.35f) &&
+                                    bsdf->get_specular_ior_level() > CLOSURE_WEIGHT_CUTOFF;
+      if (transmission || metallic || sharp_dielectric) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool object_can_form_photon_caustics(Object *object, const float roughness_threshold)
+{
+  Geometry *geometry = object->get_geometry();
+  if (!geometry || geometry->is_light()) {
+    return false;
+  }
+  for (Node *node : geometry->get_used_shaders()) {
+    if (shader_can_form_photon_caustics(static_cast<Shader *>(node), roughness_threshold)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* Halton sequence generator using only integer numbers.
@@ -330,8 +414,12 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->photon_roughness_threshold = clamp(photon_roughness_threshold, 0.0f, 1.0f);
   kintegrator->photon_normal_threshold = clamp(photon_normal_threshold, -1.0f, 1.0f);
   BoundBox photon_bounds = BoundBox::empty;
-  for (const Object *object : scene->objects) {
+  BoundBox photon_target_bounds = BoundBox::empty;
+  for (Object *object : scene->objects) {
     photon_bounds.grow_safe(object->bounds);
+    if (object_can_form_photon_caustics(object, kintegrator->photon_roughness_threshold)) {
+      photon_target_bounds.grow_safe(object->bounds);
+    }
   }
   if (photon_bounds.valid()) {
     const float3 center = photon_bounds.center();
@@ -340,6 +428,14 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   }
   else {
     kintegrator->photon_scene = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+  }
+  if (photon_target_bounds.valid()) {
+    const float3 center = photon_target_bounds.center();
+    const float radius = max(0.5f * len(photon_target_bounds.size()), 1.0e-3f);
+    kintegrator->photon_target = make_float4(center.x, center.y, center.z, radius);
+  }
+  else {
+    kintegrator->photon_target = kintegrator->photon_scene;
   }
 
   kintegrator->filter_closures = 0;
