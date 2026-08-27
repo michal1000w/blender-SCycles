@@ -1563,7 +1563,9 @@ struct KernelLightDistribution {
 static_assert_align(KernelLightDistribution, 16);
 
 /* Compact surface-photon record. `next` is a one-based index into the same array, with zero
- * terminating a spatial-hash chain. Power is stored in the renderer's working color space. */
+ * terminating a spatial-hash chain. Spectral photons store power before the wavelength sampling
+ * weight is applied; non-spectral photons store regular working-space power. `time_wavelength`
+ * packs 16-bit motion time, a 15-bit wavelength sample, and the spectral flag. */
 struct ccl_align(16) KernelPhoton {
   packed_float3 P;
   uint next;
@@ -1571,10 +1573,11 @@ struct ccl_align(16) KernelPhoton {
   int emitter_object;
   uint direction;
   uint normal;
-  float time;
+  uint time_wavelength;
   int receiver_object;
 };
 static_assert_align(KernelPhoton, 16);
+static_assert(sizeof(KernelPhoton) == 48, "KernelPhoton must remain a compact 48-byte record");
 
 /* Bounding box. */
 struct KernelBoundingBox {

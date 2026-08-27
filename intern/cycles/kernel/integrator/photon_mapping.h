@@ -11,6 +11,7 @@
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/geom/shader_data.h"
+#include "kernel/integrator/path_state.h"
 #include "kernel/integrator/surface_shader.h"
 #include "kernel/light/distribution.h"
 #include "kernel/light/sample.h"
@@ -19,6 +20,46 @@
 #include "util/atomic.h"
 
 CCL_NAMESPACE_BEGIN
+
+/* Keep the photon record at 48 bytes. Half precision is more than sufficient for shutter time,
+ * while 15 bits locate a wavelength to substantially better than 0.1 nm. */
+ccl_device_inline uint photon_pack_time_wavelength(const float time,
+                                                   const float wavelength_rand,
+                                                   const bool spectral)
+{
+  const uint packed_time = uint(clamp(time, 0.0f, 1.0f) * 65535.0f + 0.5f);
+  const uint packed_wavelength = uint(clamp(wavelength_rand, 0.0f, 1.0f) * 32767.0f + 0.5f);
+  return packed_time | (packed_wavelength << 16) | (spectral ? 0x80000000u : 0u);
+}
+
+ccl_device_inline float photon_unpack_time(const uint packed)
+{
+  return float(packed & 0xffffu) * (1.0f / 65535.0f);
+}
+
+ccl_device_inline float photon_unpack_wavelength_rand(const uint packed)
+{
+  return float((packed >> 16) & 0x7fffu) * (1.0f / 32767.0f);
+}
+
+ccl_device_inline bool photon_is_spectral(const uint packed)
+{
+  return (packed & 0x80000000u) != 0u;
+}
+
+#ifdef __SPECTRAL__
+/* Epanechnikov reconstruction over wavelength. Its support is narrow enough to preserve caustic
+ * separation but wide enough for useful photon counts in an interactive map. The normalization
+ * is in the same [0, 1] wavelength measure as sample_wavelength()'s returned probability. */
+ccl_device_inline float photon_spectral_kernel(const float photon_wavelength,
+                                               const float camera_wavelength)
+{
+  constexpr float bandwidth = 0.02f;
+  constexpr float wavelength_range = WAVELENGTH_CIE_MAX - WAVELENGTH_CIE_MIN;
+  const float x = (photon_wavelength - camera_wavelength) / bandwidth;
+  return (fabsf(x) < 1.0f) ? 0.75f * (1.0f - sqr(x)) * wavelength_range / bandwidth : 0.0f;
+}
+#endif
 
 ccl_device_inline uint photon_hash_cell(const int3 cell, const int time_bin, const uint hash_size)
 {
@@ -338,7 +379,9 @@ ccl_device_inline void photon_store(KernelGlobals kg,
                                     const Spectrum power,
                                     const int emitter_object,
                                     const int receiver_object,
-                                    const float time)
+                                    const float time,
+                                    const float wavelength_rand,
+                                    const bool spectral)
 {
   const uint slot = atomic_fetch_and_add_uint32(kernel_integrator_state.photon_stored, 1);
   if (slot >= kernel_integrator_state.photon_capacity) {
@@ -351,7 +394,7 @@ ccl_device_inline void photon_store(KernelGlobals kg,
   photon->emitter_object = emitter_object;
   photon->direction = packed_normal(D).value;
   photon->normal = packed_normal(N).value;
-  photon->time = time;
+  photon->time_wavelength = photon_pack_time_wavelength(time, wavelength_rand, spectral);
   photon->receiver_object = receiver_object;
 
   const int3 cell = photon_cell(P, kernel_integrator_state.photon_radius);
@@ -368,6 +411,16 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
   uint rng = lcg_init(
       hash_uint3(photon_index, iteration, uint(kernel_data.integrator.seed) ^ 0x70686f74u));
   photon_state_init(state, rng, iteration);
+
+#ifdef __SPECTRAL__
+  /* shader_setup_wavelength() derives this same sample from the immutable photon path state.
+   * Keep it explicitly for the photon record even when the receiver shader itself does not
+   * require a wavelength. */
+  const float photon_wavelength_rand = path_rng_1D(
+      kg, rng, iteration, PRNG_BOUNCE_NUM + PRNG_WAVELENGTH);
+#else
+  const float photon_wavelength_rand = 0.0f;
+#endif
 
   Ray ray ccl_optional_struct_init;
   Spectrum throughput;
@@ -387,11 +440,21 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     }
     ShaderData sd;
     shader_setup_from_ray(kg, &sd, &ray, &isect);
+#ifdef __SPECTRAL__
+    shader_setup_wavelength(kg, &sd, state);
+#endif
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
         kg, state, &sd, nullptr, path_visibility, INTEGRATOR_STATE(state, path, flag));
     if (sd.runtime_flag & SR_CACHE_MISS) {
       return;
     }
+#ifdef __SPECTRAL__
+    if (sd.runtime_flag & SR_BSDF_HAS_DISPERSION) {
+      /* Keep raw photon power and defer the wavelength PDF/color-matching weight until gather.
+       * This permits wavelength matching when the eye path is spectral. */
+      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;
+    }
+#endif
     surface_shader_prepare_closures(kg, state, &sd, path_visibility);
 
     bool has_receiver = false;
@@ -399,7 +462,16 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       has_receiver |= surface_shader_photon_mapping_receiver(&sd.closure[i], sd.wi);
     }
     if (had_specular && has_receiver) {
-      photon_store(kg, sd.P, sd.Ng, ray.D, throughput, emitter_object, sd.object, time);
+      photon_store(kg,
+                   sd.P,
+                   sd.Ng,
+                   ray.D,
+                   throughput,
+                   emitter_object,
+                   sd.object,
+                   time,
+                   photon_wavelength_rand,
+                   (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u);
       return;
     }
 
@@ -419,16 +491,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     float eta = 1.0f;
     float avg_roughness_squared = 0.0f;
     const int label = surface_shader_bsdf_sample_closure(
-        kg,
-        &sd,
-        sc,
-        rand_bsdf,
-        &eval,
-        &wo,
-        &pdf,
-        &sampled_roughness,
-        &eta,
-        avg_roughness_squared);
+        kg, &sd, sc, rand_bsdf, &eval, &wo, &pdf, &sampled_roughness, &eta, avg_roughness_squared);
     if (!(pdf > 0.0f) || bsdf_eval_is_zero(&eval)) {
       return;
     }
@@ -490,11 +553,28 @@ ccl_device_inline bool photon_mapping_matches(KernelGlobals kg,
                                               ccl_private const ShaderData *sd,
                                               ccl_global const KernelPhoton *photon,
                                               const int time_bin,
-                                              const float radius2)
+                                              const float radius2,
+                                              const bool camera_spectral,
+                                              const float camera_wavelength)
 {
-  if (photon_time_bin(photon->time) != time_bin || photon->receiver_object != sd->object) {
+  if (photon_time_bin(photon_unpack_time(photon->time_wavelength)) != time_bin ||
+      photon->receiver_object != sd->object)
+  {
     return false;
   }
+
+#ifdef __SPECTRAL__
+  if (camera_spectral && photon_is_spectral(photon->time_wavelength)) {
+    const float photon_wavelength = sample_wavelength(
+        photon_unpack_wavelength_rand(photon->time_wavelength));
+    if (photon_spectral_kernel(photon_wavelength, camera_wavelength) == 0.0f) {
+      return false;
+    }
+  }
+#else
+  (void)camera_spectral;
+  (void)camera_wavelength;
+#endif
 
   const float3 delta = photon->P - sd->P;
   const float normal_distance = dot(delta, sd->Ng);
@@ -543,6 +623,17 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
   const float radius2 = sqr(radius);
   const int3 base = photon_cell(sd->P, radius);
   const int time_bin = photon_time_bin(INTEGRATOR_STATE(state, ray, time));
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  const bool camera_spectral = (path_flag & PATH_RAY_SPECTRAL) != 0u;
+#ifdef __SPECTRAL__
+  const float camera_wavelength_rand = path_rng_1D(kg,
+                                                   INTEGRATOR_STATE(state, path, rng_pixel),
+                                                   INTEGRATOR_STATE(state, path, sample),
+                                                   PRNG_BOUNCE_NUM + PRNG_WAVELENGTH);
+  const float camera_wavelength = sample_wavelength(camera_wavelength_rand);
+#else
+  const float camera_wavelength = 0.0f;
+#endif
   int num_valid = 0;
 
   /* Counting is much cheaper than BSDF evaluation and removes the energy loss of truncating a
@@ -560,7 +651,9 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
           }
           const ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[node - 1u];
           node = photon->next;
-          if (photon_mapping_matches(kg, sd, photon, time_bin, radius2)) {
+          if (photon_mapping_matches(
+                  kg, sd, photon, time_bin, radius2, camera_spectral, camera_wavelength))
+          {
             num_valid++;
           }
         }
@@ -596,7 +689,9 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
           const uint photon_index = node - 1u;
           const ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[photon_index];
           node = photon->next;
-          if (!photon_mapping_matches(kg, sd, photon, time_bin, radius2)) {
+          if (!photon_mapping_matches(
+                  kg, sd, photon, time_bin, radius2, camera_spectral, camera_wavelength))
+          {
             continue;
           }
 
@@ -633,13 +728,27 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
           }
           const float q = distance2 / radius2;
           const float kernel_weight = 2.0f * (1.0f - q) / (M_PI_F * radius2);
-          const Spectrum photon_L = rgb_to_spectrum(make_float3(photon->power)) * receiver_eval *
+          Spectrum photon_power = rgb_to_spectrum(make_float3(photon->power));
+#ifdef __SPECTRAL__
+          if (photon_is_spectral(photon->time_wavelength)) {
+            const float wavelength_rand = photon_unpack_wavelength_rand(photon->time_wavelength);
+            if (camera_spectral) {
+              float wavelength_pdf;
+              const float wavelength = sample_wavelength(wavelength_rand, &wavelength_pdf);
+              photon_power *= photon_spectral_kernel(wavelength, camera_wavelength) /
+                              wavelength_pdf;
+            }
+            else {
+              photon_power *= dispersion_throughput_weight(kg, wavelength_rand);
+            }
+          }
+#endif
+          const Spectrum photon_L = photon_power * receiver_eval *
                                     (kernel_weight * selection_weight *
                                      float(kernel_data.integrator.photon_time_bins));
           sum += photon_L;
 
 #ifdef __PASSES__
-          const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
           if (kernel_data.film.pass_lightgroup != PASS_UNUSED &&
               !(path_flag & PATH_RAY_SHADOW_CATCHER_HIT))
           {
