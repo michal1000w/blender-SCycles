@@ -116,27 +116,12 @@ ccl_device_inline bool triangle_intersect_local(KernelGlobals kg,
   float t;
   float u;
   float v;
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  bool use_pixel_displacement = false;
-#endif
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (pixel_displacement_active(kg, prim)) {
-    const float3 verts[3] = {tri_a, tri_b, tri_c};
-    if (!pixel_displacement_intersect_displaced_surface(
-            kg, P, dir, tmin, tmax, 0.5f, object, prim, false, verts, &u, &v, &t))
-    {
-      return false;
-    }
-    use_pixel_displacement = true;
+  /* Local rays are used by BSSRDF, AO, and bevel queries. Intersect the base surface here:
+   * repeatedly evaluating the virtual micromesh for every local candidate can exceed the Metal
+   * GPU watchdog, while the local effects already approximate transport inside the base object. */
+  if (!ray_triangle_intersect(P, dir, tmin, tmax, tri_a, tri_b, tri_c, &u, &v, &t)) {
+    return false;
   }
-  else {
-#endif
-    if (!ray_triangle_intersect(P, dir, tmin, tmax, tri_a, tri_b, tri_c, &u, &v, &t)) {
-      return false;
-    }
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  }
-#endif
 
   /* If no actual hit information is requested, just return here. */
   if (max_hits == 0) {
@@ -158,20 +143,7 @@ ccl_device_inline bool triangle_intersect_local(KernelGlobals kg,
   isect->t = t;
 
   /* Record geometric normal. */
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (use_pixel_displacement) {
-    const float3 verts[3] = {tri_a, tri_b, tri_c};
-    float3 hit_P, hit_Ng, dPdu, dPdv;
-    pixel_displacement_displaced_geometry(
-        kg, object, prim, u, v, 0.5f, false, verts, &hit_P, &hit_Ng, &dPdu, &dPdv);
-    local_isect->Ng[hit_index] = hit_Ng;
-  }
-  else {
-#endif
-    local_isect->Ng[hit_index] = normalize(cross(tri_b - tri_a, tri_c - tri_a));
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  }
-#endif
+  local_isect->Ng[hit_index] = normalize(cross(tri_b - tri_a, tri_c - tri_a));
 
   return false;
 }

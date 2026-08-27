@@ -48,6 +48,21 @@ CCL_NAMESPACE_BEGIN
 
 static const char *cryptomatte_prefix = "Crypto";
 
+static bool device_uses_metal(const DeviceInfo &device)
+{
+  if (device.type == DEVICE_METAL) {
+    return true;
+  }
+
+  for (const DeviceInfo &subdevice : device.multi_devices) {
+    if (device_uses_metal(subdevice)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /* Constructor */
 
 BlenderSync::BlenderSync(blender::RenderEngine &b_engine,
@@ -1159,6 +1174,15 @@ SessionParams BlenderSync::get_session_params(blender::RenderEngine &b_engine,
   if (background) {
     params.use_auto_tile = true;
     params.tile_size = max(get_int(cscene, "tile_size"), 8);
+
+    /* Keep each Metal dispatch below the macOS GPU watchdog limit for virtual micromesh
+     * intersection. A small tile changes scheduling only; resolution and samples are unchanged. */
+    if (device_uses_metal(params.device) && get_boolean(cscene, "use_pixel_displacement") &&
+        get_float(cscene, "pixel_displacement_scale") != 0.0f &&
+        get_float(cscene, "pixel_displacement_max_distance") > 0.0f)
+    {
+      params.tile_size = min(params.tile_size, 32);
+    }
   }
   else {
     params.use_auto_tile = false;
