@@ -342,6 +342,7 @@ copy_package_archives() {
 
 verify_installed_cycles_sources() {
   local installed_source
+  local installed_addon
   local relative_path
   local source_file
   local installed_file
@@ -352,10 +353,18 @@ verify_installed_cycles_sources() {
   [ -n "$installed_source" ] || die "Installed Cycles source directory was not found in Blender.app."
 
   runtime_sources=(
+    kernel/data_template.h
     kernel/device/metal/bvh.h
     kernel/device/metal/kernel.metal
+    kernel/device/gpu/kernel.h
     kernel/geom/pixel_displacement_shader.h
+    kernel/integrator/path_state.h
+    kernel/integrator/photon_mapping.h
+    kernel/integrator/shade_surface.h
+    kernel/integrator/state.h
     kernel/integrator/subsurface.h
+    kernel/integrator/surface_shader.h
+    kernel/types.h
   )
 
   for relative_path in "${runtime_sources[@]}"; do
@@ -369,6 +378,15 @@ verify_installed_cycles_sources() {
   installed_file="${installed_source}/kernel/integrator/subsurface.h"
   grep -Fq 'defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)' "$installed_file" || die \
     "Installed Cycles runtime is missing pixel-displacement support in Metal shading kernels."
+
+  installed_addon="$(dirname "$installed_source")"
+  for relative_path in properties.py ui.py; do
+    source_file="${ROOT_DIR}/intern/cycles/blender/addon/${relative_path}"
+    installed_file="${installed_addon}/${relative_path}"
+    [ -f "$installed_file" ] || die "Installed Cycles add-on file is missing: ${installed_file}"
+    cmp -s "$source_file" "$installed_file" || die \
+      "Installed Cycles add-on file is stale: ${relative_path}"
+  done
 }
 
 launch_fresh_app() {
