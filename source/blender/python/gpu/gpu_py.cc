@@ -11,6 +11,7 @@
 
 #include <Python.h>
 
+#include "GPU_context.hh"
 #include "GPU_init_exit.hh"
 #include "GPU_primitive.hh"
 #include "GPU_texture.hh"
@@ -61,6 +62,10 @@ bool bpygpu_is_init_or_error()
     PyErr_SetString(
         PyExc_SystemError,
         "GPU functions for drawing requires the gpu module to be initialized. See gpu.init.");
+    return false;
+  }
+  if (!GPU_context_active_get()) {
+    PyErr_SetString(PyExc_SystemError, "GPU functions for drawing require an active GPU context.");
     return false;
   }
 
