@@ -530,8 +530,12 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
         /* Finally write the function handles into this pipeline's table */
         int size = int([best_pipeline->table_functions[table] count]);
         for (int i = 0; i < size; i++) {
+          id table_function = best_pipeline->table_functions[table][i];
+          if (table_function == [NSNull null]) {
+            continue;
+          }
           id<MTLFunctionHandle> handle = [pipeline
-              functionHandleWithFunction:best_pipeline->table_functions[table][i]];
+              functionHandleWithFunction:table_function];
           [intersection_func_table[table] setFunction:handle atIndex:i];
         }
 
@@ -621,16 +625,27 @@ void MetalKernelPipeline::compile()
                                           const char *curve_fn = nullptr,
                                           const char *point_fn = nullptr,
                                           const char *pixel_displacement_fn = nullptr) {
-      table_functions[table_index] = [NSArray
-          arrayWithObjects:make_intersection_function(tri_fn),
-                           curve_fn ? make_intersection_function(curve_fn) : nil,
-                           point_fn ? make_intersection_function(point_fn) : nil,
-                           pixel_displacement_fn ?
-                               make_intersection_function(pixel_displacement_fn) :
-                               nil,
-                           nil];
+      const char *function_names[] = {tri_fn, curve_fn, point_fn, pixel_displacement_fn};
+      int function_count = 4;
+      while (function_count > 0 && function_names[function_count - 1] == nullptr) {
+        function_count--;
+      }
 
-      [unique_functions addObjectsFromArray:table_functions[table_index]];
+      NSMutableArray *functions = [NSMutableArray arrayWithCapacity:function_count];
+      for (int i = 0; i < function_count; i++) {
+        if (function_names[i]) {
+          id<MTLFunction> intersection_function = make_intersection_function(function_names[i]);
+          [functions addObject:intersection_function];
+          [unique_functions addObject:intersection_function];
+        }
+        else {
+          /* Keep the slot empty so geometry intersectionFunctionTableOffset values continue to
+           * address the same function kind. NSArray's variadic constructor cannot represent this:
+           * its first nil argument terminates the array and used to silently discard slot 3. */
+          [functions addObject:[NSNull null]];
+        }
+      }
+      table_functions[table_index] = functions;
     };
 
     add_intersection_functions(METALRT_TABLE_DEFAULT,
@@ -649,12 +664,26 @@ void MetalKernelPipeline::compile()
                                "__intersection__point_shadow_all",
                                "__intersection__pixel_displacement_shadow_all");
     add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
-    add_intersection_functions(METALRT_TABLE_LOCAL, "__intersection__local_tri");
+    add_intersection_functions(METALRT_TABLE_LOCAL,
+                               "__intersection__local_tri",
+                               nullptr,
+                               nullptr,
+                               "__intersection__local_pixel_displacement");
     add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");
     add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT,
-                               "__intersection__local_tri_single_hit");
+                               "__intersection__local_tri_single_hit",
+                               nullptr,
+                               nullptr,
+                               "__intersection__local_pixel_displacement_single_hit");
     add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT_MBLUR,
                                "__intersection__local_tri_single_hit_mblur");
+
+    for (const int table : {METALRT_TABLE_LOCAL, METALRT_TABLE_LOCAL_SINGLE_HIT}) {
+      if (table_functions[table].count <= 3 || table_functions[table][3] == [NSNull null]) {
+        metal_printf("MetalRT pixel-displacement local intersection table is incomplete");
+        return;
+      }
+    }
 
     linked_functions = [[NSArray arrayWithArray:[unique_functions allObjects]]
         sortedArrayUsingComparator:^NSComparisonResult(id<MTLFunction> f1, id<MTLFunction> f2) {
