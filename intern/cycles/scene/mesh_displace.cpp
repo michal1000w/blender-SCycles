@@ -2,9 +2,11 @@
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <vector>
 
 #include "device/device.h"
 
@@ -32,6 +34,63 @@ static int pixel_displacement_cache_sample_count(const int grid)
 static int pixel_displacement_cache_sample_index(const int grid, const int u, const int v)
 {
   return u * (grid + 1) - (u * (u - 1)) / 2 + v;
+}
+
+constexpr uint PIXEL_DISPLACEMENT_CACHE_BVH_FLAG = (1u << 31);
+constexpr int PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE = 2;
+
+struct PixelDisplacementBVHBlock {
+  BoundBox bounds;
+  int u;
+  int v;
+};
+
+struct PixelDisplacementBVHNode {
+  BoundBox bounds;
+  int child0;
+  int child1;
+  int u;
+  int v;
+  bool leaf;
+};
+
+static int build_pixel_displacement_bvh_recursive(std::vector<PixelDisplacementBVHBlock> &blocks,
+                                                  const int begin,
+                                                  const int end,
+                                                  std::vector<PixelDisplacementBVHNode> &nodes)
+{
+  BoundBox bounds = BoundBox::empty;
+  BoundBox centroids = BoundBox::empty;
+  for (int i = begin; i < end; i++) {
+    bounds.grow(blocks[i].bounds);
+    centroids.grow(blocks[i].bounds.center());
+  }
+
+  const int node_index = int(nodes.size());
+  nodes.push_back({bounds, -1, -1, 0, 0, false});
+  if (end - begin == 1) {
+    nodes[node_index].u = blocks[begin].u;
+    nodes[node_index].v = blocks[begin].v;
+    nodes[node_index].leaf = true;
+    return node_index;
+  }
+
+  const float3 extent = centroids.max - centroids.min;
+  const int axis = (extent.x >= extent.y && extent.x >= extent.z) ? 0 :
+                   (extent.y >= extent.z)                         ? 1 :
+                                                                    2;
+  const int middle = (begin + end) / 2;
+  std::nth_element(blocks.begin() + begin,
+                   blocks.begin() + middle,
+                   blocks.begin() + end,
+                   [axis](const PixelDisplacementBVHBlock &a, const PixelDisplacementBVHBlock &b) {
+                     return a.bounds.center()[axis] < b.bounds.center()[axis];
+                   });
+  const int child0 = build_pixel_displacement_bvh_recursive(blocks, begin, middle, nodes);
+  const int child1 = build_pixel_displacement_bvh_recursive(blocks, middle, end, nodes);
+  nodes[node_index].child0 = child0;
+  nodes[node_index].child1 = child1;
+  return node_index;
 }
 
 static bool shader_allows_pixel_displacement_cache(const Shader *shader)
@@ -325,9 +384,11 @@ static int fill_pixel_displacement_cache_input(const Scene *scene,
 
 static void read_pixel_displacement_cache_output(
     Scene *scene,
-    const device_vector<uint> &pixel_displacement_grid,
+    device_vector<uint> &pixel_displacement_grid,
     const device_vector<int> &pixel_displacement_offset,
     device_vector<float4> &pixel_displacement_data,
+    device_vector<int> &pixel_displacement_bvh_offset,
+    device_vector<float4> &pixel_displacement_bvh_nodes,
     const device_vector<float> &d_output)
 {
   float4 *cache_data = pixel_displacement_data.data();
@@ -336,6 +397,7 @@ static void read_pixel_displacement_cache_output(
   const float max_distance = max(0.0f, scene->integrator->get_pixel_displacement_max_distance());
 
   const int num_samples = min(int(pixel_displacement_data.size()), int(d_output.size() / 3));
+  std::vector<PixelDisplacementBVHNode> bvh_nodes;
 
   for (int i = 0; i < num_samples; i++) {
     float3 D = make_float3(output_data[i * 3 + 0], output_data[i * 3 + 1], output_data[i * 3 + 2]);
@@ -374,6 +436,7 @@ static void read_pixel_displacement_cache_output(
         const float3 face_normal = safe_normalize(cross(p1 - p0, p2 - p0));
         float min_height = std::numeric_limits<float>::infinity();
         float max_height = -std::numeric_limits<float>::infinity();
+        float max_tangent_squared = 0.0f;
         for (int u = 0; u <= grid; u++) {
           for (int v = 0; v <= grid - u; v++, sample++) {
             const float fu = float(u) / float(grid);
@@ -383,6 +446,8 @@ static void read_pixel_displacement_cache_output(
             const float height = dot(displacement, face_normal);
             min_height = min(min_height, height);
             max_height = max(max_height, height);
+            max_tangent_squared = max(max_tangent_squared,
+                                      len_squared(displacement - height * face_normal));
           }
         }
         /* The fourth component is unused by displacement vectors. Keep tight height bounds in the
@@ -390,6 +455,45 @@ static void read_pixel_displacement_cache_output(
         constexpr float height_epsilon = 1.0e-6f;
         cache_data[sample_offset].w = min_height - height_epsilon;
         cache_data[sample_offset + 1].w = max_height + height_epsilon;
+
+        /* Grid DDA is exact only when displacement is parallel to the base-triangle normal. On
+         * smooth or curved geometry the shading normal moves microtriangles tangentially, so build
+         * an object-space block BVH and intersect the actual displaced microtriangles instead. */
+        /* Shader evaluation and normal transforms can leave sub-ULP tangential residue even when
+         * the displacement is mathematically parallel to the face. Keep that numerical noise on
+         * the DDA path; meaningful smooth-normal displacement is orders of magnitude larger. */
+        const float tangent_epsilon = max(1.0e-5f, max_distance * 1.0e-4f);
+        if (max_tangent_squared > sqr(tangent_epsilon)) {
+          std::vector<PixelDisplacementBVHBlock> blocks;
+          for (int block_u = 0; block_u < grid; block_u += PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE) {
+            for (int block_v = 0; block_u + block_v < grid;
+                 block_v += PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE)
+            {
+              BoundBox block_bounds = BoundBox::empty;
+              const int end_u = min(block_u + PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE, grid);
+              for (int u = block_u; u <= end_u; u++) {
+                const int end_v = min(block_v + PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE, grid - u);
+                for (int v = block_v; v <= end_v; v++) {
+                  const float fu = float(u) / float(grid);
+                  const float fv = float(v) / float(grid);
+                  const int index = sample_offset +
+                                    pixel_displacement_cache_sample_index(grid, u, v);
+                  block_bounds.grow(p0 + fu * (p1 - p0) + fv * (p2 - p0) +
+                                    make_float3(cache_data[index]));
+                }
+              }
+              block_bounds.grow(block_bounds.min, 1.0e-6f);
+              block_bounds.grow(block_bounds.max, 1.0e-6f);
+              blocks.push_back({block_bounds, block_u, block_v});
+            }
+          }
+
+          if (!blocks.empty()) {
+            pixel_displacement_bvh_offset.data()[prim] = int(bvh_nodes.size());
+            build_pixel_displacement_bvh_recursive(blocks, 0, int(blocks.size()), bvh_nodes);
+            pixel_displacement_grid.data()[prim] |= PIXEL_DISPLACEMENT_CACHE_BVH_FLAG;
+          }
+        }
 
         constexpr int block_size = 8;
         if (grid >= block_size) {
@@ -427,6 +531,21 @@ static void read_pixel_displacement_cache_output(
       mesh->pixel_displacement_bounds[triangle] = bounds;
     }
   }
+
+  pixel_displacement_bvh_nodes.free();
+  if (!bvh_nodes.empty()) {
+    float4 *serialized = pixel_displacement_bvh_nodes.alloc(bvh_nodes.size() * 2);
+    for (int i = 0; i < int(bvh_nodes.size()); i++) {
+      const PixelDisplacementBVHNode &node = bvh_nodes[i];
+      const uint meta0 = node.leaf ? (PIXEL_DISPLACEMENT_CACHE_BVH_FLAG | uint(node.u)) :
+                                     uint(node.child0);
+      const uint meta1 = node.leaf ? uint(node.v) : uint(node.child1);
+      serialized[i * 2] = make_float4(
+          node.bounds.min.x, node.bounds.min.y, node.bounds.min.z, __uint_as_float(meta0));
+      serialized[i * 2 + 1] = make_float4(
+          node.bounds.max.x, node.bounds.max.y, node.bounds.max.z, __uint_as_float(meta1));
+    }
+  }
 }
 
 bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
@@ -437,6 +556,8 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
   device_vector<uint> &cache_info = dscene->pixel_displacement_info;
   device_vector<int> &cache_offset = dscene->pixel_displacement_offset;
   device_vector<float4> &cache_data = dscene->pixel_displacement_data;
+  device_vector<int> &bvh_offset = dscene->pixel_displacement_bvh_offset;
+  device_vector<float4> &bvh_nodes = dscene->pixel_displacement_bvh_nodes;
 
   uint *info = cache_info.alloc(dscene->tri_shader.size());
   for (int i = 0; i < cache_info.size(); i++) {
@@ -448,10 +569,17 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
     offsets[i] = -1;
   }
 
+  int *bvh_offsets = bvh_offset.alloc(dscene->tri_shader.size());
+  for (int i = 0; i < bvh_offset.size(); i++) {
+    bvh_offsets[i] = -1;
+  }
+
   cache_data.free();
+  bvh_nodes.free();
   for (Geometry *geom : scene->geometry) {
     if (geom->is_mesh()) {
-      static_cast<Mesh *>(geom)->pixel_displacement_bounds.clear();
+      Mesh *mesh = static_cast<Mesh *>(geom);
+      mesh->pixel_displacement_bounds.clear();
     }
   }
 
@@ -468,12 +596,14 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
     }
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
+    bvh_offset.copy_to_device();
     return false;
   }
 
   if (total_samples > size_t(std::numeric_limits<int>::max())) {
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
+    bvh_offset.copy_to_device();
     return false;
   }
 
@@ -501,9 +631,10 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
             scene, cache_info, cache_offset, d_input);
         return actual_samples;
       },
-      [scene, &cache_info, &cache_offset, &cache_data](const device_vector<float> &d_output) {
+      [scene, &cache_info, &cache_offset, &cache_data, &bvh_offset, &bvh_nodes](
+          const device_vector<float> &d_output) {
         read_pixel_displacement_cache_output(
-            scene, cache_info, cache_offset, cache_data, d_output);
+            scene, cache_info, cache_offset, cache_data, bvh_offset, bvh_nodes, d_output);
       });
 
   if (!success || actual_samples == 0 || progress.get_cancel()) {
@@ -514,19 +645,24 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
       offsets[i] = -1;
     }
     cache_data.free();
+    bvh_nodes.free();
     for (Geometry *geom : scene->geometry) {
       if (geom->is_mesh()) {
-        static_cast<Mesh *>(geom)->pixel_displacement_bounds.clear();
+        Mesh *mesh = static_cast<Mesh *>(geom);
+        mesh->pixel_displacement_bounds.clear();
       }
     }
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
+    bvh_offset.copy_to_device();
     return false;
   }
 
   cache_info.copy_to_device();
   cache_offset.copy_to_device();
   cache_data.copy_to_device();
+  bvh_offset.copy_to_device();
+  bvh_nodes.copy_to_device();
 
   return true;
 }

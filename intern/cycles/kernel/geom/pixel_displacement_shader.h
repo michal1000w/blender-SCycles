@@ -213,7 +213,8 @@ ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
     return false;
   }
 
-  const int grid = int(kernel_data_fetch(pixel_displacement_info, prim));
+  const uint info = kernel_data_fetch(pixel_displacement_info, prim);
+  const int grid = int(info & 0x7fffffffu);
   if (grid <= 0) {
     return false;
   }
@@ -226,6 +227,11 @@ ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
   *r_grid = grid;
   *r_offset = offset;
   return true;
+}
+
+ccl_device_inline bool pixel_displacement_cache_uses_bvh(KernelGlobals kg, const int prim)
+{
+  return (kernel_data_fetch(pixel_displacement_info, prim) & 0x80000000u) != 0;
 }
 
 ccl_device_inline bool pixel_displacement_eval_object_cached(KernelGlobals kg,
@@ -755,6 +761,77 @@ ccl_device_inline bool pixel_displacement_intersect_cached_cell(KernelGlobals kg
   return hit;
 }
 
+/* Traverse exact object-space bounds for displaced micro-blocks. This path is used whenever the
+ * sampled displacement has a component tangent to the base triangle, for which barycentric grid
+ * DDA is not geometrically valid. Leaves contain at most 2x2 cells. */
+ccl_device_noinline bool pixel_displacement_intersect_cached_bvh(KernelGlobals kg,
+                                                                 const int prim,
+                                                                 const int offset,
+                                                                 const int grid,
+                                                                 ccl_private const float3 verts[3],
+                                                                 const float3 ray_P,
+                                                                 const float3 ray_D,
+                                                                 const float ray_tmin,
+                                                                 const float ray_tmax,
+                                                                 ccl_private float *r_t,
+                                                                 ccl_private float2 *r_bary)
+{
+  const int root = kernel_data_fetch(pixel_displacement_bvh_offset, prim);
+  if (root < 0) {
+    return false;
+  }
+
+  int stack[64];
+  int stack_size = 0;
+  stack[stack_size++] = root;
+  bool hit = false;
+  float best_t = ray_tmax;
+  float2 best_bary = zero_float2();
+
+  while (stack_size != 0) {
+    const int node_index = stack[--stack_size];
+    const float4 node_min = kernel_data_fetch(pixel_displacement_bvh_nodes, node_index * 2);
+    const float4 node_max = kernel_data_fetch(pixel_displacement_bvh_nodes, node_index * 2 + 1);
+    float node_t0 = ray_tmin;
+    float node_t1 = best_t;
+    if (!pixel_displacement_clip_bounds(
+            make_float3(node_min), make_float3(node_max), ray_P, ray_D, &node_t0, &node_t1))
+    {
+      continue;
+    }
+
+    const uint meta0 = __float_as_uint(node_min.w);
+    const uint meta1 = __float_as_uint(node_max.w);
+    if ((meta0 & 0x80000000u) == 0) {
+      /* Balanced construction has depth below 20 for the maximum 2048 grid resolution. */
+      stack[stack_size++] = int(meta0);
+      stack[stack_size++] = int(meta1);
+      continue;
+    }
+
+    const int block_u = int(meta0 & 0x7fffffffu);
+    const int block_v = int(meta1);
+    const int end_u = min(block_u + 2, grid);
+    for (int u = block_u; u < end_u; u++) {
+      const int end_v = min(block_v + 2, grid - u);
+      for (int v = block_v; v < end_v; v++) {
+        hit |= pixel_displacement_intersect_cached_cell(
+            kg, offset, grid, u, v, false, verts, ray_P, ray_D, ray_tmin, &best_t, &best_bary);
+        if (u + v + 2 <= grid) {
+          hit |= pixel_displacement_intersect_cached_cell(
+              kg, offset, grid, u, v, true, verts, ray_P, ray_D, ray_tmin, &best_t, &best_bary);
+        }
+      }
+    }
+  }
+
+  if (hit) {
+    *r_t = best_t;
+    *r_bary = best_bary;
+  }
+  return hit;
+}
+
 ccl_device_inline float pixel_displacement_next_grid_crossing(const float x,
                                                               const float dx,
                                                               const float s)
@@ -846,6 +923,11 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_micro_mesh(KernelGl
   int grid, offset;
   if (!pixel_displacement_cache_lookup(kg, prim, motion, &grid, &offset)) {
     return false;
+  }
+
+  if (pixel_displacement_cache_uses_bvh(kg, prim)) {
+    return pixel_displacement_intersect_cached_bvh(
+        kg, prim, offset, grid, verts, ray_P, ray_D, ray_tmin, ray_tmax, r_t, r_bary);
   }
 
   /* The caller may provide a conservatively padded barycentric segment. Clamp its parameter

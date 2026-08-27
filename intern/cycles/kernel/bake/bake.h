@@ -38,8 +38,8 @@ ccl_device void kernel_displace_evaluate(KernelGlobals kg,
    * Filter over one micromesh cell so texture LOD is independent of how the UV domain happens to
    * be split into base faces. The cache layout is uploaded before this evaluation. */
   const int pixel_displacement_grid = kernel_data.integrator.use_pixel_displacement ?
-                                          int(kernel_data_fetch(pixel_displacement_info,
-                                                                in.prim)) :
+                                          int(kernel_data_fetch(pixel_displacement_info, in.prim) &
+                                              0x7fffffffu) :
                                           0;
   if (pixel_displacement_grid > 0) {
     const float inv_grid = 1.0f / float(pixel_displacement_grid);
