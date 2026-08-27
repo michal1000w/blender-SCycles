@@ -208,6 +208,7 @@ KERNEL_STRUCT_MEMBER(integrator, float, photon_radius_decay)
 KERNEL_STRUCT_MEMBER(integrator, float, photon_roughness_threshold)
 KERNEL_STRUCT_MEMBER(integrator, float, photon_normal_threshold)
 KERNEL_STRUCT_MEMBER(integrator, float4, photon_scene)
+KERNEL_STRUCT_MEMBER(integrator, float4, photon_target)
 /* Seed. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, seed)

@@ -155,6 +155,7 @@ ccl_device_inline void path_state_next(KernelGlobals kg,
   if (label & LABEL_VOLUME_SCATTER) {
     /* volume scatter */
     visibility |= PATH_RAY_VISIBILITY_VOLUME_SCATTER;
+    flag &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;
     flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
     flag &= ~PATH_RAY_TRANSPARENT_BACKGROUND;
     if (!(flag & PATH_RAY_ANY_PASS)) {
