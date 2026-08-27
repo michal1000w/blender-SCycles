@@ -32,6 +32,8 @@ class DeviceScene {
   device_vector<uint> pixel_displacement_info;
   device_vector<int> pixel_displacement_offset;
   device_vector<float4> pixel_displacement_data;
+  device_vector<int> pixel_displacement_bvh_offset;
+  device_vector<float4> pixel_displacement_bvh_nodes;
 
   device_vector<KernelCurve> curves;
   device_vector<float4> curve_keys;

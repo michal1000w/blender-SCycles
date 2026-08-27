@@ -129,7 +129,9 @@ def assign_material(obj, image):
     image_node.interpolation = "Linear"
     displacement = nodes.new("ShaderNodeDisplacement")
     displacement.inputs["Midlevel"].default_value = 0.5
-    displacement.inputs["Scale"].default_value = 0.12
+    displacement.inputs["Scale"].default_value = float(
+        os.environ.get("PIXEL_DISPLACEMENT_VISUAL_MATERIAL_SCALE", "0.12")
+    )
     if os.environ.get("PIXEL_DISPLACEMENT_VISUAL_EMISSION", "0") in {"1", "true", "True"}:
         emission = nodes.new("ShaderNodeEmission")
         emission.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
@@ -147,7 +149,16 @@ def create_synthetic_scene(grid_size, texture_size):
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
     image = make_height_image(texture_size)
-    obj = create_grid_mesh(grid_size)
+    if os.environ.get("PIXEL_DISPLACEMENT_VISUAL_GEOMETRY", "flat") == "curved":
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            segments=max(grid_size * 2, 8), ring_count=max(grid_size, 4), radius=2.0
+        )
+        obj = bpy.context.object
+        obj.name = "pixel_displacement_curved_mesh"
+        for polygon in obj.data.polygons:
+            polygon.use_smooth = True
+    else:
+        obj = create_grid_mesh(grid_size)
     assign_material(obj, image)
 
     light_data = bpy.data.lights.new("key_area", "AREA")
@@ -251,6 +262,16 @@ def load_scene(exact_reference):
         grid = int(os.environ.get("PIXEL_DISPLACEMENT_VISUAL_GRID", "4"))
         texture = int(os.environ.get("PIXEL_DISPLACEMENT_VISUAL_TEXTURE", "512"))
         create_synthetic_scene(grid, texture)
+
+    if os.environ.get("PIXEL_DISPLACEMENT_VISUAL_TRANSFORM_STRESS", "0") in {
+        "1",
+        "true",
+        "True",
+    }:
+        for obj in bpy.context.scene.objects:
+            if obj.type == "MESH" and not obj.hide_render:
+                obj.scale = (-1.35, 0.7, 1.8)
+                obj.rotation_euler = (math.radians(17.0), math.radians(-23.0), math.radians(31.0))
 
     configure_cycles(
         int(os.environ.get("PIXEL_DISPLACEMENT_VISUAL_SAMPLES", "1")),
