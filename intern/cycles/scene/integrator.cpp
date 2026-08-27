@@ -185,6 +185,7 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(use_pixel_displacement, "Pixel Level Displacement", true);
   SOCKET_FLOAT(pixel_displacement_scale, "Pixel Displacement Scale", 1.0f);
   SOCKET_FLOAT(pixel_displacement_max_distance, "Pixel Displacement Max Distance", 0.1f);
+  SOCKET_INT(pixel_displacement_resolution, "Pixel Displacement Micromesh Resolution", 1024);
   SOCKET_INT(pixel_displacement_steps, "Pixel Displacement Steps", 32);
 
   static NodeEnum denoiser_type_enum;

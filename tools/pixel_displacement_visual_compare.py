@@ -27,6 +27,13 @@ def configure_cycles(samples, resolution, preserve_displacement_settings):
         scene.cycles.pixel_displacement_steps = int(
             os.environ.get("PIXEL_DISPLACEMENT_VISUAL_STEPS", "32")
         )
+    if (
+        not preserve_displacement_settings
+        or "PIXEL_DISPLACEMENT_VISUAL_MICROMESH_RESOLUTION" in os.environ
+    ):
+        scene.cycles.pixel_displacement_resolution = int(
+            os.environ.get("PIXEL_DISPLACEMENT_VISUAL_MICROMESH_RESOLUTION", "1024")
+        )
     scene.cycles.device = "GPU"
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.look = "None"
