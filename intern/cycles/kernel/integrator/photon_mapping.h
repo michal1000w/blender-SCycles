@@ -229,8 +229,10 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
     else {
       /* Infinite emitters are launched from a disk enclosing the scene. This is the standard
        * finite-scene photon mapping construction and preserves the directional light PDF. */
-      const float3 center = make_float3(kernel_data.integrator.photon_scene);
-      const float radius = kernel_data.integrator.photon_scene.w;
+      const float3 scene_center = make_float3(kernel_data.integrator.photon_scene);
+      const float scene_radius = kernel_data.integrator.photon_scene.w;
+      const float3 target_center = make_float3(kernel_data.integrator.photon_target);
+      const float target_radius = min(kernel_data.integrator.photon_target.w, scene_radius);
       float direction_pdf;
       if (type == LIGHT_SUN) {
         float unused;
@@ -242,15 +244,41 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
         eval_fac = klight->sun.eval_fac;
       }
       else {
-        ray->D = -background_light_sample(
-            kg, center, make_float2(lcg_step_float(rng), lcg_step_float(rng)), &direction_pdf);
+        ray->D = -background_light_sample(kg,
+                                          scene_center,
+                                          make_float2(lcg_step_float(rng), lcg_step_float(rng)),
+                                          &direction_pdf);
       }
+
+      /* Most light paths are aimed through the aggregate bounds of likely sharp caustic casters.
+       * A full-scene component preserves support for procedural/OSL shaders and any conservative
+       * host-side classification miss. Evaluate the complete mixture PDF to remain unbiased. */
+      const float target_probability = (target_radius < 0.999f * scene_radius ||
+                                        len_squared(target_center - scene_center) > 1.0e-10f) ?
+                                           0.9f :
+                                           0.0f;
+      const bool sample_target = lcg_step_float(rng) < target_probability;
+      const float3 disk_center = sample_target ? target_center : scene_center;
+      const float disk_radius = sample_target ? target_radius : scene_radius;
       float3 T, B;
       make_orthonormals(ray->D, &T, &B);
       const float2 disk = sample_uniform_disk(
           make_float2(lcg_step_float(rng), lcg_step_float(rng)));
-      ray->P = center - ray->D * (2.0f * radius) + radius * (disk.x * T + disk.y * B);
-      ray_pdf = direction_pdf / max(M_PI_F * sqr(radius), 1.0e-20f);
+      const float3 cross_section = disk_center + disk_radius * (disk.x * T + disk.y * B);
+      ray->P = cross_section - ray->D * (2.0f * scene_radius);
+
+      const float3 scene_delta = cross_section - scene_center;
+      const float3 target_delta = cross_section - target_center;
+      const float scene_distance2 = len_squared(scene_delta) - sqr(dot(scene_delta, ray->D));
+      const float target_distance2 = len_squared(target_delta) - sqr(dot(target_delta, ray->D));
+      float position_pdf = 0.0f;
+      if (scene_distance2 <= sqr(scene_radius)) {
+        position_pdf += (1.0f - target_probability) / max(M_PI_F * sqr(scene_radius), 1.0e-20f);
+      }
+      if (target_probability > 0.0f && target_distance2 <= sqr(target_radius)) {
+        position_pdf += target_probability / max(M_PI_F * sqr(target_radius), 1.0e-20f);
+      }
+      ray_pdf = direction_pdf * position_pdf;
     }
 
     if (!(ray_pdf > 0.0f) || !(eval_fac > 0.0f)) {
@@ -300,6 +328,7 @@ ccl_device_inline void photon_store(KernelGlobals kg,
                                     const float3 D,
                                     const Spectrum power,
                                     const int emitter_object,
+                                    const int receiver_object,
                                     const float time)
 {
   const uint slot = atomic_fetch_and_add_uint32(kernel_integrator_state.photon_stored, 1);
@@ -314,7 +343,7 @@ ccl_device_inline void photon_store(KernelGlobals kg,
   photon->direction = packed_normal(D).value;
   photon->normal = packed_normal(N).value;
   photon->time = time;
-  photon->pad = 0;
+  photon->receiver_object = receiver_object;
 
   const int3 cell = photon_cell(P, kernel_integrator_state.photon_radius);
   const uint bucket = photon_hash_cell(
@@ -356,18 +385,20 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     }
     surface_shader_prepare_closures(kg, state, &sd, path_visibility);
 
-    bool has_diffuse = false;
+    bool has_receiver = false;
     for (int i = 0; i < sd.num_closure; i++) {
-      has_diffuse |= CLOSURE_IS_BSDF_DIFFUSE(sd.closure[i].type);
+      has_receiver |= surface_shader_photon_mapping_receiver(&sd.closure[i], sd.wi);
     }
-    if (had_specular && has_diffuse) {
-      photon_store(kg, sd.P, sd.Ng, ray.D, throughput, emitter_object, time);
+    if (had_specular && has_receiver) {
+      photon_store(kg, sd.P, sd.Ng, ray.D, throughput, emitter_object, sd.object, time);
       return;
     }
 
     float3 rand_bsdf = lcg_step_float3(&rng);
     const ccl_private ShaderClosure *sc = surface_shader_bsdf_bssrdf_pick(&sd, &rand_bsdf);
-    if (!CLOSURE_IS_BSDF(sc->type) || CLOSURE_IS_RAY_PORTAL(sc->type)) {
+    if (!CLOSURE_IS_BSDF(sc->type) || CLOSURE_IS_RAY_PORTAL(sc->type) ||
+        surface_shader_is_hair_closure(sc->type))
+    {
       return;
     }
 
@@ -396,7 +427,8 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
         return;
       }
       const float roughness = max(sampled_roughness.x, sampled_roughness.y);
-      const bool sharp = roughness <= sqr(kernel_data.integrator.photon_roughness_threshold);
+      const bool sharp = (label & LABEL_SINGULAR) ||
+                         roughness < sqr(kernel_data.integrator.photon_roughness_threshold);
       const bool specular_label = (label & LABEL_GLOSSY) || (label & LABEL_TRANSMIT) ||
                                   (label & LABEL_SINGULAR);
       /* Keep the estimator's transport partition disjoint from camera path tracing. A caustic
@@ -437,7 +469,14 @@ ccl_device_inline bool photon_mapping_matches(KernelGlobals kg,
                                               const int time_bin,
                                               const float radius2)
 {
-  if (photon_time_bin(photon->time) != time_bin || len_squared(photon->P - sd->P) > radius2) {
+  if (photon_time_bin(photon->time) != time_bin || photon->receiver_object != sd->object) {
+    return false;
+  }
+
+  const float3 delta = photon->P - sd->P;
+  const float normal_distance = dot(delta, sd->Ng);
+  const float tangent_distance2 = max(len_squared(delta) - sqr(normal_distance), 0.0f);
+  if (tangent_distance2 > radius2 || fabsf(normal_distance) > 0.25f * sqrtf(radius2)) {
     return false;
   }
 
@@ -469,11 +508,11 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
     return zero_spectrum();
   }
 
-  bool has_diffuse = false;
+  bool has_receiver = false;
   for (int i = 0; i < sd->num_closure; i++) {
-    has_diffuse |= CLOSURE_IS_BSDF_DIFFUSE(sd->closure[i].type);
+    has_receiver |= surface_shader_photon_mapping_receiver(&sd->closure[i], sd->wi);
   }
-  if (!has_diffuse) {
+  if (!has_receiver) {
     return zero_spectrum();
   }
 
@@ -555,14 +594,16 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
             continue;
           }
 
-          const float distance2 = len_squared(photon->P - sd->P);
+          const float3 delta = photon->P - sd->P;
+          const float normal_distance = dot(delta, sd->Ng);
+          const float distance2 = max(len_squared(delta) - sqr(normal_distance), 0.0f);
           Spectrum receiver_eval = zero_spectrum();
           packed_normal photon_direction;
           photon_direction.value = photon->direction;
           const float3 light_direction = -photon_direction.decode();
           for (int i = 0; i < sd->num_closure; i++) {
             const ccl_private ShaderClosure *sc = &sd->closure[i];
-            if (CLOSURE_IS_BSDF_DIFFUSE(sc->type)) {
+            if (surface_shader_photon_mapping_receiver(sc, sd->wi)) {
               float unused_pdf;
               receiver_eval += bsdf_eval(kg, sd, sc, light_direction, &unused_pdf) * sc->weight;
             }

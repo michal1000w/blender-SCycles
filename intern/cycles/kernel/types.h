@@ -276,6 +276,10 @@ enum PathRayFlag : uint32_t {
    * subsequent sharp transport in the regular path tracer until another supported diffuse
    * surface is sampled. Currently used for BSSRDF transport. */
   PATH_RAY_PHOTON_MAPPING_UNSUPPORTED = (1U << 25U),
+
+  /* The last camera-path event is a non-delta surface closure represented by the photon map.
+   * Sharp transport after it is removed from path tracing to keep the estimators disjoint. */
+  PATH_RAY_PHOTON_MAPPING_RECEIVER = (1U << 26U),
 };
 
 // 8bit enum, just in case we need to move more variables in it
@@ -1544,7 +1548,7 @@ struct ccl_align(16) KernelPhoton {
   uint direction;
   uint normal;
   float time;
-  uint pad;
+  int receiver_object;
 };
 static_assert_align(KernelPhoton, 16);
 

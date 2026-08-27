@@ -23,6 +23,42 @@
 
 CCL_NAMESPACE_BEGIN
 
+#ifdef __KERNEL_METAL__
+ccl_device_inline bool surface_shader_is_hair_closure(const ClosureType type)
+{
+  return type == CLOSURE_BSDF_HAIR_REFLECTION_ID || type == CLOSURE_BSDF_HAIR_TRANSMISSION_ID ||
+         type == CLOSURE_BSDF_HAIR_CHIANG_ID || type == CLOSURE_BSDF_HAIR_HUANG_ID;
+}
+
+/* Photon density estimation is well behaved for diffuse and sufficiently broad non-delta surface
+ * lobes. Narrow glossy/transmission lobes remain ray traced. Roughness values returned by Cycles
+ * are microfacet alpha, while the UI threshold is artist-facing perceptual roughness. */
+ccl_device_inline bool surface_shader_photon_mapping_receiver(ccl_private const ShaderClosure *sc,
+                                                              const float3 wi)
+{
+  if (!CLOSURE_IS_BSDF(sc->type) || CLOSURE_IS_BSDF_SINGULAR(sc->type) ||
+      surface_shader_is_hair_closure(sc->type))
+  {
+    return false;
+  }
+  if (CLOSURE_IS_BSDF_DIFFUSE(sc->type)) {
+    return true;
+  }
+  if (!(CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_BSDF_TRANSMISSION(sc->type) ||
+        CLOSURE_IS_GLASS(sc->type)))
+  {
+    return false;
+  }
+
+  float2 roughness;
+  float eta;
+  bsdf_roughness_eta(sc, wi, &roughness, &eta);
+  const float alpha = max(roughness.x, roughness.y);
+  const float threshold = sqr(kernel_data.integrator.photon_roughness_threshold);
+  return alpha > 1.0e-8f && alpha >= threshold;
+}
+#endif
+
 /* Guiding */
 
 #if defined(__PATH_GUIDING__)
@@ -184,23 +220,19 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
 
 #ifdef __KERNEL_METAL__
   /* Partition caustic transport without overlap: photon mapping handles sufficiently sharp
-   * glossy/transmission lobes reached after a diffuse bounce, while ordinary path tracing keeps
-   * rough caustics. Photon paths themselves never arrive here with diffuse visibility. */
+   * glossy/transmission lobes reached after a supported broad receiver event, while ordinary path
+   * tracing keeps rough caustics and unsupported receivers. */
   if (kernel_data.integrator.use_photon_mapping &&
-      (path_visibility & PATH_RAY_VISIBILITY_DIFFUSE) &&
+      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_PHOTON_MAPPING_RECEIVER) &&
       !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_PHOTON_MAPPING_UNSUPPORTED))
   {
-    const float threshold = sqr(kernel_data.integrator.photon_roughness_threshold);
     for (int i = 0; i < sd->num_closure; i++) {
       ccl_private ShaderClosure *sc = &sd->closure[i];
-      if (!CLOSURE_IS_BSDF_DIFFUSE(sc->type) &&
+      if (!surface_shader_is_hair_closure(sc->type) && !CLOSURE_IS_BSDF_DIFFUSE(sc->type) &&
           (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_BSDF_TRANSMISSION(sc->type) ||
            CLOSURE_IS_GLASS(sc->type)))
       {
-        float2 roughness;
-        float eta;
-        bsdf_roughness_eta(sc, sd->wi, &roughness, &eta);
-        if (max(roughness.x, roughness.y) <= threshold) {
+        if (!surface_shader_photon_mapping_receiver(sc, sd->wi)) {
           sc->type = CLOSURE_NONE_ID;
           sc->sample_weight = 0.0f;
         }
