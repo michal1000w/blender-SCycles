@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Blender for Apple Silicon macOS and install the complete app bundle to ./Release.
+# Build Blender for Apple Silicon macOS and install the complete app bundle to ./install.
 
 set -Eeuo pipefail
 
@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BUILD_TYPE="${BLENDER_BUILD_TYPE:-Release}"
 ARCH="${BLENDER_ARCH:-arm64}"
 BUILD_DIR="${BLENDER_BUILD_DIR:-${ROOT_DIR}/build/macos_${ARCH}_${BUILD_TYPE}}"
-RELEASE_DIR="${BLENDER_RELEASE_DIR:-${ROOT_DIR}/Release}"
+RELEASE_DIR="${BLENDER_RELEASE_DIR:-${ROOT_DIR}/install}"
 LIBDIR="${BLENDER_LIBDIR:-${ROOT_DIR}/lib/macos_${ARCH}}"
 JOBS="${BLENDER_JOBS:-}"
 FETCH_LIBRARIES="${BLENDER_FETCH_LIBRARIES:-auto}"
@@ -32,12 +32,12 @@ Builds Blender for Apple Silicon macOS and installs the complete app bundle to:
 Options:
   -j, --jobs N              Parallel build jobs. Default: detected CPU count.
   --build-dir DIR           CMake build directory. Default: ./build/macos_arm64_Release.
-  --release-dir DIR         Install/artifact directory. Default: ./Release.
+  --release-dir DIR         Install/artifact directory. Default: ./install.
   --libdir DIR              Blender dependency library directory. Default: ./lib/macos_arm64.
   --fetch-libraries         Fetch missing official macOS arm64 dependency libraries and LFS data.
   --no-fetch-libraries      Fail if dependency libraries or LFS data are missing.
-  --clean-release           Remove ./Release before installing.
-  --package                 Also build Blender's package_archive target and copy zips to ./Release.
+  --clean-release           Remove ./install before installing.
+  --package                 Also build Blender's package_archive target and copy zips to ./install.
   --no-smoke-test           Skip the final background --version run.
   --run                     Launch a new instance of the freshly installed app after building.
   --open FILE               Launch a new instance and open FILE after building.
