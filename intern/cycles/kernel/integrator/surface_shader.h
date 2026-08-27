@@ -188,6 +188,33 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
     }
   }
 
+#ifdef __KERNEL_METAL__
+  /* Partition caustic transport without overlap: photon mapping handles sufficiently sharp
+   * glossy/transmission lobes reached after a diffuse bounce, while ordinary path tracing keeps
+   * rough caustics. Photon paths themselves never arrive here with diffuse visibility. */
+  if (kernel_data.integrator.use_photon_mapping &&
+      (path_visibility & PATH_RAY_VISIBILITY_DIFFUSE) &&
+      !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_PHOTON_MAPPING_UNSUPPORTED))
+  {
+    const float threshold = sqr(kernel_data.integrator.photon_roughness_threshold);
+    for (int i = 0; i < sd->num_closure; i++) {
+      ccl_private ShaderClosure *sc = &sd->closure[i];
+      if (!CLOSURE_IS_BSDF_DIFFUSE(sc->type) &&
+          (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_BSDF_TRANSMISSION(sc->type) ||
+           CLOSURE_IS_GLASS(sc->type)))
+      {
+        float2 roughness;
+        float eta;
+        bsdf_roughness_eta(sc, sd->wi, &roughness, &eta);
+        if (max(roughness.x, roughness.y) <= threshold) {
+          sc->type = CLOSURE_NONE_ID;
+          sc->sample_weight = 0.0f;
+        }
+      }
+    }
+  }
+#endif
+
   /* Filter glossy.
    *
    * Blurring of bsdf after bounces, for rays that have a small likelihood

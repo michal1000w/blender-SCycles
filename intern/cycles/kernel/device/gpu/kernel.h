@@ -37,6 +37,9 @@
 #include "kernel/integrator/shade_dedicated_light.h"
 #include "kernel/integrator/shade_light.h"
 #include "kernel/integrator/shade_shadow.h"
+#ifdef __KERNEL_METAL__
+#  include "kernel/integrator/photon_mapping.h"
+#endif
 #include "kernel/integrator/shade_surface.h"
 #include "kernel/integrator/shade_volume.h"
 
@@ -72,6 +75,19 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   }
 }
 ccl_gpu_kernel_postfix
+
+#ifdef __KERNEL_METAL__
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_photon_emit, const int num_photons, const int iteration)
+{
+  const uint photon_index = ccl_gpu_global_id_x();
+  if (photon_index < uint(num_photons)) {
+    ccl_gpu_kernel_call(
+        integrator_photon_emit(nullptr, photon_index, photon_index, uint(iteration)));
+  }
+}
+ccl_gpu_kernel_postfix
+#endif
 
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_init_from_camera,
