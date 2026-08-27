@@ -29,6 +29,11 @@ static int pixel_displacement_cache_sample_count(const int grid)
   return (grid + 1) * (grid + 2) / 2;
 }
 
+static int pixel_displacement_cache_sample_index(const int grid, const int u, const int v)
+{
+  return u * (grid + 1) - (u * (u - 1)) / 2 + v;
+}
+
 static bool shader_allows_pixel_displacement_cache(const Shader *shader)
 {
   /* Deterministic validation hook used by the visual regression tool to exercise the exact
@@ -70,15 +75,10 @@ static bool shader_allows_pixel_displacement_cache(const Shader *shader)
       continue;
     }
 
-    /* Procedural textures can contain arbitrarily high frequencies. Keep them exact. */
-    if (node_name == ustring("noise_texture") || node_name == ustring("gabor_texture") ||
-        node_name == ustring("voronoi_texture") || node_name == ustring("white_noise_texture") ||
-        node_name == ustring("wave_texture") || node_name == ustring("magic_texture") ||
-        node_name == ustring("checker_texture") || node_name == ustring("brick_texture") ||
-        node_name == ustring("gradient_texture"))
-    {
-      return false;
-    }
+    /* Static procedural textures are deterministic functions of the shading coordinates and can
+     * be sampled into the same piecewise-linear micromesh as image textures. The user-controlled
+     * micromesh resolution is the spatial bandwidth limit; inputs which can change with the ray,
+     * object, or time are rejected above. */
   }
 
   return true;
@@ -165,7 +165,7 @@ static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const 
     return 0;
   }
 
-  const int resolution = clamp(scene->integrator->get_pixel_displacement_steps(), 8, 128);
+  const int resolution = clamp(scene->integrator->get_pixel_displacement_resolution(), 64, 2048);
   float max_uv_edge;
   if (!mesh_triangle_uv_extent(mesh, triangle, &max_uv_edge)) {
     return resolution;
@@ -178,7 +178,7 @@ static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const 
   /* UVs produced by regular subdivisions should land on an integer resolution. Avoid ceilf()
    * turning harmless float round-off (for example 8.000001) into a different micromesh density,
    * which would make the rendered surface depend on the base mesh subdivision. */
-  return clamp(int(ceilf(scaled_resolution - 1.0e-5f)), 1, 128);
+  return clamp(int(ceilf(scaled_resolution - 1.0e-5f)), 1, 2048);
 }
 
 bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
@@ -370,11 +370,52 @@ static void read_pixel_displacement_cache_output(
 
       if (grid > 0) {
         int sample = pixel_displacement_offset.data()[prim];
+        const int sample_offset = sample;
+        const float3 face_normal = safe_normalize(cross(p1 - p0, p2 - p0));
+        float min_height = std::numeric_limits<float>::infinity();
+        float max_height = -std::numeric_limits<float>::infinity();
         for (int u = 0; u <= grid; u++) {
           for (int v = 0; v <= grid - u; v++, sample++) {
             const float fu = float(u) / float(grid);
             const float fv = float(v) / float(grid);
-            bounds.grow(p0 + fu * (p1 - p0) + fv * (p2 - p0) + make_float3(cache_data[sample]));
+            const float3 displacement = make_float3(cache_data[sample]);
+            bounds.grow(p0 + fu * (p1 - p0) + fv * (p2 - p0) + displacement);
+            const float height = dot(displacement, face_normal);
+            min_height = min(min_height, height);
+            max_height = max(max_height, height);
+          }
+        }
+        /* The fourth component is unused by displacement vectors. Keep tight height bounds in the
+         * first two samples so intersection can clip the ray slab without another device array. */
+        constexpr float height_epsilon = 1.0e-6f;
+        cache_data[sample_offset].w = min_height - height_epsilon;
+        cache_data[sample_offset + 1].w = max_height + height_epsilon;
+
+        constexpr int block_size = 8;
+        if (grid >= block_size) {
+          for (int block_u = 0; block_u < grid; block_u += block_size) {
+            for (int block_v = 0; block_u + block_v < grid; block_v += block_size) {
+              float block_min_height = std::numeric_limits<float>::infinity();
+              float block_max_height = -std::numeric_limits<float>::infinity();
+              const int end_u = min(block_u + block_size, grid);
+              for (int u = block_u; u <= end_u; u++) {
+                const int end_v = min(block_v + block_size, grid - u);
+                for (int v = block_v; v <= end_v; v++) {
+                  const int index = sample_offset +
+                                    pixel_displacement_cache_sample_index(grid, u, v);
+                  const float height = dot(make_float3(cache_data[index]), face_normal);
+                  block_min_height = min(block_min_height, height);
+                  block_max_height = max(block_max_height, height);
+                }
+              }
+
+              const int bounds_index = (block_u == 0 && block_v == 0) ?
+                                           sample_offset + 2 :
+                                           sample_offset + pixel_displacement_cache_sample_index(
+                                                               grid, block_u, block_v);
+              cache_data[bounds_index].w = block_min_height - height_epsilon;
+              cache_data[bounds_index + 1].w = block_max_height + height_epsilon;
+            }
           }
         }
       }

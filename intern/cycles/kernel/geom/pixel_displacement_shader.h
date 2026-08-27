@@ -177,6 +177,32 @@ ccl_device_inline float3 pixel_displacement_cache_sample(const int offset,
   return make_float3(D.x, D.y, D.z);
 }
 
+ccl_device_inline void pixel_displacement_cache_height_bounds(KernelGlobals kg,
+                                                              const int offset,
+                                                              ccl_private float *r_min_height,
+                                                              ccl_private float *r_max_height)
+{
+  *r_min_height = kernel_data_fetch(pixel_displacement_data, offset).w;
+  *r_max_height = kernel_data_fetch(pixel_displacement_data, offset + 1).w;
+}
+
+ccl_device_inline void pixel_displacement_cache_block_height_bounds(
+    KernelGlobals kg,
+    const int offset,
+    const int grid,
+    const int block_u,
+    const int block_v,
+    ccl_private float *r_min_height,
+    ccl_private float *r_max_height)
+{
+  const int bounds_index = (block_u == 0 && block_v == 0) ?
+                               offset + 2 :
+                               offset +
+                                   pixel_displacement_cache_sample_index(grid, block_u, block_v);
+  *r_min_height = kernel_data_fetch(pixel_displacement_data, bounds_index).w;
+  *r_max_height = kernel_data_fetch(pixel_displacement_data, bounds_index + 1).w;
+}
+
 ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
                                                        const int prim,
                                                        const bool motion,
@@ -743,6 +769,60 @@ ccl_device_inline float pixel_displacement_next_grid_crossing(const float x,
   return s + (boundary - value) / dx;
 }
 
+ccl_device_inline bool pixel_displacement_skip_empty_cache_block(KernelGlobals kg,
+                                                                 const int offset,
+                                                                 const int grid,
+                                                                 const int block_size,
+                                                                 const int iu,
+                                                                 const int iv,
+                                                                 const float gu0,
+                                                                 const float gv0,
+                                                                 const float gdu,
+                                                                 const float gdv,
+                                                                 const float s,
+                                                                 const float dda_t0,
+                                                                 const float dda_t1,
+                                                                 const float origin_plane,
+                                                                 const float dir_plane,
+                                                                 ccl_private float *r_next_s)
+{
+  if (grid < block_size) {
+    return false;
+  }
+
+  const int block_u = (iu / block_size) * block_size;
+  const int block_v = (iv / block_size) * block_size;
+  if (block_u + block_v >= grid) {
+    return false;
+  }
+
+  float next_s = 1.0f;
+  next_s = min(
+      next_s,
+      pixel_displacement_next_grid_crossing(gu0 / float(block_size), gdu / float(block_size), s));
+  next_s = min(
+      next_s,
+      pixel_displacement_next_grid_crossing(gv0 / float(block_size), gdv / float(block_size), s));
+  next_s = min(next_s,
+               pixel_displacement_next_grid_crossing(
+                   (gu0 + gv0) / float(block_size), (gdu + gdv) / float(block_size), s));
+  next_s = clamp(next_s, s + 1.0e-6f, 1.0f);
+
+  float min_height, max_height;
+  pixel_displacement_cache_block_height_bounds(
+      kg, offset, grid, block_u, block_v, &min_height, &max_height);
+  const float ray_height0 = origin_plane + mix(dda_t0, dda_t1, s) * dir_plane;
+  const float ray_height1 = origin_plane + mix(dda_t0, dda_t1, next_s) * dir_plane;
+  constexpr float height_epsilon = 2.0e-6f;
+  if (max(ray_height0, ray_height1) < min_height - height_epsilon ||
+      min(ray_height0, ray_height1) > max_height + height_epsilon)
+  {
+    *r_next_s = next_s;
+    return true;
+  }
+  return false;
+}
+
 /* Intersect the cached piecewise-linear micromesh without height marching. The projected ray is
  * linear in barycentric space, so grid-line crossings give the complete ordered set of cells for
  * normal displacement. Tangential vector displacement falls back to the general solver below if
@@ -758,6 +838,8 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_micro_mesh(KernelGl
                                                                         const float ray_tmax,
                                                                         const float2 bary_t0,
                                                                         const float2 bary_t1,
+                                                                        const float segment_t0,
+                                                                        const float segment_t1,
                                                                         ccl_private float *r_t,
                                                                         ccl_private float2 *r_bary)
 {
@@ -786,6 +868,8 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_micro_mesh(KernelGl
 
   const float2 b0 = pixel_displacement_clamp_bary(mix(bary_t0, bary_t1, slo));
   const float2 b1 = pixel_displacement_clamp_bary(mix(bary_t0, bary_t1, shi));
+  const float dda_t0 = mix(segment_t0, segment_t1, slo);
+  const float dda_t1 = mix(segment_t0, segment_t1, shi);
   const float gu0 = b0.x * float(grid);
   const float gv0 = b0.y * float(grid);
   const float gdu = (b1.x - b0.x) * float(grid);
@@ -797,8 +881,12 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_micro_mesh(KernelGl
   float best_t = ray_tmax;
   float2 best_bary = zero_float2();
   float s = 0.0f;
+  const float3 face_Ng = safe_normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
+  const float origin_plane = dot(ray_P - verts[0], face_Ng);
+  const float dir_plane = dot(ray_D, face_Ng);
 
-  for (int iteration = 0; iteration < 388 && s < 1.0f + 1.0e-6f; iteration++) {
+  /* A line can cross at most grid boundaries from each of the u, v, and u + v families. */
+  for (int iteration = 0; iteration < 6148 && s < 1.0f + 1.0e-6f; iteration++) {
     float next_s = 1.0f;
     next_s = min(next_s, pixel_displacement_next_grid_crossing(gu0, gdu, s));
     next_s = min(next_s, pixel_displacement_next_grid_crossing(gv0, gdv, s));
@@ -811,6 +899,31 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_micro_mesh(KernelGl
     const int iu = clamp(int(floorf(gu)), 0, grid - 1);
     const int iv = clamp(int(floorf(gv)), 0, grid - 1);
     const bool upper = (gu - floorf(gu)) + (gv - floorf(gv)) > 1.0f;
+
+    float block_next_s;
+    if (pixel_displacement_skip_empty_cache_block(kg,
+                                                  offset,
+                                                  grid,
+                                                  8,
+                                                  iu,
+                                                  iv,
+                                                  gu0,
+                                                  gv0,
+                                                  gdu,
+                                                  gdv,
+                                                  s,
+                                                  dda_t0,
+                                                  dda_t1,
+                                                  origin_plane,
+                                                  dir_plane,
+                                                  &block_next_s))
+    {
+      if (block_next_s >= 1.0f) {
+        break;
+      }
+      s = block_next_s;
+      continue;
+    }
 
     /* The midpoint lies strictly inside the current DDA interval, so it uniquely identifies the
      * crossed cell. Scalar cached displacement cannot move a microtriangle into a neighboring
@@ -854,23 +967,23 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_surface(KernelGloba
     return false;
   }
   (void)cache_grid;
-  (void)cache_offset;
 
-  const uint object_flag = kernel_data_fetch(object_flag, object);
-  const float3 Ng = pixel_displacement_face_normal(verts, object_flag);
-  const float max_distance = kernel_data.integrator.pixel_displacement_max_distance;
+  const float3 Ng = safe_normalize(cross(verts[1] - verts[0], verts[2] - verts[0]));
   const float origin_plane = dot(ray_P - verts[0], Ng);
   const float dir_plane = dot(ray_D, Ng);
   float t0 = ray_tmin;
   float t1 = ray_tmax;
 
+  float min_height, max_height;
+  pixel_displacement_cache_height_bounds(kg, cache_offset, &min_height, &max_height);
+
   if (fabsf(dir_plane) > 1.0e-8f) {
-    const float ta = (-max_distance - origin_plane) / dir_plane;
-    const float tb = (max_distance - origin_plane) / dir_plane;
+    const float ta = (min_height - origin_plane) / dir_plane;
+    const float tb = (max_height - origin_plane) / dir_plane;
     t0 = max(t0, min(ta, tb));
     t1 = min(t1, max(ta, tb));
   }
-  else if (origin_plane < -max_distance || origin_plane > max_distance) {
+  else if (origin_plane < min_height || origin_plane > max_height) {
     return false;
   }
   if (t1 <= t0) {
@@ -888,7 +1001,8 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_surface(KernelGloba
   const float3 e1 = verts[2] - verts[0];
   const float3 e2 = verts[2] - verts[1];
   const float min_edge_len = sqrtf(max(min(min(dot(e0, e0), dot(e1, e1)), dot(e2, e2)), 1.0e-8f));
-  const float bary_eps = clamp(max_distance / min_edge_len + 5.0e-4f, 5.0e-4f, 0.25f);
+  const float height_range = max_height - min_height;
+  const float bary_eps = clamp(height_range / min_edge_len + 5.0e-4f, 5.0e-4f, 0.25f);
   float slo = 0.0f;
   float shi = 1.0f;
   if (!pixel_displacement_clip_greater_equal_zero(
@@ -914,6 +1028,8 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_surface(KernelGloba
                                                       ray_tmax,
                                                       mix(bary_t0, bary_t1, slo),
                                                       mix(bary_t0, bary_t1, shi),
+                                                      mix(t0, t1, slo),
+                                                      mix(t0, t1, shi),
                                                       r_t,
                                                       &hit_bary))
   {
@@ -1114,6 +1230,8 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                      ray_tmax,
                                                      clipped_bary_t0,
                                                      clipped_bary_t1,
+                                                     t0,
+                                                     t1,
                                                      &cached_t,
                                                      &cached_bary))
   {
