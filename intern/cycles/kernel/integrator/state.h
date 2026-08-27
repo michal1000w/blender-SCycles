@@ -208,8 +208,18 @@ struct IntegratorStateGPU {
   /* Partition/key offsets used when writing sorted active indices. */
   ccl_global int *sort_partition_key_offsets;
 
+  /* Metal photon-map working memory. These remain null on other devices and when disabled. */
+  ccl_global KernelPhoton *photons;
+  ccl_global uint *photon_hash;
+  ccl_global uint *photon_stored;
+
   /* Divisor used to partition active indices by locality when sorting by material. */
   uint sort_partition_divisor;
+
+  uint photon_hash_size;
+  uint photon_capacity;
+  uint photon_iteration;
+  float photon_radius;
 };
 
 /* Abstraction

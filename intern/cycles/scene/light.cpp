@@ -542,10 +542,12 @@ void LightManager::test_enabled_lights(Scene *scene)
     /* Ignore background light if:
      * - If unsupported on a device
      * - If we don't need it (no HDRs etc.)
-     */
+     * Photon emission is view independent and still needs constant environments, for which the
+     * regular camera integrator normally disables explicit background-light sampling. */
     Shader *shader = scene->background->get_shader(scene);
     for (BackgroundLight *light : background_lights) {
-      light->is_enabled = has_portal || (light->use_mis && shader->has_surface_spatial_varying);
+      light->is_enabled = scene->integrator->use_photon_mapping_on_device(scene->device) ||
+                          has_portal || (light->use_mis && shader->has_surface_spatial_varying);
       if (light->is_enabled) {
         background_enabled = true;
         background_resolution = light->get_map_resolution();
@@ -572,7 +574,11 @@ void LightManager::device_update_distribution(Device * /*unused*/,
                                               Progress &progress)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  if (kintegrator->use_light_tree) {
+  /* Photon emission needs a view-independent emitter CDF even when camera paths use the light
+   * tree. Building both is intentional; the regular light sampler continues using the tree. */
+  if (kintegrator->use_light_tree &&
+      !scene->integrator->use_photon_mapping_on_device(scene->device))
+  {
     dscene->light_distribution.free();
     return;
   }
