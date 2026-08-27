@@ -96,6 +96,9 @@ PathTraceWorkGPU::PathTraceWorkGPU(Device *device,
       queued_paths_(device, "queued_paths", MEM_READ_WRITE),
       num_queued_paths_(device, "num_queued_paths", MEM_READ_WRITE),
       work_tiles_(device, "work_tiles", MEM_READ_WRITE),
+      photons_(device, "photon_map"),
+      photon_hash_(device, "photon_hash"),
+      photon_stored_(device, "photon_stored", MEM_READ_WRITE),
       display_rgba_half_(device, "display buffer half", MEM_READ_WRITE),
       max_num_paths_(0),
       min_num_active_main_paths_(0),
@@ -310,6 +313,40 @@ void PathTraceWorkGPU::alloc_work_memory()
   alloc_integrator_queue();
   alloc_integrator_sorting();
   alloc_integrator_path_split();
+  alloc_photon_mapping();
+}
+
+void PathTraceWorkGPU::alloc_photon_mapping()
+{
+  if (!device_scene_->data.integrator.use_photon_mapping) {
+    photons_.free();
+    photon_hash_.free();
+    photon_stored_.free();
+    integrator_state_gpu_.photons = nullptr;
+    integrator_state_gpu_.photon_hash = nullptr;
+    integrator_state_gpu_.photon_stored = nullptr;
+    integrator_state_gpu_.photon_hash_size = 0;
+    integrator_state_gpu_.photon_capacity = 0;
+    return;
+  }
+
+  const uint capacity = uint(min(device_scene_->data.integrator.photon_count, max_num_paths_));
+  const uint hash_size = max(2048u, next_power_of_two(2u * capacity));
+
+  photons_.alloc_to_device(capacity, false);
+  photon_hash_.alloc_to_device(hash_size, false);
+  if (photon_stored_.size() == 0) {
+    photon_stored_.alloc(1);
+    photon_stored_.zero_to_device();
+  }
+
+  integrator_state_gpu_.photons = (KernelPhoton *)photons_.device_pointer;
+  integrator_state_gpu_.photon_hash = (uint *)photon_hash_.device_pointer;
+  integrator_state_gpu_.photon_stored = (uint *)photon_stored_.device_pointer;
+  integrator_state_gpu_.photon_hash_size = hash_size;
+  integrator_state_gpu_.photon_capacity = capacity;
+  integrator_state_gpu_.photon_iteration = 0;
+  integrator_state_gpu_.photon_radius = device_scene_->data.integrator.photon_radius;
 }
 
 void PathTraceWorkGPU::init_execution()
@@ -364,6 +401,7 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
                              device_scene_->data.integrator.scrambling_distance);
 
   enqueue_reset();
+  enqueue_photon_mapping(start_sample);
 
   int num_iterations = 0;
   uint64_t num_busy_accum = 0;
@@ -408,6 +446,16 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
   }
   else {
     statistics.occupancy = 0.0f;
+  }
+
+  if (device_scene_->data.integrator.use_photon_mapping && LOG_IS_ON(LOG_LEVEL_DEBUG)) {
+    queue_->copy_from_device(photon_stored_);
+    if (queue_->synchronize()) {
+      LOG_DEBUG << "Photon map stored "
+                << min(photon_stored_.data()[0], integrator_state_gpu_.photon_capacity) << " / "
+                << integrator_state_gpu_.photon_capacity << " photons at radius "
+                << integrator_state_gpu_.photon_radius;
+    }
   }
 }
 
@@ -454,6 +502,31 @@ void PathTraceWorkGPU::enqueue_reset()
   if (integrator_queue_counter_.host_pointer) {
     memset(integrator_queue_counter_.data(), 0, integrator_queue_counter_.memory_size());
   }
+}
+
+void PathTraceWorkGPU::enqueue_photon_mapping(const int start_sample)
+{
+  if (!device_scene_->data.integrator.use_photon_mapping ||
+      integrator_state_gpu_.photon_capacity == 0)
+  {
+    return;
+  }
+
+  queue_->zero_to_device(photon_hash_);
+  queue_->zero_to_device(photon_stored_);
+
+  const int iteration = max(start_sample, 0);
+  integrator_state_gpu_.photon_iteration = iteration;
+  integrator_state_gpu_.photon_radius = max(
+      device_scene_->data.integrator.photon_radius *
+          powf(float(iteration + 1), -device_scene_->data.integrator.photon_radius_decay),
+      1.0e-6f);
+  device_->const_copy_to(
+      "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
+
+  const int num_photons = int(integrator_state_gpu_.photon_capacity);
+  const DeviceKernelArguments args(&num_photons, &iteration);
+  queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT, num_photons, args);
 }
 
 bool PathTraceWorkGPU::enqueue_path_iteration()

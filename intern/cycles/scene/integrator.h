@@ -40,6 +40,8 @@ class Integrator : public Node {
  public:
   NODE_DECLARE
 
+  bool use_photon_mapping_on_device(const Device *device) const;
+
   NODE_SOCKET_API(int, min_bounce)
   NODE_SOCKET_API(int, max_bounce)
 
@@ -80,6 +82,15 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(float, filter_glossy)
+
+  NODE_SOCKET_API(bool, use_photon_mapping)
+  NODE_SOCKET_API(int, photon_count)
+  NODE_SOCKET_API(float, photon_radius)
+  NODE_SOCKET_API(float, photon_radius_decay)
+  NODE_SOCKET_API(int, photon_max_bounces)
+  NODE_SOCKET_API(int, photon_gather_max)
+  NODE_SOCKET_API(float, photon_roughness_threshold)
+  NODE_SOCKET_API(float, photon_normal_threshold)
 
   NODE_SOCKET_API(bool, use_direct_light);
   NODE_SOCKET_API(bool, use_indirect_light);

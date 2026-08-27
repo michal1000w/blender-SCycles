@@ -382,6 +382,14 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
+  integrator->set_use_photon_mapping(get_boolean(cscene, "use_photon_mapping"));
+  integrator->set_photon_count(get_int(cscene, "photon_count"));
+  integrator->set_photon_radius(get_float(cscene, "photon_radius"));
+  integrator->set_photon_radius_decay(get_float(cscene, "photon_radius_decay"));
+  integrator->set_photon_max_bounces(get_int(cscene, "photon_max_bounces"));
+  integrator->set_photon_gather_max(get_int(cscene, "photon_gather_max"));
+  integrator->set_photon_roughness_threshold(get_float(cscene, "photon_roughness_threshold"));
+  integrator->set_photon_normal_threshold(get_float(cscene, "photon_normal_threshold"));
 
   integrator->set_use_pixel_jitter(get_boolean(cscene, "use_pixel_jitter"));
   integrator->set_use_pixel_displacement(get_boolean(cscene, "use_pixel_displacement"));

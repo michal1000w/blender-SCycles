@@ -193,6 +193,18 @@ KERNEL_STRUCT_MEMBER(integrator, int, transparent_shadows)
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_reflective)
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_refractive)
 KERNEL_STRUCT_MEMBER(integrator, float, filter_glossy)
+/* Progressive surface photon mapping. The map itself is render-working memory and its pointers
+ * live in IntegratorStateGPU; these values are scene-level controls shared by emission/gather. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_photon_mapping)
+KERNEL_STRUCT_MEMBER(integrator, int, photon_count)
+KERNEL_STRUCT_MEMBER(integrator, int, photon_max_bounces)
+KERNEL_STRUCT_MEMBER(integrator, int, photon_gather_max)
+KERNEL_STRUCT_MEMBER(integrator, int, photon_time_bins)
+KERNEL_STRUCT_MEMBER(integrator, float, photon_radius)
+KERNEL_STRUCT_MEMBER(integrator, float, photon_radius_decay)
+KERNEL_STRUCT_MEMBER(integrator, float, photon_roughness_threshold)
+KERNEL_STRUCT_MEMBER(integrator, float, photon_normal_threshold)
+KERNEL_STRUCT_MEMBER(integrator, float4, photon_scene)
 /* Seed. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, seed)
