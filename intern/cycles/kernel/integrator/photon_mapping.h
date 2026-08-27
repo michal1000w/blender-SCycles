@@ -104,6 +104,13 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                              ccl_private Spectrum *flux,
                                              ccl_private int *emitter_object)
 {
+  /* MetalRT consumes the self-intersection payload unconditionally. Keep it initialized for
+   * analytic emitters, and replace it below for emissive geometry. */
+  ray->self.prim = PRIM_NONE;
+  ray->self.object = OBJECT_NONE;
+  ray->self.light_prim = PRIM_NONE;
+  ray->self.light_object = OBJECT_NONE;
+
   if (kernel_data.integrator.num_distribution == 0) {
     return false;
   }
@@ -138,6 +145,8 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       u -= v;
     }
     ray->P = (1.0f - u - v) * V[0] + u * V[1] + v * V[2];
+    ray->self.prim = prim_or_lamp;
+    ray->self.object = *emitter_object;
 
     const int shader = kernel_data_fetch(tri_shader, prim_or_lamp);
     const int shader_flags = kernel_data_fetch(shaders, shader & SHADER_MASK).flags;
@@ -360,7 +369,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       hash_uint3(photon_index, iteration, uint(kernel_data.integrator.seed) ^ 0x70686f74u));
   photon_state_init(state, rng, iteration);
 
-  Ray ray;
+  Ray ray ccl_optional_struct_init;
   Spectrum throughput;
   int emitter_object = OBJECT_NONE;
   const float time = lcg_step_float(&rng);
@@ -450,6 +459,10 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     }
     ray.D = normalize(wo);
     ray.tmax = FLT_MAX;
+    ray.self.prim = sd.prim;
+    ray.self.object = sd.object;
+    ray.self.light_prim = PRIM_NONE;
+    ray.self.light_object = OBJECT_NONE;
 
     if (bounce >= 3) {
       const float continuation = min(saturatef(reduce_max(throughput)), 0.95f);
