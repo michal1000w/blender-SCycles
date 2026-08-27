@@ -552,7 +552,9 @@ ccl_device_inline bool metalrt_pixel_displacement_intersect(
 }
 
 #  ifdef __BVH_LOCAL__
-[[intersection(bounding_box, triangle_data, curve_data)]] BoundingBoxIntersectionResult
+[[intersection(bounding_box,
+               metal::raytracing::triangle_data,
+               metal::raytracing::curve_data)]] BoundingBoxIntersectionResult
 __intersection__local_pixel_displacement_single_hit(
     constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
     ray_data MetalKernelContext::MetalRTIntersectionLocalPayload_single_hit &payload [[payload]],
@@ -596,7 +598,9 @@ __intersection__local_pixel_displacement_single_hit(
   return result;
 }
 
-[[intersection(bounding_box, triangle_data, curve_data)]] BoundingBoxIntersectionResult
+[[intersection(bounding_box,
+               metal::raytracing::triangle_data,
+               metal::raytracing::curve_data)]] BoundingBoxIntersectionResult
 __intersection__local_pixel_displacement(
     constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
     ray_data MetalKernelContext::MetalRTIntersectionLocalPayload &payload [[payload]],
@@ -636,8 +640,8 @@ __intersection__local_pixel_displacement(
 #  endif /* __BVH_LOCAL__ */
 
 [[intersection(bounding_box,
-               triangle_data,
-               curve_data,
+               metal::raytracing::triangle_data,
+               metal::raytracing::curve_data,
                METALRT_TAGS METALRT_LIMITS)]] BoundingBoxIntersectionResult
 __intersection__pixel_displacement(constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
                                    ray_data MetalKernelContext::MetalRTIntersectionPayload &payload
@@ -693,8 +697,8 @@ __intersection__pixel_displacement(constant KernelParamsMetal &launch_params_met
 }
 
 [[intersection(bounding_box,
-               triangle_data,
-               curve_data,
+               metal::raytracing::triangle_data,
+               metal::raytracing::curve_data,
                METALRT_TAGS METALRT_LIMITS)]] BoundingBoxIntersectionResult
 __intersection__pixel_displacement_shadow(
     constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
@@ -743,8 +747,8 @@ __intersection__pixel_displacement_shadow(
 }
 
 [[intersection(bounding_box,
-               triangle_data,
-               curve_data,
+               metal::raytracing::triangle_data,
+               metal::raytracing::curve_data,
                METALRT_TAGS METALRT_LIMITS)]] BoundingBoxIntersectionResult
 __intersection__pixel_displacement_shadow_all(
     constant KernelParamsMetal &launch_params_metal [[buffer(1)]],
