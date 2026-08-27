@@ -391,11 +391,13 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_pixel_displacement_scale(get_float(cscene, "pixel_displacement_scale"));
   integrator->set_pixel_displacement_max_distance(
       get_float(cscene, "pixel_displacement_max_distance"));
+  integrator->set_pixel_displacement_resolution(get_int(cscene, "pixel_displacement_resolution"));
   integrator->set_pixel_displacement_steps(get_int(cscene, "pixel_displacement_steps"));
 
   if (integrator->use_pixel_displacement_is_modified() ||
       integrator->pixel_displacement_scale_is_modified() ||
       integrator->pixel_displacement_max_distance_is_modified() ||
+      integrator->pixel_displacement_resolution_is_modified() ||
       integrator->pixel_displacement_steps_is_modified())
   {
     for (Geometry *geom : scene->geometry) {

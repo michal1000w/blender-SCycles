@@ -937,6 +937,19 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=32,
     )
 
+    pixel_displacement_resolution: IntProperty(
+        name="Micromesh Resolution",
+        description=(
+            "Maximum cached displacement samples across one UV tile; this controls visible "
+            "microtriangle detail independently of the base mesh subdivision"
+        ),
+        min=64,
+        max=2048,
+        soft_min=256,
+        soft_max=2048,
+        default=1024,
+    )
+
     seed: IntProperty(
         name="Seed",
         description="Seed value for integrator to get different noise patterns",
