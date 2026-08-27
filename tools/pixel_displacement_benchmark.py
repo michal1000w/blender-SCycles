@@ -19,6 +19,9 @@ def configure_cycles(samples, resolution):
     scene.cycles.pixel_displacement_scale = 1.0
     scene.cycles.pixel_displacement_max_distance = 0.12
     scene.cycles.pixel_displacement_steps = 32
+    scene.cycles.pixel_displacement_resolution = int(
+        os.environ.get("PIXEL_DISPLACEMENT_BENCH_MICROMESH_RESOLUTION", "1024")
+    )
     scene.cycles.device = os.environ.get("PIXEL_DISPLACEMENT_BENCH_DEVICE", "GPU")
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.look = "None"

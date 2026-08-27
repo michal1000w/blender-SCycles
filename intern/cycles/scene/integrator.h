@@ -122,6 +122,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, use_pixel_displacement)
   NODE_SOCKET_API(float, pixel_displacement_scale)
   NODE_SOCKET_API(float, pixel_displacement_max_distance)
+  NODE_SOCKET_API(int, pixel_displacement_resolution)
   NODE_SOCKET_API(int, pixel_displacement_steps)
   int pixel_jitter_frame = 0;
 
