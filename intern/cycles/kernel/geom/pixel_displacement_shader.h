@@ -78,7 +78,8 @@ ccl_device_inline void pixel_displacement_setup_shader_data(KernelGlobals kg,
   sd->v = v;
   sd->time = time;
   sd->ray_length = 0.0f;
-  sd->flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
+  sd->runtime_flag = 0;
+  sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = kernel_data_fetch(object_flag, object);
   sd->ray_P = zero_float3();
   sd->ray_dP = 0.0f;
