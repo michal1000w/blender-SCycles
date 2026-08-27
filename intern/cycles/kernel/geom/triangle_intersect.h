@@ -161,8 +161,10 @@ ccl_device_inline bool triangle_intersect_local(KernelGlobals kg,
 #ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
   if (use_pixel_displacement) {
     const float3 verts[3] = {tri_a, tri_b, tri_c};
-    const uint object_flag = kernel_data_fetch(object_flag, object);
-    local_isect->Ng[hit_index] = pixel_displacement_face_normal(verts, object_flag);
+    float3 hit_P, hit_Ng, dPdu, dPdv;
+    pixel_displacement_displaced_geometry(
+        kg, object, prim, u, v, 0.5f, false, verts, &hit_P, &hit_Ng, &dPdu, &dPdv);
+    local_isect->Ng[hit_index] = hit_Ng;
   }
   else {
 #endif
