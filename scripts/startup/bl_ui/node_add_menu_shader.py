@@ -336,22 +336,31 @@ class NODE_MT_shader_node_shader_base(node_add_menu.NodeMenu):
         if not object_light_shader_nodes_poll(context):
             layout.separator()
 
-            self.node_operator(
-                layout,
-                "ShaderNodeVolumePrincipled",
-            )
-            self.node_operator(
-                layout,
-                "ShaderNodeVolumeAbsorption",
-            )
-            self.node_operator(
-                layout,
-                "ShaderNodeVolumeCoefficients",
-            )
-            self.node_operator(
-                layout,
-                "ShaderNodeVolumeScatter",
-            )
+        self.node_operator(
+            layout,
+            "ShaderNodeVolumePrincipled",
+            poll=not object_light_shader_nodes_poll(context),
+        )
+        self.node_operator(
+            layout,
+            "ShaderNodeVolumeFast",
+            poll=not object_light_shader_nodes_poll(context),
+        )
+        self.node_operator(
+            layout,
+            "ShaderNodeVolumeAbsorption",
+            poll=not object_light_shader_nodes_poll(context),
+        )
+        self.node_operator(
+            layout,
+            "ShaderNodeVolumeCoefficients",
+            poll=not object_light_shader_nodes_poll(context),
+        )
+        self.node_operator(
+            layout,
+            "ShaderNodeVolumeScatter",
+            poll=not object_light_shader_nodes_poll(context),
+        )
 
         self.draw_assets_for_catalog(layout, self.bl_label)
 

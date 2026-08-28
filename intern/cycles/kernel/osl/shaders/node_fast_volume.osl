@@ -1,0 +1,78 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ *
+ * SPDX-License-Identifier: Apache-2.0 */
+
+#include "node_math.h"
+#include "node_scatter.h"
+#include "stdcycles.h"
+
+shader node_fast_volume(string phase = "Henyey-Greenstein",
+                        color ScatterColor = color(0.5),
+                        float Density = 1.0,
+                        float DensityCutoff = 0.001,
+                        float ScatterStrength = 1.0,
+                        float Anisotropy = 0.0,
+                        float IOR = 1.33,
+                        float Backscatter = 0.1,
+                        float Alpha = 0.5,
+                        float Diameter = 20.0,
+                        color AbsorptionColor = color(0.0),
+                        float AbsorptionStrength = 0.0,
+                        float EmissionStrength = 0.0,
+                        color EmissionColor = color(1.0),
+                        float FlameCutoff = 0.001,
+                        float BlackbodyStrength = 0.0,
+                        color BlackbodyTint = color(1.0),
+                        float Temperature = 1000.0,
+                        string DensityAttribute = "geom:density",
+                        string ColorAttribute = "",
+                        string ScatterAttribute = "",
+                        string EmissionAttribute = "geom:flames",
+                        string TemperatureAttribute = "geom:temperature",
+                        output closure color Volume = 0)
+{
+  float density_field = 1.0;
+  getattribute(DensityAttribute, density_field);
+  float density = max(Density * density_field, 0.0);
+  if (density < max(DensityCutoff, 0.0)) {
+    density = 0.0;
+  }
+
+  if (density > 0.0) {
+    color color_field = color(1.0);
+    float scatter_field = 1.0;
+    getattribute(ColorAttribute, color_field);
+    getattribute(ScatterAttribute, scatter_field);
+    color sigma_s = max(ScatterColor * color_field, 0.0) * density *
+                    max(ScatterStrength, 0.0) * max(scatter_field, 0.0);
+    color sigma_a = max(AbsorptionColor, 0.0) * density * max(AbsorptionStrength, 0.0);
+    closure color scatter_closure = scatter(
+        phase, Anisotropy, IOR, Backscatter, Alpha, Diameter);
+    Volume = sigma_s * scatter_closure + sigma_a * absorption();
+  }
+
+  float flame = 1.0;
+  getattribute(EmissionAttribute, flame);
+  flame = max(flame, 0.0);
+  if (flame <= max(FlameCutoff, 0.0)) {
+    flame = 0.0;
+  }
+  if (EmissionStrength > 0.0 && flame > 0.0) {
+    Volume += max(EmissionColor, 0.0) * EmissionStrength * flame * emission();
+  }
+
+  if (BlackbodyStrength > 0.0 && flame > 0.0) {
+    float temperature_field = 1.0;
+    getattribute(TemperatureAttribute, temperature_field);
+    float T = max(Temperature * temperature_field, 0.0);
+    float T4 = (T * T) * (T * T);
+    float intensity = (5.670373e-8 * 1e-6 / M_PI) * T4 * max(BlackbodyStrength, 0.0);
+    if (intensity > 0.0) {
+      color bb = blackbody(T);
+      float l = luminance(bb);
+      if (l > 0.0) {
+        Volume += bb * max(BlackbodyTint, 0.0) * (intensity * flame / l) * emission();
+      }
+    }
+  }
+}
