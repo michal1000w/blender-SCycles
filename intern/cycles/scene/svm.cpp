@@ -806,6 +806,9 @@ void SVMCompiler::generate_closure_node(ShaderNode *node, CompilerState *state)
     if (node->has_dispersion()) {
       current_shader->has_dispersion = true;
     }
+    if (node->has_spectral_transmission()) {
+      current_shader->has_spectral_transmission = true;
+    }
   }
 }
 

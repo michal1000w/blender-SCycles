@@ -106,6 +106,7 @@ Shader::Shader() : Node(get_node_type())
   has_aov_output_node = false;
   has_time_dependency = false;
   has_dispersion = false;
+  has_spectral_transmission = false;
 
   emission_estimate = zero_float3();
   emission_sampling = EMISSION_SAMPLING_NONE;
@@ -567,6 +568,7 @@ void ShaderManager::device_update_pre(Device * /*device*/,
       shader->has_displacement = output->input("Displacement")->link != nullptr;
       shader->has_bump_from_surface = false;
       shader->has_dispersion = false;
+      shader->has_spectral_transmission = false;
 
       /* Determine both properties. */
       shader->has_light_path_node = false;
@@ -697,7 +699,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (shader->has_light_path_node) {
       flag |= SD_HAS_LIGHT_PATH_NODE;
     }
-    if (shader->has_dispersion) {
+    if (shader->has_dispersion || shader->has_spectral_transmission) {
       flag |= SD_REQUIRES_WAVELENGTH;
     }
 
@@ -749,6 +751,9 @@ void ShaderManager::device_update_common(Device * /*device*/,
   kfilm->rec709_to_r = make_float4(rec709_to_r);
   kfilm->rec709_to_g = make_float4(rec709_to_g);
   kfilm->rec709_to_b = make_float4(rec709_to_b);
+  kfilm->rgb_to_rec709_r = make_float4(rgb_to_rec709_r);
+  kfilm->rgb_to_rec709_g = make_float4(rgb_to_rec709_g);
+  kfilm->rgb_to_rec709_b = make_float4(rgb_to_rec709_b);
   kfilm->is_rec709 = scene_linear_interop_id == "lin_rec709_scene";
 }
 
@@ -1007,6 +1012,9 @@ void ShaderManager::init_xyz_transforms()
     rec709_to_r = make_float3(1.0f, 0.0f, 0.0f);
     rec709_to_g = make_float3(0.0f, 1.0f, 0.0f);
     rec709_to_b = make_float3(0.0f, 0.0f, 1.0f);
+    rgb_to_rec709_r = make_float3(1.0f, 0.0f, 0.0f);
+    rgb_to_rec709_g = make_float3(0.0f, 1.0f, 0.0f);
+    rgb_to_rec709_b = make_float3(0.0f, 0.0f, 1.0f);
   }
   else {
     const Transform xyz_to_rec709 = ColorSpaceManager::get_xyz_to_rec709();
@@ -1014,6 +1022,11 @@ void ShaderManager::init_xyz_transforms()
     rec709_to_r = make_float3(rec709_to_rgb.x);
     rec709_to_g = make_float3(rec709_to_rgb.y);
     rec709_to_b = make_float3(rec709_to_rgb.z);
+
+    const Transform rgb_to_rec709 = xyz_to_rec709 * transform_inverse(xyz_to_rgb);
+    rgb_to_rec709_r = make_float3(rgb_to_rec709.x);
+    rgb_to_rec709_g = make_float3(rgb_to_rec709.y);
+    rgb_to_rec709_b = make_float3(rgb_to_rec709.z);
   }
 
   xyz_to_r = make_float3(xyz_to_rgb.x);

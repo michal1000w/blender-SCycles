@@ -32,6 +32,15 @@ ccl_device float3 rec709_to_rgb(KernelGlobals kg, const float3 rec709)
                          dot(make_float3(kernel_data.film.rec709_to_b), rec709));
 }
 
+ccl_device float3 rgb_to_rec709(KernelGlobals kg, const float3 rgb)
+{
+  return (kernel_data.film.is_rec709) ?
+             rgb :
+             make_float3(dot(make_float3(kernel_data.film.rgb_to_rec709_r), rgb),
+                         dot(make_float3(kernel_data.film.rgb_to_rec709_g), rgb),
+                         dot(make_float3(kernel_data.film.rgb_to_rec709_b), rgb));
+}
+
 template<class T> ccl_device auto linear_rgb_to_gray(KernelGlobals kg, const T c)
 {
   return dot(c, make_float3(kernel_data.film.rgb_to_y));
@@ -53,6 +62,24 @@ ccl_device float spectrum_to_gray(KernelGlobals kg, Spectrum c)
 }
 
 #ifdef __SPECTRAL__
+/* Reconstruct a smooth, non-negative transmittance spectrum from linear BT.709 using the three
+ * primaries by Mallett and Yuksel (EGSR 2019). This is exact under D65 for in-gamut BT.709 colors
+ * and costs one interpolated float3 lookup plus a dot product at the selected wavelength. */
+ccl_device_inline float bt709_to_spectral_transmission(const float3 rgb, const float lambda_um)
+{
+  int i;
+  const float f = floorfrac((lambda_um - WAVELENGTH_CIE_MIN) / WAVELENGTH_DLAMBDA, &i);
+
+  if (i < 0 || i >= WAVELENGTH_RESOLUTION) {
+    return 0.0f;
+  }
+
+  ccl_constant float *b0 = cie1931_bt709_spectral_primaries[i];
+  ccl_constant float *b1 = cie1931_bt709_spectral_primaries[i + 1];
+  const float3 basis = mix(make_float3(b0[0], b0[1], b0[2]), make_float3(b1[0], b1[1], b1[2]), f);
+  return dot(rgb, basis);
+}
+
 /* Given a wavelength, convert it to rgb in the working color space, assuming D65 illuminant.
  * [Metameric: Spectral Uplifting via Controllable Color Constraints]
  * (https://markvanderuit.nl/files/2023-07-23-paper-metameric/metameric-paper.pdf)

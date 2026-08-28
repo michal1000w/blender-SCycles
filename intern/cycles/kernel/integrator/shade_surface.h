@@ -822,7 +822,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
     }
 
 #ifdef __SPECTRAL__
-    if (sd.runtime_flag & SR_BSDF_HAS_DISPERSION) {
+    if (sd.runtime_flag & (SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION)) {
       update_path_throughput_for_dispersion(kg, state, sd.rand_wavelength);
     }
 #endif

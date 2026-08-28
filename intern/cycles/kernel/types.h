@@ -946,11 +946,14 @@ enum ShaderRuntimeFlag {
   SR_RAY_PORTAL = (1 << 12),
   /* BSDF has dispersion. */
   SR_BSDF_HAS_DISPERSION = (1 << 13),
+  /* BSDF has wavelength-dependent transmission tint. */
+  SR_BSDF_HAS_SPECTRAL_TRANSMISSION = (1 << 14),
 
   /* Flags that indicate the presence of closures. */
   SR_CLOSURE_FLAG = (SR_EMISSION | SR_BSDF | SR_BSDF_HAS_EVAL | SR_BSSRDF | SR_HOLDOUT |
                      SR_EXTINCTION | SR_SCATTER | SR_IS_VOLUME_SHADER_EVAL | SR_TRANSPARENT |
-                     SR_BSDF_HAS_TRANSMISSION | SR_RAY_PORTAL | SR_BSDF_HAS_DISPERSION)
+                     SR_BSDF_HAS_TRANSMISSION | SR_RAY_PORTAL | SR_BSDF_HAS_DISPERSION |
+                     SR_BSDF_HAS_SPECTRAL_TRANSMISSION)
 };
 
 /* Shader flags that are set after compiling the shaders. */

@@ -189,6 +189,10 @@ class ShaderNode : public Node {
   {
     return false;
   }
+  virtual bool has_spectral_transmission()
+  {
+    return false;
+  }
   virtual bool has_bump()
   {
     return false;

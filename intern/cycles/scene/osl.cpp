@@ -1464,6 +1464,9 @@ void OSLCompiler::generate_nodes(const ShaderNodeSet &nodes)
             if (node->has_dispersion()) {
               current_shader->has_dispersion = true;
             }
+            if (node->has_spectral_transmission()) {
+              current_shader->has_spectral_transmission = true;
+            }
           }
           else if (current_type == SHADER_TYPE_VOLUME) {
             if (node->has_spatial_varying()) {

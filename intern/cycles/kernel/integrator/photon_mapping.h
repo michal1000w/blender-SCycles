@@ -449,7 +449,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       return;
     }
 #ifdef __SPECTRAL__
-    if (sd.runtime_flag & SR_BSDF_HAS_DISPERSION) {
+    if (sd.runtime_flag & (SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION)) {
       /* Keep raw photon power and defer the wavelength PDF/color-matching weight until gather.
        * This permits wavelength matching when the eye path is spectral. */
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;

@@ -218,9 +218,10 @@ ccl_device
       Spectrum weight = principled_bsdf_emission(
           kg, sd, stack, data, N, ray_visibility, path_flag, mix_weight);
 
-      const Spectrum base_color = rgb_to_spectrum(
-          max(stack_load(stack, data.base_color), zero_float3()));
+      const float3 base_color_rgb = max(stack_load(stack, data.base_color), zero_float3());
+      const Spectrum base_color = rgb_to_spectrum(base_color_rgb);
       const Spectrum clamped_base_color = min(base_color, white);
+      const float3 clamped_base_color_rgb = min(base_color_rgb, one_float3());
       const float ior = fmaxf(stack_load(stack, data.ior), 1e-5f);
       const float roughness = saturatef(stack_load(stack, data.roughness));
       const float3 valid_reflection_N = maybe_ensure_valid_specular_reflection(sd, N);
@@ -300,11 +301,13 @@ ccl_device
         if (reflective_caustics || refractive_caustics) {
           FresnelThinFilm thinfilm = {thinfilm_thickness, thinfilm_ior};
           if (thin_wall) {
+            const Spectrum transmission_color = bsdf_spectral_transmission_color(
+                kg, sd, clamped_base_color_rgb);
             bsdf_thin_glass_setup(kg,
                                   sd,
                                   reflective_caustics,
                                   refractive_caustics,
-                                  {specular_tint, clamped_base_color},
+                                  {specular_tint, transmission_color},
                                   transmission_weight * weight,
                                   valid_reflection_N,
                                   sqr(roughness),
@@ -314,6 +317,8 @@ ccl_device
                                   path_flag);
           }
           else {
+            const Spectrum transmission_color = bsdf_spectral_transmission_color(
+                kg, sd, sqrt(clamped_base_color_rgb));
             ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
                 sd, sizeof(MicrofacetBsdf), transmission_weight * weight);
             ccl_private FresnelGeneralizedSchlick *fresnel =
@@ -343,7 +348,7 @@ ccl_device
                                                    reflective_caustics,
                                                    refractive_caustics,
                                                    specular_tint,
-                                                   sqrt(clamped_base_color),
+                                                   transmission_color,
                                                    thinfilm);
 
               /* setup bsdf */
@@ -682,7 +687,9 @@ ccl_device
       float3 N = stack_load_float3_default(stack, bsdf_data.normal_offset, sd->N);
       N = safe_normalize_fallback(N, sd->N);
 
-      const Spectrum weight = closure_weight * mix_weight;
+      const Spectrum weight = bsdf_spectral_transmission_color(
+                                  kg, sd, spectrum_to_rgb(closure_weight)) *
+                              mix_weight;
       ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
           sd, sizeof(MicrofacetBsdf), weight);
 
@@ -752,8 +759,11 @@ ccl_device
         fresnel->f0 = make_float3(F0_from_ior(ior));
         fresnel->f90 = white;
         fresnel->exponent = -ior;
-        const Spectrum color = max(rgb_to_spectrum(stack_load(stack, bsdf_data.color)), black);
-        fresnel->tint = {float(reflective_caustics) * color, float(refractive_caustics) * color};
+        const float3 color_rgb = max(stack_load(stack, bsdf_data.color), zero_float3());
+        const Spectrum reflection_color = rgb_to_spectrum(color_rgb);
+        const Spectrum transmission_color = bsdf_spectral_transmission_color(kg, sd, color_rgb);
+        fresnel->tint = {float(reflective_caustics) * reflection_color,
+                         float(refractive_caustics) * transmission_color};
         fresnel->thin_film.thickness = thinfilm_thickness;
         fresnel->thin_film.ior = (sd->runtime_flag & SR_BACKFACING) ? thinfilm_ior / ior :
                                                                       thinfilm_ior;

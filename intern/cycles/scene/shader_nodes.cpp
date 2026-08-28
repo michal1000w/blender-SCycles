@@ -2809,6 +2809,13 @@ bool PrincipledBsdfNode::has_dispersion()
          has_nonzero_weight("Transmission Weight");
 }
 
+bool PrincipledBsdfNode::has_spectral_transmission()
+{
+  return has_nonzero_weight("Transmission Weight") &&
+         (input("Base Color")->link != nullptr ||
+          reduce_max(base_color) - reduce_min(base_color) > CLOSURE_WEIGHT_CUTOFF);
+}
+
 bool PrincipledBsdfNode::has_nonzero_weight(const char *name)
 {
   ShaderInput *weight_in = input(name);

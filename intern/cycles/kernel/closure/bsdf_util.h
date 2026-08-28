@@ -22,6 +22,36 @@ struct FresnelThinFilm {
   float ior;
 };
 
+/* Convert only chromatic transmission colors to the path's sampled wavelength. Achromatic colors
+ * stay in the regular RGB path, avoiding spectral noise and work for the common clear-glass case.
+ * Values above one retain their existing artistic energy scale while the normalized chromaticity
+ * is reconstructed as a bounded BT.709 transmittance. */
+ccl_device_inline Spectrum bsdf_spectral_transmission_color(KernelGlobals kg,
+                                                            ccl_private ShaderData *sd,
+                                                            const float3 color)
+{
+#ifdef __SPECTRAL__
+  if (sd->shader_flag & SD_REQUIRES_WAVELENGTH) {
+    const float3 bt709 = max(rgb_to_rec709(kg, color), zero_float3());
+    const float min_channel = min(bt709.x, min(bt709.y, bt709.z));
+    const float max_channel = max(bt709.x, max(bt709.y, bt709.z));
+
+    if (max_channel - min_channel > CLOSURE_WEIGHT_CUTOFF) {
+      const float scale = max(max_channel, 1.0f);
+      const float3 bounded = saturate(bt709 / scale);
+      const float wavelength = sample_wavelength(sd->rand_wavelength);
+      const float transmission = bt709_to_spectral_transmission(bounded, wavelength) * scale;
+      sd->runtime_flag |= SR_BSDF_HAS_SPECTRAL_TRANSMISSION;
+      return make_spectrum(max(transmission, 0.0f));
+    }
+  }
+#else
+  (void)kg;
+  (void)sd;
+#endif
+  return rgb_to_spectrum(color);
+}
+
 template<typename T> struct complex {
   T re;
   T im;
