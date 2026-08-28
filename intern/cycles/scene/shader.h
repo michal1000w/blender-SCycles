@@ -124,6 +124,7 @@ class Shader : public Node {
   bool has_aov_output_node;
   bool has_time_dependency;
   bool has_dispersion;
+  bool has_spectral_transmission;
 
   float3 emission_estimate;
   EmissionSampling emission_sampling;
@@ -256,6 +257,9 @@ class ShaderManager {
   float3 rec709_to_r;
   float3 rec709_to_g;
   float3 rec709_to_b;
+  float3 rgb_to_rec709_r;
+  float3 rgb_to_rec709_g;
+  float3 rgb_to_rec709_b;
   string scene_linear_interop_id;
   vector<float> thin_film_table;
 
