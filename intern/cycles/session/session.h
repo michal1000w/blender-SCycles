@@ -83,7 +83,7 @@ class SessionParams {
 
     use_profiling = false;
 
-    use_auto_tile = true;
+    use_auto_tile = false;
     tile_size = 2048;
 
     use_resolution_divider = true;
