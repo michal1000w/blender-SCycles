@@ -386,7 +386,7 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
         col.prop(cscene, "use_surface_guiding", text="Surface")
         col.prop(cscene, "use_volume_guiding", text="Volume", text_ctxt=i18n_contexts.id_id)
 
-        if cscene.use_guiding:
+        if cscene.use_guiding and cscene.use_auto_tile:
             # Calculation matches TileManager::compute_render_tile_size and
             # Session::get_effective_tile_size
             if cscene.tile_size < 128:
@@ -936,7 +936,11 @@ class CYCLES_RENDER_PT_performance_memory(CyclesButtonsPanel, Panel):
         scene = context.scene
         cscene = scene.cycles
 
-        layout.prop(cscene, "tile_size")
+        col = layout.column()
+        col.prop(cscene, "use_auto_tile")
+        sub = col.column()
+        sub.active = cscene.use_auto_tile
+        sub.prop(cscene, "tile_size")
 
 
 class CYCLES_RENDER_PT_performance_texture_cache(CyclesButtonsPanel, Panel):

@@ -1172,12 +1172,13 @@ SessionParams BlenderSync::get_session_params(blender::RenderEngine &b_engine,
                          BlenderSession::print_render_stats;
 
   if (background) {
-    params.use_auto_tile = true;
+    params.use_auto_tile = get_boolean(cscene, "use_auto_tile");
     params.tile_size = max(get_int(cscene, "tile_size"), 8);
 
     /* Keep each Metal dispatch below the macOS GPU watchdog limit for virtual micromesh
      * intersection. A small tile changes scheduling only; resolution and samples are unchanged. */
-    if (device_uses_metal(params.device) && get_boolean(cscene, "use_pixel_displacement") &&
+    if (params.use_auto_tile && device_uses_metal(params.device) &&
+        get_boolean(cscene, "use_pixel_displacement") &&
         get_float(cscene, "pixel_displacement_scale") != 0.0f &&
         get_float(cscene, "pixel_displacement_max_distance") > 0.0f)
     {
