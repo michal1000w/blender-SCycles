@@ -3643,6 +3643,154 @@ void PrincipledVolumeNode::compile(OSLCompiler &compiler)
   compiler.add(this, "node_principled_volume");
 }
 
+/* Fast Volume Closure */
+
+NODE_DEFINE(FastVolumeNode)
+{
+  NodeType *type = NodeType::add("fast_volume", create, NodeType::SHADER);
+
+  SOCKET_IN_STRING(density_attribute, "Density Attribute", ustring("density"));
+  SOCKET_IN_STRING(color_attribute, "Color Attribute", ustring());
+  SOCKET_IN_STRING(scatter_attribute, "Scatter Attribute", ustring());
+  SOCKET_IN_STRING(emission_attribute, "Emission Attribute", ustring("flames"));
+  SOCKET_IN_STRING(temperature_attribute, "Temperature Attribute", ustring("temperature"));
+
+  SOCKET_IN_COLOR(scatter_color, "Scatter Color", make_float3(0.5f, 0.5f, 0.5f));
+  SOCKET_IN_FLOAT(density, "Density", 1.0f);
+  SOCKET_IN_FLOAT(density_cutoff, "Density Cutoff", 0.001f);
+  SOCKET_IN_FLOAT(scatter_strength, "Scatter Strength", 1.0f);
+  SOCKET_IN_FLOAT(anisotropy, "Anisotropy", 0.0f);
+  SOCKET_IN_FLOAT(IOR, "IOR", 1.33f);
+  SOCKET_IN_FLOAT(backscatter, "Backscatter", 0.1f);
+  SOCKET_IN_FLOAT(alpha, "Alpha", 0.5f);
+  SOCKET_IN_FLOAT(diameter, "Diameter", 20.0f);
+
+  static NodeEnum phase_enum;
+  phase_enum.insert("Henyey-Greenstein", CLOSURE_VOLUME_HENYEY_GREENSTEIN_ID);
+  phase_enum.insert("Fournier-Forand", CLOSURE_VOLUME_FOURNIER_FORAND_ID);
+  phase_enum.insert("Draine", CLOSURE_VOLUME_DRAINE_ID);
+  phase_enum.insert("Rayleigh", CLOSURE_VOLUME_RAYLEIGH_ID);
+  phase_enum.insert("Mie", CLOSURE_VOLUME_MIE_ID);
+  SOCKET_ENUM(phase, "Phase", phase_enum, CLOSURE_VOLUME_HENYEY_GREENSTEIN_ID);
+
+  SOCKET_IN_COLOR(absorption_color, "Absorption Color", zero_float3());
+  SOCKET_IN_FLOAT(absorption_strength, "Absorption Strength", 0.0f);
+  SOCKET_IN_FLOAT(emission_strength, "Emission Strength", 0.0f);
+  SOCKET_IN_COLOR(emission_color, "Emission Color", one_float3());
+  SOCKET_IN_FLOAT(flame_cutoff, "Flame Cutoff", 0.001f);
+  SOCKET_IN_FLOAT(blackbody_strength, "Blackbody Strength", 0.0f);
+  SOCKET_IN_COLOR(blackbody_tint, "Blackbody Tint", one_float3());
+  SOCKET_IN_FLOAT(temperature, "Temperature", 1000.0f);
+  SOCKET_IN_FLOAT(volume_mix_weight, "VolumeMixWeight", 0.0f, SocketType::SVM_INTERNAL);
+
+  SOCKET_OUT_CLOSURE(volume, "Volume");
+  return type;
+}
+
+FastVolumeNode::FastVolumeNode() : VolumeNode(get_node_type())
+{
+  closure = CLOSURE_VOLUME_HENYEY_GREENSTEIN_ID;
+}
+
+void FastVolumeNode::attributes(Shader *shader, AttributeRequestSet *attributes)
+{
+  if (shader->has_volume) {
+    if (input("Density")->link || density > 0.0f) {
+      attributes->add_name_or_standard(density_attribute);
+      attributes->add_name_or_standard(color_attribute);
+      if (input("Scatter Strength")->link || scatter_strength > 0.0f) {
+        attributes->add_name_or_standard(scatter_attribute);
+      }
+    }
+    if (input("Emission Strength")->link || emission_strength > 0.0f ||
+        input("Blackbody Strength")->link || blackbody_strength > 0.0f)
+    {
+      attributes->add_name_or_standard(emission_attribute);
+    }
+    if (input("Blackbody Strength")->link || blackbody_strength > 0.0f) {
+      attributes->add_name_or_standard(temperature_attribute);
+    }
+    attributes->add(ATTR_STD_GENERATED_TRANSFORM);
+  }
+  ShaderNode::attributes(shader, attributes);
+}
+
+void FastVolumeNode::compile(SVMCompiler &compiler)
+{
+  closure = phase;
+  const char *param1 = nullptr;
+  const char *param2 = nullptr;
+  switch (phase) {
+    case CLOSURE_VOLUME_HENYEY_GREENSTEIN_ID:
+      param1 = "Anisotropy";
+      break;
+    case CLOSURE_VOLUME_FOURNIER_FORAND_ID:
+      param1 = "IOR";
+      param2 = "Backscatter";
+      break;
+    case CLOSURE_VOLUME_DRAINE_ID:
+      param1 = "Anisotropy";
+      param2 = "Alpha";
+      break;
+    case CLOSURE_VOLUME_RAYLEIGH_ID:
+      break;
+    case CLOSURE_VOLUME_MIE_ID:
+      param1 = "Diameter";
+      break;
+    default:
+      assert(false);
+      break;
+  }
+
+  ShaderInput *color_in = input("Scatter Color");
+  if (color_in->link) {
+    compiler.add_node(this,
+                      NODE_CLOSURE_WEIGHT,
+                      SVMNodeClosureWeight{.weight_offset = compiler.input_link("Scatter Color")});
+  }
+  else {
+    compiler.add_node(
+        this, NODE_CLOSURE_SET_WEIGHT, SVMNodeClosureSetWeight{.rgb = scatter_color});
+  }
+
+  compiler.add_node(
+      this,
+      NODE_FAST_VOLUME,
+      SVMNodeFastVolume{
+          .closure_type = closure,
+          .absorption_color = compiler.input_float3("Absorption Color"),
+          .emission_color = compiler.input_float3("Emission Color"),
+          .blackbody_tint = compiler.input_float3("Blackbody Tint"),
+          .density = compiler.input_float("Density"),
+          .density_cutoff = compiler.input_float("Density Cutoff"),
+          .scatter_strength = compiler.input_float("Scatter Strength"),
+          .param1 = (param1) ? compiler.input_float(param1) : SVMInputFloat{0},
+          .param_extra = (param2) ? compiler.input_float(param2) : SVMInputFloat{0},
+          .absorption_strength = compiler.input_float("Absorption Strength"),
+          .emission_strength = compiler.input_float("Emission Strength"),
+          .flame_cutoff = compiler.input_float("Flame Cutoff"),
+          .blackbody_strength = compiler.input_float("Blackbody Strength"),
+          .temperature = compiler.input_float("Temperature"),
+          .attr_density = (int)compiler.attribute_standard(density_attribute),
+          .attr_color = (int)compiler.attribute_standard(color_attribute),
+          .attr_scatter = (int)compiler.attribute_standard(scatter_attribute),
+          .attr_emission = (int)compiler.attribute_standard(emission_attribute),
+          .attr_temperature = (int)compiler.attribute_standard(temperature_attribute),
+          .mix_weight_offset = compiler.closure_mix_weight_offset(),
+      });
+}
+
+void FastVolumeNode::compile(OSLCompiler &compiler)
+{
+  density_attribute = Attribute::osl_name(density_attribute);
+  color_attribute = Attribute::osl_name(color_attribute);
+  scatter_attribute = Attribute::osl_name(scatter_attribute);
+  emission_attribute = Attribute::osl_name(emission_attribute);
+  temperature_attribute = Attribute::osl_name(temperature_attribute);
+  compiler.parameter(this, "phase");
+  compiler.add(this, "node_fast_volume");
+}
+
 /* Principled Hair BSDF Closure */
 
 NODE_DEFINE(PrincipledHairBsdfNode)

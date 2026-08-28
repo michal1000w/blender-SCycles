@@ -111,13 +111,6 @@ def do_versions(self):
             if scene.library not in libraries:
                 continue
 
-            # Auto tiling is always enabled now
-            if version <= (5, 0, 77):
-                cscene = scene.cycles
-                if not cscene.use_auto_tile:
-                    cscene.use_auto_tile = True
-                    cscene.tile_size = 8192
-
             # Clamp Direct/Indirect separation in 270
             if version <= (2, 70, 0):
                 cscene = scene.cycles

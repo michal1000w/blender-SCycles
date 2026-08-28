@@ -362,6 +362,15 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
             kg, sd, stack, closure_weight, bsdf_node, path_visibility, path_flag);
       }
       break;
+      SVM_CASE(NODE_FAST_VOLUME)
+      IF_KERNEL_NODES_FEATURE(VOLUME)
+      {
+        const ccl_global SVMNodeFastVolume &volume_node = svm_node_get<SVMNodeFastVolume>(kg,
+                                                                                          &offset);
+        svm_node_fast_volume<type>(
+            kg, sd, stack, closure_weight, volume_node, path_visibility, path_flag);
+      }
+      break;
       SVM_CASE(NODE_MATH)
       svm_node_math(stack, svm_node_get<SVMNodeMath>(kg, &offset));
       break;

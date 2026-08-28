@@ -1013,6 +1013,33 @@ struct SVMNodePrincipledVolume {
 static_assert(alignof(SVMNodePrincipledVolume) <= alignof(uint));
 static_assert(sizeof(SVMNodePrincipledVolume) % sizeof(uint) == 0);
 
+/* NODE_FAST_VOLUME */
+struct SVMNodeFastVolume {
+  ClosureType closure_type;
+  SVMInputFloat3 absorption_color;
+  SVMInputFloat3 emission_color;
+  SVMInputFloat3 blackbody_tint;
+  SVMInputFloat density;
+  SVMInputFloat density_cutoff;
+  SVMInputFloat scatter_strength;
+  SVMInputFloat param1;
+  SVMInputFloat param_extra;
+  SVMInputFloat absorption_strength;
+  SVMInputFloat emission_strength;
+  SVMInputFloat flame_cutoff;
+  SVMInputFloat blackbody_strength;
+  SVMInputFloat temperature;
+  int attr_density;
+  int attr_color;
+  int attr_scatter;
+  int attr_emission;
+  int attr_temperature;
+  SVMStackOffset mix_weight_offset;
+  uint8_t _pad[3];
+};
+static_assert(alignof(SVMNodeFastVolume) <= alignof(uint));
+static_assert(sizeof(SVMNodeFastVolume) % sizeof(uint) == 0);
+
 /* NODE_CLOSURE_BSDF. Common header for all BSDFs, followed by data defined below. */
 struct SVMNodeClosureBsdf {
   ClosureType closure_type;

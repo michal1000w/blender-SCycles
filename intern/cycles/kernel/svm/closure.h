@@ -1339,6 +1339,107 @@ ccl_device_noinline void svm_node_principled_volume(
 #endif
 }
 
+template<ShaderType shader_type>
+ccl_device_noinline void svm_node_fast_volume(KernelGlobals kg,
+                                              ccl_private ShaderData *sd,
+                                              ccl_private float *ccl_restrict stack,
+                                              const Spectrum closure_weight,
+                                              const ccl_global SVMNodeFastVolume &ccl_restrict
+                                                  node,
+                                              const PathRayVisibility path_visibility,
+                                              const uint32_t path_flag)
+{
+#ifdef __VOLUME__
+  if (shader_type != SHADER_TYPE_VOLUME) {
+    return;
+  }
+
+  const float mix_weight = stack_load_float_default(stack, node.mix_weight_offset, 1.0f);
+  if (mix_weight == 0.0f) {
+    return;
+  }
+
+  const float object_weight = mix_weight * object_volume_density(kg, sd->object);
+  float density = fmaxf(stack_load(stack, node.density), 0.0f);
+  if (density > 0.0f) {
+    const AttributeDescriptor attr = find_attribute(kg, sd, node.attr_density);
+    if (is_attribute_found(attr)) {
+      density *= fmaxf(primitive_volume_attribute<float>(kg, sd, attr, true), 0.0f);
+    }
+  }
+
+  const float density_cutoff = fmaxf(stack_load(stack, node.density_cutoff), 0.0f);
+  density = (density >= density_cutoff) ? density * object_weight : 0.0f;
+
+  if (density > 0.0f) {
+    Spectrum scatter_color = closure_weight;
+    const AttributeDescriptor attr_color = find_attribute(kg, sd, node.attr_color);
+    if (is_attribute_found(attr_color)) {
+      scatter_color *= rgb_to_spectrum(
+          max(primitive_volume_attribute<float3>(kg, sd, attr_color, true), zero_float3()));
+    }
+
+    float scatter_mask = 1.0f;
+    const AttributeDescriptor attr_scatter = find_attribute(kg, sd, node.attr_scatter);
+    if (is_attribute_found(attr_scatter)) {
+      scatter_mask = fmaxf(primitive_volume_attribute<float>(kg, sd, attr_scatter, true), 0.0f);
+    }
+
+    const Spectrum sigma_s = scatter_color * density * scatter_mask *
+                             fmaxf(stack_load(stack, node.scatter_strength), 0.0f);
+    const Spectrum sigma_a = rgb_to_spectrum(
+                                 max(stack_load(stack, node.absorption_color), zero_float3())) *
+                             density * fmaxf(stack_load(stack, node.absorption_strength), 0.0f);
+
+    if (!is_zero(sigma_s)) {
+      svm_alloc_closure_volume_scatter(
+          sd, stack, sigma_s, node.closure_type, node.param1, node.param_extra);
+    }
+    if (!is_zero(sigma_s) || !is_zero(sigma_a)) {
+      volume_extinction_setup(sd, sigma_s + sigma_a);
+    }
+  }
+
+  if ((path_visibility & PATH_RAY_VISIBILITY_SHADOW) || (path_flag & PATH_RAY_EXTINCTION)) {
+    return;
+  }
+
+  float flame = 1.0f;
+  const AttributeDescriptor attr_emission = find_attribute(kg, sd, node.attr_emission);
+  if (is_attribute_found(attr_emission)) {
+    flame = fmaxf(primitive_volume_attribute<float>(kg, sd, attr_emission, true), 0.0f);
+  }
+  const float flame_cutoff = fmaxf(stack_load(stack, node.flame_cutoff), 0.0f);
+  if (flame <= flame_cutoff) {
+    return;
+  }
+
+  const float emission_strength = fmaxf(stack_load(stack, node.emission_strength), 0.0f);
+  if (emission_strength > 0.0f) {
+    const float3 emission_color = max(stack_load(stack, node.emission_color), zero_float3());
+    emission_setup(sd,
+                   rgb_to_spectrum(emission_color * (emission_strength * flame * object_weight)));
+  }
+
+  const float blackbody_strength = fmaxf(stack_load(stack, node.blackbody_strength), 0.0f);
+  if (blackbody_strength > 0.0f) {
+    float T = fmaxf(stack_load(stack, node.temperature), 0.0f);
+    const AttributeDescriptor attr_temperature = find_attribute(kg, sd, node.attr_temperature);
+    if (is_attribute_found(attr_temperature)) {
+      T *= fmaxf(primitive_volume_attribute<float>(kg, sd, attr_temperature, true), 0.0f);
+    }
+
+    const float intensity = (5.670373e-8f * 1e-6f / M_PI_F) * sqr(sqr(T)) * blackbody_strength *
+                            flame;
+    if (intensity > 0.0f) {
+      const float3 tint = max(stack_load(stack, node.blackbody_tint), zero_float3());
+      const float3 bb = tint * intensity * rec709_to_rgb(kg, svm_math_blackbody_color_rec709(T));
+      emission_setup(sd, rgb_to_spectrum(bb * object_weight));
+    }
+  }
+#endif
+}
+
 ccl_device_noinline void svm_node_closure_emission(
     KernelGlobals kg,
     ccl_private ShaderData *sd,

@@ -417,14 +417,15 @@ ccl_device_inline void volume_shader_motion_blur(KernelGlobals kg,
   sd->shader_flag &= ~SD_VOLUME_CUBIC;
 
   /* Find velocity. */
-  float3 velocity = primitive_volume_attribute<float3>(kg, sd, v_desc, false);
+  float3 velocity = ensure_finite(
+      make_float3(volume_attribute_float4(kg, sd, v_desc, false, true)));
   object_dir_transform(kg, sd, &velocity);
 
   /* Find advected P. */
   sd->P = P - (time - time_offset) * velocity_scale * velocity;
 
   /* Find advected velocity. */
-  velocity = primitive_volume_attribute<float3>(kg, sd, v_desc, false);
+  velocity = ensure_finite(make_float3(volume_attribute_float4(kg, sd, v_desc, false, true)));
   object_dir_transform(kg, sd, &velocity);
 
   /* Find advected P. */

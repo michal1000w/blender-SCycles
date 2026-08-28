@@ -832,6 +832,27 @@ static ShaderNode *add_node(Scene *scene,
     PrincipledVolumeNode *principled = graph->create_node<PrincipledVolumeNode>();
     node = principled;
   }
+  else if (b_node.is_type("ShaderNodeVolumeFast"_ustr)) {
+    FastVolumeNode *fast_volume = graph->create_node<FastVolumeNode>();
+    switch (b_node.custom1) {
+      case blender::SHD_PHASE_HENYEY_GREENSTEIN:
+        fast_volume->set_phase(CLOSURE_VOLUME_HENYEY_GREENSTEIN_ID);
+        break;
+      case blender::SHD_PHASE_FOURNIER_FORAND:
+        fast_volume->set_phase(CLOSURE_VOLUME_FOURNIER_FORAND_ID);
+        break;
+      case blender::SHD_PHASE_DRAINE:
+        fast_volume->set_phase(CLOSURE_VOLUME_DRAINE_ID);
+        break;
+      case blender::SHD_PHASE_RAYLEIGH:
+        fast_volume->set_phase(CLOSURE_VOLUME_RAYLEIGH_ID);
+        break;
+      case blender::SHD_PHASE_MIE:
+        fast_volume->set_phase(CLOSURE_VOLUME_MIE_ID);
+        break;
+    }
+    node = fast_volume;
+  }
   else if (b_node.is_type("ShaderNodeNewGeometry"_ustr)) {
     node = graph->create_node<GeometryNode>();
   }
@@ -1961,12 +1982,18 @@ void BlenderSync::sync_lights(blender::Depsgraph &b_depsgraph, bool update_all, 
 
         add_nodes(scene, *b_engine, *b_data, *b_scene, graph.get(), *b_light.nodetree);
       }
-      else {
+
+      /* Blender lights always have a node tree, but users may remove all nodes or leave the
+       * Light Output surface disconnected to drive the light entirely from the Light Properties
+       * controls. In that case use a neutral emission shader: the actual color, energy, exposure,
+       * temperature and normalization are applied by sync_light(). Keep connected custom light
+       * shaders unchanged. */
+      ShaderNode *out = graph->output();
+      if (out->input("Surface")->link == nullptr) {
         EmissionNode *emission = graph->create_node<EmissionNode>();
         emission->set_color(one_float3());
         emission->set_strength(1.0f);
 
-        ShaderNode *out = graph->output();
         graph->connect(emission->output("Emission"), out->input("Surface"));
       }
 

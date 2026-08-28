@@ -181,10 +181,29 @@ __attribute__((noinline))
 ccl_device_noinline
 #  endif
 OutT kernel_image_interp_nanovdb(const ccl_global KernelImageInfo &info,
-                                     float3 P,
-                                     const InterpolationType interp)
+                                 float3 P,
+                                 const InterpolationType interp,
+                                 const bool extend_border)
 {
   ccl_global nanovdb::NanoGrid<T> *const grid = (ccl_global nanovdb::NanoGrid<T> *)info.data;
+
+  if (extend_border) {
+    /* Eulerian volume motion blur must query velocity at positions swept outside the sparse
+     * velocity topology. Extend the boundary value there instead of returning the zero
+     * background, which abruptly stops the backtracking and clips the trail. This is equivalent
+     * to the common constant (zero-gradient) boundary condition used for velocity advection and
+     * has no storage cost. */
+    const ccl_global auto &root = grid->tree().root();
+    if (root.mBBox[0].x <= root.mBBox[1].x && root.mBBox[0].y <= root.mBBox[1].y &&
+        root.mBBox[0].z <= root.mBBox[1].z)
+    {
+      const float3 bbox_min = make_float3(
+          float(root.mBBox[0].x), float(root.mBBox[0].y), float(root.mBBox[0].z));
+      const float3 bbox_max = make_float3(
+          float(root.mBBox[1].x), float(root.mBBox[1].y), float(root.mBBox[1].z));
+      P = clamp(P, bbox_min, bbox_max);
+    }
+  }
 
   if (interp == INTERPOLATION_CLOSEST) {
     nanovdb::ReadAccessor<T> acc(grid->tree().root());
@@ -205,7 +224,8 @@ ccl_device float4 kernel_image_interp_3d(KernelGlobals kg,
                                          const int image_texture_id,
                                          float3 P,
                                          InterpolationType interp,
-                                         const bool stochastic)
+                                         const bool stochastic,
+                                         const bool extend_border = false)
 {
 #ifdef WITH_NANOVDB
   const ccl_global KernelImageTexture &tex = kernel_data_fetch(image_textures, image_texture_id);
@@ -226,22 +246,26 @@ ccl_device float4 kernel_image_interp_3d(KernelGlobals kg,
 
   const ImageDataType data_type = (ImageDataType)info.data_type;
   if (data_type == IMAGE_DATA_TYPE_NANOVDB_FLOAT) {
-    const float f = kernel_image_interp_nanovdb<float, float>(info, P, interpolation);
+    const float f = kernel_image_interp_nanovdb<float, float>(
+        info, P, interpolation, extend_border);
     return make_float4(f, f, f, 1.0f);
   }
   if (data_type == IMAGE_DATA_TYPE_NANOVDB_FLOAT3) {
-    const float3 f = kernel_image_interp_nanovdb<float3, packed_float3>(info, P, interpolation);
+    const float3 f = kernel_image_interp_nanovdb<float3, packed_float3>(
+        info, P, interpolation, extend_border);
     return make_float4(f, 1.0f);
   }
   if (data_type == IMAGE_DATA_TYPE_NANOVDB_FLOAT4) {
-    return kernel_image_interp_nanovdb<float4, float4>(info, P, interpolation);
+    return kernel_image_interp_nanovdb<float4, float4>(info, P, interpolation, extend_border);
   }
   if (data_type == IMAGE_DATA_TYPE_NANOVDB_FPN) {
-    const float f = kernel_image_interp_nanovdb<float, nanovdb::FpN>(info, P, interpolation);
+    const float f = kernel_image_interp_nanovdb<float, nanovdb::FpN>(
+        info, P, interpolation, extend_border);
     return make_float4(f, f, f, 1.0f);
   }
   if (data_type == IMAGE_DATA_TYPE_NANOVDB_FP16) {
-    const float f = kernel_image_interp_nanovdb<float, nanovdb::Fp16>(info, P, interpolation);
+    const float f = kernel_image_interp_nanovdb<float, nanovdb::Fp16>(
+        info, P, interpolation, extend_border);
     return make_float4(f, f, f, 1.0f);
   }
   if (data_type == IMAGE_DATA_TYPE_NANOVDB_EMPTY) {
@@ -254,6 +278,7 @@ ccl_device float4 kernel_image_interp_3d(KernelGlobals kg,
   (void)P;
   (void)interp;
   (void)stochastic;
+  (void)extend_border;
 #endif
 
   return IMAGE_MISSING_RGBA;
