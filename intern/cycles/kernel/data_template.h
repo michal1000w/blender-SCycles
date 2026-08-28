@@ -73,6 +73,10 @@ KERNEL_STRUCT_MEMBER(film, float4, white_xyz)
 KERNEL_STRUCT_MEMBER(film, float4, rec709_to_r)
 KERNEL_STRUCT_MEMBER(film, float4, rec709_to_g)
 KERNEL_STRUCT_MEMBER(film, float4, rec709_to_b)
+/* Rendering color space to Rec709, used for compact spectral upsampling. */
+KERNEL_STRUCT_MEMBER(film, float4, rgb_to_rec709_r)
+KERNEL_STRUCT_MEMBER(film, float4, rgb_to_rec709_g)
+KERNEL_STRUCT_MEMBER(film, float4, rgb_to_rec709_b)
 KERNEL_STRUCT_MEMBER(film, int, is_rec709)
 /* Exposure. */
 KERNEL_STRUCT_MEMBER(film, float, exposure)

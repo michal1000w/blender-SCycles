@@ -986,7 +986,7 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
   ManifoldVertex vertices[MNEE_MAX_CAUSTIC_CASTERS];
 
   int vertex_count = 0;
-  bool has_dispersion = false;
+  bool has_spectral_transport = false;
   for (int isect_count = 0; isect_count < MNEE_MAX_INTERSECTION_COUNT; isect_count++) {
     const bool hit = scene_intersect(kg, &probe_ray, PATH_RAY_VISIBILITY_TRANSMIT, &probe_isect);
     if (!hit) {
@@ -1033,14 +1033,14 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
       /* FIXME: Temporary workaround for a bug in the oneAPI + Embree backend that sometimes sets
        * the SR_BSDF_HAS_DISPERSION flag when calling `surface_shader_eval` inside the MNEE code
        * path. This happens even in scenes where no material uses dispersion. This workaround
-       * disables dispersion support + MNEE for all oneAPI backends. Proper fix should be on the
-       * oneAPI side. */
-      sd_mnee->runtime_flag &= ~SR_BSDF_HAS_DISPERSION;
+       * disables wavelength-dependent transmission support + MNEE for all oneAPI backends.
+       * Proper fix should be on the oneAPI side. */
+      sd_mnee->runtime_flag &= ~(SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION);
 #endif
 
       /* Query before #mnee_setup_manifold_vertex resets the runtime flag. */
-      if (sd_mnee->runtime_flag & SR_BSDF_HAS_DISPERSION) {
-        has_dispersion = true;
+      if (sd_mnee->runtime_flag & (SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION)) {
+        has_spectral_transport = true;
       }
 
       /* Get and sample refraction bsdf */
@@ -1150,7 +1150,7 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
     }
 
 #ifdef __SPECTRAL__
-    if (has_dispersion && !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL)) {
+    if (has_spectral_transport && !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL)) {
       *throughput *= dispersion_throughput_weight(kg, sd_mnee->rand_wavelength);
     }
 #endif

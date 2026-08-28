@@ -339,10 +339,7 @@ ccl_device void osl_closure_dielectric_bsdf_setup(KernelGlobals kg,
 
   fresnel->thin_film = {closure->thinfilm_thickness, closure->thinfilm_ior};
   fresnel->tint = {rgb_to_spectrum(closure->reflection_tint),
-                   rgb_to_spectrum(closure->transmission_tint)};
-  if (backfacing) {
-    adjust_thin_film_ior_at_backface(fresnel->thin_film.ior, bsdf->ior);
-  }
+                   bsdf_spectral_transmission_color(kg, sd, closure->transmission_tint)};
   bsdf_dielectric_tint_setup(kg, bsdf, sd, fresnel, beckmann, multiggx);
 
   if (layer_albedo != nullptr) {
@@ -495,7 +492,8 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
 
   fresnel->tint.reflectance = reflective_caustics ? rgb_to_spectrum(closure->reflection_tint) :
                                                     zero_spectrum();
-  fresnel->tint.transmittance = refractive_caustics ? rgb_to_spectrum(closure->transmission_tint) :
+  fresnel->tint.transmittance = refractive_caustics ? bsdf_spectral_transmission_color(
+                                                          kg, sd, closure->transmission_tint) :
                                                       zero_spectrum();
   fresnel->f0 = rgb_to_spectrum(closure->f0);
   fresnel->f90 = rgb_to_spectrum(closure->f90);
@@ -553,7 +551,7 @@ ccl_device void osl_closure_thin_glass_setup(KernelGlobals kg,
       sd, safe_normalize_fallback(closure->N, sd->N));
   const FresnelThinFilm thinfilm = {closure->thinfilm_thickness, closure->thinfilm_ior};
   const FresnelCoeff tint = {rgb_to_spectrum(closure->reflection_tint),
-                             rgb_to_spectrum(closure->transmission_tint)};
+                             bsdf_spectral_transmission_color(kg, sd, closure->transmission_tint)};
   const FresnelCoeff fresnel = bsdf_thin_glass_setup(kg,
                                                      sd,
                                                      reflective_caustics,
@@ -609,8 +607,11 @@ ccl_device void osl_closure_microfacet_setup(KernelGlobals kg,
     return;
   }
 
+  const Spectrum spectral_weight = (closure->refract == 1) ?
+                                       bsdf_spectral_transmission_color(kg, sd, weight) :
+                                       rgb_to_spectrum(weight);
   ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
-      sd, sizeof(MicrofacetBsdf), rgb_to_spectrum(weight));
+      sd, sizeof(MicrofacetBsdf), spectral_weight);
   if (!bsdf) {
     return;
   }

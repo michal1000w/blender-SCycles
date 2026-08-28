@@ -600,6 +600,7 @@ class PrincipledBsdfNode : public BsdfBaseNode {
   bool has_surface_transparent() override;
   bool has_surface_emission() override;
   bool has_dispersion() override;
+  bool has_spectral_transmission() override;
 
  protected:
   /* Checks whether the given weight input is potentially non-zero. */
@@ -727,13 +728,11 @@ class GlassBsdfNode : public BsdfNode {
   NODE_SOCKET_API(float, thin_film_ior)
   NODE_SOCKET_API(ClosureType, distribution)
 
-  void attributes(Shader *shader, AttributeRequestSet *attributes) override;
-  bool has_attribute_dependency() override
+  bool has_spectral_transmission() override
   {
-    return true;
+    return input("Color")->link != nullptr ||
+           reduce_max(color) - reduce_min(color) > CLOSURE_WEIGHT_CUTOFF;
   }
-
-  bool is_isotropic();
 };
 
 class RefractionBsdfNode : public BsdfNode {
@@ -748,6 +747,12 @@ class RefractionBsdfNode : public BsdfNode {
   NODE_SOCKET_API(float, roughness)
   NODE_SOCKET_API(float, IOR)
   NODE_SOCKET_API(ClosureType, distribution)
+
+  bool has_spectral_transmission() override
+  {
+    return input("Color")->link != nullptr ||
+           reduce_max(color) - reduce_min(color) > CLOSURE_WEIGHT_CUTOFF;
+  }
 };
 
 class ToonBsdfNode : public BsdfNode {
