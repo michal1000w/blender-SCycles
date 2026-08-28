@@ -1982,12 +1982,18 @@ void BlenderSync::sync_lights(blender::Depsgraph &b_depsgraph, bool update_all, 
 
         add_nodes(scene, *b_engine, *b_data, *b_scene, graph.get(), *b_light.nodetree);
       }
-      else {
+
+      /* Blender lights always have a node tree, but users may remove all nodes or leave the
+       * Light Output surface disconnected to drive the light entirely from the Light Properties
+       * controls. In that case use a neutral emission shader: the actual color, energy, exposure,
+       * temperature and normalization are applied by sync_light(). Keep connected custom light
+       * shaders unchanged. */
+      ShaderNode *out = graph->output();
+      if (out->input("Surface")->link == nullptr) {
         EmissionNode *emission = graph->create_node<EmissionNode>();
         emission->set_color(one_float3());
         emission->set_strength(1.0f);
 
-        ShaderNode *out = graph->output();
         graph->connect(emission->output("Emission"), out->input("Surface"));
       }
 
