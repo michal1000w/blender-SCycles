@@ -73,7 +73,8 @@ ccl_device float volume_attribute_alpha(const float4 value)
 ccl_device float4 volume_attribute_float4(KernelGlobals kg,
                                           ccl_private ShaderData *sd,
                                           const AttributeDescriptor desc,
-                                          const bool stochastic)
+                                          const bool stochastic,
+                                          const bool extend_border = false)
 {
   if (desc.element & (ATTR_ELEMENT_OBJECT | ATTR_ELEMENT_MESH)) {
     switch (desc.type) {
@@ -104,7 +105,8 @@ ccl_device float4 volume_attribute_float4(KernelGlobals kg,
     object_inverse_position_transform(kg, sd, &P);
     const InterpolationType interp = (sd->shader_flag & SD_VOLUME_CUBIC) ? INTERPOLATION_CUBIC :
                                                                            INTERPOLATION_NONE;
-    const float4 value = kernel_image_interp_3d(kg, sd, desc.offset, P, interp, stochastic);
+    const float4 value = kernel_image_interp_3d(
+        kg, sd, desc.offset, P, interp, stochastic, extend_border);
     if (value.w > 1e-6f && value.w != 1.0f) {
       /* For RGBA colors, unpremultiply after interpolation. */
       return make_float4(make_float3(value) / value.w, value.w);
