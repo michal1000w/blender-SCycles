@@ -159,11 +159,15 @@ class VolumeMeshBuilder {
 
   void add_padding(const int pad_size);
 
-  void create_mesh(vector<float3> &vertices, vector<int> &indices, const bool ray_marching);
+  void create_mesh(vector<float3> &vertices,
+                   vector<int> &indices,
+                   const bool ray_marching,
+                   const float3 motion_displacement);
 
   void generate_vertices_and_quads(vector<int3> &vertices_is,
                                    vector<QuadData> &quads,
-                                   const bool ray_marching);
+                                   const bool ray_marching,
+                                   const int3 motion_pad_size);
 
   void convert_object_space(const vector<int3> &vertices, vector<float3> &out_vertices);
 
@@ -212,14 +216,36 @@ void VolumeMeshBuilder::add_padding(const int pad_size)
 
 void VolumeMeshBuilder::create_mesh(vector<float3> &vertices,
                                     vector<int> &indices,
-                                    const bool ray_marching)
+                                    const bool ray_marching,
+                                    const float3 motion_displacement)
 {
   /* We create vertices in index space (is), and only convert them to object
    * space when done. */
   vector<int3> vertices_is;
   vector<QuadData> quads;
 
-  generate_vertices_and_quads(vertices_is, quads, ray_marching);
+  int3 motion_pad_size = make_int3(0, 0, 0);
+  if (reduce_max(motion_displacement) > 0.0f) {
+    /* Velocity values are object-space vectors, while the boundary mesh is built in index space.
+     * Transform every corner of the symmetric displacement bound so rotated, sheared and
+     * non-uniform VDB transforms remain conservative without padding unrelated axes. */
+    constexpr double max_safe_padding = double(1 << 29);
+    const openvdb::math::MapBase::ConstPtr map = topology_grid->transform().baseMap();
+    for (int corner = 0; corner < 8; corner++) {
+      const openvdb::math::Vec3d displacement(
+          (corner & 1) ? motion_displacement.x : -motion_displacement.x,
+          (corner & 2) ? motion_displacement.y : -motion_displacement.y,
+          (corner & 4) ? motion_displacement.z : -motion_displacement.z);
+      const openvdb::math::Vec3d index_displacement = map->applyInverseJacobian(displacement);
+      for (int axis = 0; axis < 3; axis++) {
+        const double padding = std::ceil(std::fabs(index_displacement[axis]));
+        motion_pad_size[axis] = max(motion_pad_size[axis],
+                                    static_cast<int>(min(padding, max_safe_padding)));
+      }
+    }
+  }
+
+  generate_vertices_and_quads(vertices_is, quads, ray_marching, motion_pad_size);
 
   convert_object_space(vertices_is, vertices);
 
@@ -234,8 +260,42 @@ static bool is_non_empty_leaf(const openvdb::MaskGrid::TreeType &tree, const ope
 
 void VolumeMeshBuilder::generate_vertices_and_quads(vector<ccl::int3> &vertices_is,
                                                     vector<QuadData> &quads,
-                                                    const bool ray_marching)
+                                                    const bool ray_marching,
+                                                    const int3 motion_pad_size)
 {
+  /* A velocity-swept volume can extend far beyond its active voxel topology. Building that
+   * support with voxel dilation is both expensive and unnecessary: only the boundary mesh needs
+   * to cover the positions that the shader may backtrack to. Use a conservative bounding box in
+   * this case. Besides avoiding an O(padding^3) topology expansion, this also lets motion extend
+   * beyond the original active region for arbitrarily large finite velocities. */
+  if (max(max(motion_pad_size.x, motion_pad_size.y), motion_pad_size.z) > 0) {
+    openvdb::CoordBBox bbox = topology_grid->evalActiveVoxelBoundingBox();
+    bbox.min() = bbox.min().offsetBy(-motion_pad_size.x, -motion_pad_size.y, -motion_pad_size.z);
+    bbox.max() = bbox.max().offsetBy(motion_pad_size.x, motion_pad_size.y, motion_pad_size.z);
+
+    const int3 min = make_int3(bbox.min().x(), bbox.min().y(), bbox.min().z());
+    const int3 max = make_int3(bbox.max().x(), bbox.max().y(), bbox.max().z());
+    const int3 corners[8] = {
+        make_int3(min[0], min[1], min[2]),
+        make_int3(max[0], min[1], min[2]),
+        make_int3(max[0], max[1], min[2]),
+        make_int3(min[0], max[1], min[2]),
+        make_int3(min[0], min[1], max[2]),
+        make_int3(max[0], min[1], max[2]),
+        make_int3(max[0], max[1], max[2]),
+        make_int3(min[0], max[1], max[2]),
+    };
+
+    VertHashMap used_verts;
+    create_quad(corners, vertices_is, quads, used_verts, QUAD_X_MIN);
+    create_quad(corners, vertices_is, quads, used_verts, QUAD_X_MAX);
+    create_quad(corners, vertices_is, quads, used_verts, QUAD_Y_MIN);
+    create_quad(corners, vertices_is, quads, used_verts, QUAD_Y_MAX);
+    create_quad(corners, vertices_is, quads, used_verts, QUAD_Z_MIN);
+    create_quad(corners, vertices_is, quads, used_verts, QUAD_Z_MAX);
+    return;
+  }
+
   if (ray_marching) {
     /* Make sure we only have leaf nodes in the tree, as tiles are not handled by this algorithm */
     topology_grid->tree().voxelizeActiveTiles();
@@ -380,133 +440,33 @@ bool VolumeMeshBuilder::empty_grid() const
          (!topology_grid->tree().hasActiveTiles() && topology_grid->tree().leafCount() == 0);
 }
 
-/* -------------------------------------------------------------------- */
-/** \name NanoVDB Grid Statistics
- *
- * Compute the average and variance of active values in a nanovdb grid, separately in all
- * dimensions. Adapted from `nanovdb/tools/GridStats.h`.
- * \{ */
-
-struct Vec3Stats {
-  double avg[3] = {0.0, 0.0, 0.0};
-  double var[3] = {0.0, 0.0, 0.0};
-  uint size = 0;
-
-  /* Numerically stable way of computing online mean and variance, from Donald Knuth in “The Art
-   * Of Computer Programming” (1998). */
-  void add(const double value[3])
-  {
-    size++;
-    for (int i = 0; i < 3; i++) {
-      const double delta = value[i] - avg[i];
-      avg[i] += delta / double(size);
-      var[i] += delta * (value[i] - avg[i]);
-    }
-  }
-
-  void add(const Vec3Stats &other)
-  {
-    if (other.size > 0) {
-      const double denom = 1.0 / (double(size + other.size));
-      for (int i = 0; i < 3; i++) {
-        const double delta = other.avg[i] - avg[i];
-        avg[i] += denom * delta * double(other.size);
-        var[i] += other.var[i] + denom * delta * delta * double(size) * double(other.size);
-      }
-      size += other.size;
-    }
-  }
-
-  void finalize()
-  {
-    if (size < 2) {
-      var[0] = var[1] = var[2] = 0.0;
-    }
-    else {
-      for (int i = 0; i < 3; i++) {
-        var[i] /= double(size);
-      }
-    }
-  }
-};
-
-template<typename ChildT> static Vec3Stats compute_stats(const nanovdb::LeafNode<ChildT> &leaf)
-{
-  Vec3Stats stats;
-  for (auto value_it = leaf.cbeginValueOn(); value_it; ++value_it) {
-    const double value[3] = {(*value_it)[0], (*value_it)[1], (*value_it)[2]};
-    stats.add(value);
-  }
-  return stats;
-}
-
-template<typename ChildT> static Vec3Stats compute_stats(const nanovdb::InternalNode<ChildT> &node)
-{
-  const uint32_t num_leaf = node.mChildMask.countOn();
-
-  std::unique_ptr<const ChildT *[]> childNodes(new const ChildT *[num_leaf]);
-  const ChildT **ptr = childNodes.get();
-  for (auto it = node.mChildMask.beginOn(); it; ++it) {
-    *ptr++ = node.getChild(*it);
-  }
-
-  auto reduction_func = [&](const blocked_range<uint32_t> &r, Vec3Stats init) -> Vec3Stats {
-    for (uint32_t i = r.begin(); i < r.end(); ++i) {
-      init.add(compute_stats(*childNodes[i]));
-    }
-    return init;
-  };
-
-  auto join_func = [](Vec3Stats a, Vec3Stats b) -> Vec3Stats {
-    a.add(b);
-    return a;
-  };
-
-  const tbb::blocked_range<uint32_t> range(0, num_leaf);
-
-  return parallel_reduce(range, Vec3Stats(), reduction_func, join_func);
-}
-
-/** \} */
-
-static int estimate_required_velocity_padding(const nanovdb::GridHandle<> &grid,
-                                              const float velocity_scale)
+static float3 estimate_max_velocity_displacement(const nanovdb::GridHandle<> &grid,
+                                                 const float velocity_scale)
 {
   const auto *typed_grid = grid.template grid<nanovdb::Vec3f>(0);
 
   if (typed_grid == nullptr) {
-    return 0;
+    return zero_float3();
   }
 
-  const nanovdb::Vec3d voxel_size = typed_grid->voxelSize();
-
-  /* We should only have uniform grids, so x = y = z, but we never know. */
-  const double max_voxel_size = openvdb::math::Max(voxel_size[0], voxel_size[1], voxel_size[2]);
-  if (max_voxel_size == 0.0 || velocity_scale == 0.0f) {
-    return 0;
+  if (velocity_scale == 0.0f) {
+    return zero_float3();
   }
 
-  Vec3Stats stats;
-  for (auto internal = typed_grid->tree().root().cbeginChild(); internal; ++internal) {
-    stats.add(compute_stats(*internal));
-  }
-  stats.finalize();
-
-  /* A standard score of 2.32635 makes sure only 1% of the values are above `avg + score * std`. */
-  const double score = 2.32635;
-  double estimated_padding = 0.0f;
+  /* NanoVDB stores exact extrema in the root node. Reading them is constant time, unlike scanning
+   * every active velocity voxel to estimate a percentile. The mesh is only a conservative
+   * intersection bound, so discarding statistical outliers here creates visible clipping. */
+  const nanovdb::Vec3f min_velocity = typed_grid->tree().root().minimum();
+  const nanovdb::Vec3f max_velocity = typed_grid->tree().root().maximum();
+  float3 max_displacement = zero_float3();
   for (int i = 0; i < 3; i++) {
-    const double max_velocity = max(std::fabs(stats.avg[i] + score * sqrt(stats.var[i])),
-                                    std::fabs(stats.avg[i] - score * sqrt(stats.var[i])));
-    const double max_dist_in_voxel = max_velocity * double(velocity_scale) / voxel_size[i];
-
-    /* Clamp padding to half of the volume size, and find the max padding in all 3 dimensions. */
-    estimated_padding = max(
-        min(max_dist_in_voxel, 0.5 * double(typed_grid->tree().bbox().dim()[i])),
-        estimated_padding);
+    const double max_abs_velocity = max(std::fabs(double(min_velocity[i])),
+                                        std::fabs(double(max_velocity[i])));
+    const double displacement = max_abs_velocity * std::fabs(double(velocity_scale));
+    max_displacement[i] = std::isfinite(displacement) ? float(displacement) : 0.0f;
   }
 
-  return static_cast<int>(std::ceil(estimated_padding));
+  return max_displacement;
 }
 #endif
 
@@ -616,6 +576,7 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
   /* Find shader and compute padding based on volume shader interpolation settings. */
   Shader *volume_shader = nullptr;
   int pad_size = 0;
+  float3 motion_displacement = zero_float3();
 
   for (Node *node : volume->get_used_shaders()) {
     Shader *shader = static_cast<Shader *>(node);
@@ -676,8 +637,9 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
 
     /* Add padding based on the maximum velocity vector. */
     if (attr.std == ATTR_STD_VOLUME_VELOCITY && scene->need_motion() != Scene::MOTION_NONE) {
-      pad_size = max(pad_size,
-                     estimate_required_velocity_padding(grid, volume->get_velocity_scale()));
+      motion_displacement = max(
+          motion_displacement,
+          estimate_max_velocity_displacement(grid, volume->get_velocity_scale()));
     }
 
     builder.add_grid(grid);
@@ -689,13 +651,15 @@ void GeometryManager::create_volume_mesh(const Scene *scene, Volume *volume, Pro
     return;
   }
 
+  /* Interpolation padding is small and changes the sparse topology used for empty-space skipping.
+   * Motion padding can be arbitrarily large and is represented only by the boundary mesh. */
   builder.add_padding(pad_size);
 
   /* Create mesh. */
   vector<float3> vertices;
   vector<int> indices;
   const bool ray_marching = scene->integrator->get_volume_ray_marching();
-  builder.create_mesh(vertices, indices, ray_marching);
+  builder.create_mesh(vertices, indices, ray_marching, motion_displacement);
 
   volume->resize_mesh(vertices.size(), indices.size() / 3);
   volume->used_shaders.clear();
