@@ -30,6 +30,7 @@ set(SRC_OSL
   node_emission.osl
   node_environment_texture.osl
   node_float_curve.osl
+  node_fast_volume.osl
   node_fresnel.osl
   node_gabor_texture.osl
   node_gamma.osl

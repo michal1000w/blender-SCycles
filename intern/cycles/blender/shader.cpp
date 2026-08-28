@@ -832,6 +832,27 @@ static ShaderNode *add_node(Scene *scene,
     PrincipledVolumeNode *principled = graph->create_node<PrincipledVolumeNode>();
     node = principled;
   }
+  else if (b_node.is_type("ShaderNodeVolumeFast"_ustr)) {
+    FastVolumeNode *fast_volume = graph->create_node<FastVolumeNode>();
+    switch (b_node.custom1) {
+      case blender::SHD_PHASE_HENYEY_GREENSTEIN:
+        fast_volume->set_phase(CLOSURE_VOLUME_HENYEY_GREENSTEIN_ID);
+        break;
+      case blender::SHD_PHASE_FOURNIER_FORAND:
+        fast_volume->set_phase(CLOSURE_VOLUME_FOURNIER_FORAND_ID);
+        break;
+      case blender::SHD_PHASE_DRAINE:
+        fast_volume->set_phase(CLOSURE_VOLUME_DRAINE_ID);
+        break;
+      case blender::SHD_PHASE_RAYLEIGH:
+        fast_volume->set_phase(CLOSURE_VOLUME_RAYLEIGH_ID);
+        break;
+      case blender::SHD_PHASE_MIE:
+        fast_volume->set_phase(CLOSURE_VOLUME_MIE_ID);
+        break;
+    }
+    node = fast_volume;
+  }
   else if (b_node.is_type("ShaderNodeNewGeometry"_ustr)) {
     node = graph->create_node<GeometryNode>();
   }

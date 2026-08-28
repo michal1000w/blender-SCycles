@@ -955,6 +955,40 @@ class PrincipledVolumeNode : public VolumeNode {
   NODE_SOCKET_API(float, temperature)
 };
 
+class FastVolumeNode : public VolumeNode {
+ public:
+  SHADER_NODE_CLASS(FastVolumeNode)
+  void attributes(Shader *shader, AttributeRequestSet *attributes) override;
+  bool has_attribute_dependency() override
+  {
+    return true;
+  }
+
+  NODE_SOCKET_API(ustring, density_attribute)
+  NODE_SOCKET_API(ustring, color_attribute)
+  NODE_SOCKET_API(ustring, scatter_attribute)
+  NODE_SOCKET_API(ustring, emission_attribute)
+  NODE_SOCKET_API(ustring, temperature_attribute)
+
+  NODE_SOCKET_API(float3, scatter_color)
+  NODE_SOCKET_API(float, density_cutoff)
+  NODE_SOCKET_API(float, scatter_strength)
+  NODE_SOCKET_API(float, anisotropy)
+  NODE_SOCKET_API(float, IOR)
+  NODE_SOCKET_API(float, backscatter)
+  NODE_SOCKET_API(float, alpha)
+  NODE_SOCKET_API(float, diameter)
+  NODE_SOCKET_API(ClosureType, phase)
+  NODE_SOCKET_API(float3, absorption_color)
+  NODE_SOCKET_API(float, absorption_strength)
+  NODE_SOCKET_API(float, emission_strength)
+  NODE_SOCKET_API(float3, emission_color)
+  NODE_SOCKET_API(float, flame_cutoff)
+  NODE_SOCKET_API(float, blackbody_strength)
+  NODE_SOCKET_API(float3, blackbody_tint)
+  NODE_SOCKET_API(float, temperature)
+};
+
 /* Interface between the I/O sockets and the SVM/OSL backend. */
 class PrincipledHairBsdfNode : public BsdfBaseNode {
  public:
