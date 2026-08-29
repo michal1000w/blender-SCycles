@@ -21,6 +21,16 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Tag volume receivers without growing the compact photon record. Cycles object indices are
+ * non-negative, leaving the sign bit available to distinguish the 3D volume estimator from the
+ * surface estimator. */
+#define PHOTON_VOLUME_RECEIVER_BIT 0x80000000u
+
+ccl_device_inline int photon_volume_receiver_object(const int object)
+{
+  return int(uint(object) | PHOTON_VOLUME_RECEIVER_BIT);
+}
+
 /* Keep the photon record at 48 bytes. Half precision is more than sufficient for shutter time,
  * while 15 bits locate a wavelength to substantially better than 0.1 nm. */
 ccl_device_inline uint photon_pack_time_wavelength(const float time,
@@ -174,6 +184,53 @@ ccl_device_inline float3 photon_sample_point_spot_direction(KernelGlobals kg,
   return D;
 }
 
+/* Aim delta point-light photons at the aggregate sharp-caster bounds most of the time. The
+ * remaining uniform-sphere component preserves support for conservatively missed or procedural
+ * casters, and evaluating the full mixture PDF keeps the estimator unbiased. */
+ccl_device_inline float3 photon_sample_point_direction(KernelGlobals kg,
+                                                       const float3 light_P,
+                                                       ccl_private uint *rng,
+                                                       ccl_private float *pdf)
+{
+  const float3 target_center = make_float3(kernel_data.integrator.photon_target);
+  const float target_radius = kernel_data.integrator.photon_target.w;
+  const float3 to_target = target_center - light_P;
+  const float distance2 = len_squared(to_target);
+  constexpr float target_probability = 0.9f;
+  constexpr float uniform_pdf = M_1_2PI_F * 0.5f;
+
+  if (!(target_radius > 0.0f) || distance2 <= sqr(target_radius)) {
+    *pdf = uniform_pdf;
+    return sample_uniform_sphere(make_float2(lcg_step_float(rng), lcg_step_float(rng)));
+  }
+
+  const float inv_distance = inversesqrtf(distance2);
+  const float3 target_direction = to_target * inv_distance;
+  const float cos_half_angle = safe_sqrtf(1.0f - sqr(target_radius) / distance2);
+  const float one_minus_cos = 1.0f - cos_half_angle;
+  const float target_pdf = 1.0f / max(M_2PI_F * one_minus_cos, 1.0e-20f);
+
+  float3 D;
+  if (lcg_step_float(rng) < target_probability) {
+    float unused_cosine;
+    float unused_pdf;
+    D = sample_uniform_cone(target_direction,
+                            one_minus_cos,
+                            make_float2(lcg_step_float(rng), lcg_step_float(rng)),
+                            &unused_cosine,
+                            &unused_pdf);
+  }
+  else {
+    D = sample_uniform_sphere(make_float2(lcg_step_float(rng), lcg_step_float(rng)));
+  }
+
+  *pdf = (1.0f - target_probability) * uniform_pdf;
+  if (dot(D, target_direction) >= cos_half_angle) {
+    *pdf += target_probability * target_pdf;
+  }
+  return D;
+}
+
 /* Sample an emitted ray and its total flux divided by the emitter-selection and ray PDFs. */
 ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                              IntegratorState state,
@@ -312,8 +369,7 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
           eval_fac = klight->spot.eval_fac * spot_attenuation;
         }
         else {
-          ray->D = sample_uniform_sphere(make_float2(lcg_step_float(rng), lcg_step_float(rng)));
-          ray_pdf = M_1_2PI_F * 0.5f;
+          ray->D = photon_sample_point_direction(kg, ray->P, rng, &ray_pdf);
         }
       }
       if (klight->spot.is_sphere) {
@@ -429,7 +485,8 @@ ccl_device_inline void photon_store(KernelGlobals kg,
                                     const int receiver_object,
                                     const float time,
                                     const float wavelength_rand,
-                                    const bool spectral)
+                                    const bool spectral,
+                                    const bool volume)
 {
   const uint slot = atomic_fetch_and_add_uint32(kernel_integrator_state.photon_stored, 1);
   if (slot >= kernel_integrator_state.photon_capacity) {
@@ -441,9 +498,10 @@ ccl_device_inline void photon_store(KernelGlobals kg,
   photon->power = power;
   photon->emitter_object = emitter_object;
   photon->direction = packed_normal(D).value;
-  photon->normal = packed_normal(N).value;
+  photon->normal = volume ? 0u : packed_normal(N).value;
   photon->time_wavelength = photon_pack_time_wavelength(time, wavelength_rand, spectral);
-  photon->receiver_object = receiver_object;
+  photon->receiver_object = volume ? photon_volume_receiver_object(receiver_object) :
+                                     receiver_object;
 
   const int3 cell = photon_cell(P, kernel_integrator_state.photon_radius);
   const uint bucket = photon_hash_cell(
@@ -479,11 +537,59 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
   }
   throughput /= float(kernel_integrator_state.photon_capacity);
 
+#ifdef __VOLUME__
+  if (kernel_data.integrator.use_volumes) {
+    /* Photon emitters may be inside object or world volumes. Initialize the same stack used by
+     * camera paths, but with light-path visibility so holdout/camera visibility does not change
+     * photon transport. */
+    INTEGRATOR_STATE_WRITE(state, ray, P) = ray.P;
+    INTEGRATOR_STATE_WRITE(state, ray, D) = ray.D;
+    INTEGRATOR_STATE_WRITE(state, ray, tmin) = ray.tmin;
+    INTEGRATOR_STATE_WRITE(state, ray, tmax) = ray.tmax;
+    INTEGRATOR_STATE_WRITE(state, ray, time) = ray.time;
+    integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_GLOSSY);
+  }
+#endif
+
   bool had_specular = false;
   for (int bounce = 0; bounce < kernel_data.integrator.photon_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
-    if (!scene_intersect(kg, &ray, path_visibility, &isect)) {
+    const bool hit_surface = scene_intersect(kg, &ray, path_visibility, &isect);
+
+#ifdef __VOLUME__
+    if (kernel_data.integrator.use_volumes && !integrator_state_volume_stack_is_empty(kg, state)) {
+      ray.tmax = hit_surface ? isect.t : FLT_MAX;
+      INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
+      float3 scatter_P;
+      int receiver_object = OBJECT_NONE;
+      const PhotonVolumeSampleEvent volume_event = photon_volume_sample_segment(
+          kg, state, &ray, &throughput, &scatter_P, &receiver_object);
+      if (volume_event == PHOTON_VOLUME_CACHE_MISS) {
+        return;
+      }
+      if (volume_event == PHOTON_VOLUME_SCATTERED) {
+        if (had_specular && receiver_object != OBJECT_NONE && isfinite_safe(throughput)) {
+          photon_store(kg,
+                       scatter_P,
+                       zero_float3(),
+                       ray.D,
+                       throughput,
+                       emitter_object,
+                       receiver_object,
+                       time,
+                       photon_wavelength_rand,
+                       (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u,
+                       true);
+        }
+        /* The first broad event ends the caustic transport class, whether or not it was eligible
+         * for storage. Ordinary volume multiple scattering remains in the path tracer. */
+        return;
+      }
+    }
+#endif
+
+    if (!hit_surface) {
       return;
     }
     ShaderData sd;
@@ -519,7 +625,8 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
                    sd.object,
                    time,
                    photon_wavelength_rand,
-                   (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u);
+                   (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u,
+                   false);
       return;
     }
 
@@ -549,6 +656,12 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     }
 
     path_state_next(kg, state, label, sd.runtime_flag);
+
+#ifdef __VOLUME__
+    if (label & LABEL_TRANSMIT) {
+      volume_stack_enter_exit<false>(kg, state, &sd);
+    }
+#endif
 
     if (!(label & LABEL_TRANSPARENT)) {
       if (((label & LABEL_REFLECT) && !kernel_data.integrator.caustics_reflective) ||

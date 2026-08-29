@@ -1565,6 +1565,12 @@ struct KernelLightDistribution {
 };
 static_assert_align(KernelLightDistribution, 16);
 
+enum PhotonVolumeSampleEvent {
+  PHOTON_VOLUME_ATTENUATED = 0,
+  PHOTON_VOLUME_SCATTERED = 1,
+  PHOTON_VOLUME_CACHE_MISS = 2,
+};
+
 /* Compact surface-photon record. `next` is a one-based index into the same array, with zero
  * terminating a spatial-hash chain. Spectral photons store power before the wavelength sampling
  * weight is applied; non-spectral photons store regular working-space power. `time_wavelength`

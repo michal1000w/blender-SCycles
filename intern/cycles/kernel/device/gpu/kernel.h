@@ -37,11 +37,11 @@
 #include "kernel/integrator/shade_dedicated_light.h"
 #include "kernel/integrator/shade_light.h"
 #include "kernel/integrator/shade_shadow.h"
+#include "kernel/integrator/shade_volume.h"
 #ifdef __KERNEL_METAL__
 #  include "kernel/integrator/photon_mapping.h"
 #endif
 #include "kernel/integrator/shade_surface.h"
-#include "kernel/integrator/shade_volume.h"
 
 #include "kernel/bake/bake.h"
 

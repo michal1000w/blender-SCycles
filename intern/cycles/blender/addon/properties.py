@@ -664,7 +664,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     use_photon_mapping: BoolProperty(
         name="Photon Mapping",
-        description="Use a progressive photon density estimate for difficult reflective and refractive caustics (Metal GPU only)",
+        description="Use progressive photon density estimates for difficult surface and volume caustics (Metal GPU only)",
         default=False,
     )
 
@@ -690,6 +690,14 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         description="Progressively reduce the gather radius as rendering converges; 0 keeps a fixed radius and 0.5 reduces it fastest",
         min=0.0, max=0.5,
         default=0.25,
+    )
+
+    photon_volume_radius_scale: FloatProperty(
+        name="Volume Radius Scale",
+        description="Multiply the photon gather radius in volumes to provide enough neighbors for the three-dimensional density estimate",
+        min=1.0, max=8.0,
+        soft_max=4.0,
+        default=2.0,
     )
 
     photon_max_bounces: IntProperty(

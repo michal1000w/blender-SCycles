@@ -1897,6 +1897,61 @@ ccl_device_forceinline void volume_integrate_heterogeneous(
   volume_equiangular_direct_scatter(kg, state, ray, sd, vstate, result);
 }
 
+#  ifdef __KERNEL_METAL__
+/* Sample a photon ray segment with the same weighted/null tracking implementation as camera paths,
+ * but without NEE, film writes, denoising features, or volume scattering-probability guiding. */
+ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg,
+                                                                IntegratorState state,
+                                                                const ccl_private Ray *ray,
+                                                                ccl_private Spectrum *power,
+                                                                ccl_private float3 *scatter_P,
+                                                                ccl_private int *receiver_object)
+{
+  if (integrator_state_volume_stack_is_empty(kg, state)) {
+    return PHOTON_VOLUME_ATTENUATED;
+  }
+
+  ShaderData sd;
+  *receiver_object = INTEGRATOR_STATE_ARRAY(state, volume_stack, 0, object);
+  shader_setup_from_volume(&sd, ray, *receiver_object);
+
+  RNGState rng_state;
+  path_state_rng_load(state, &rng_state);
+  sd.lcg_state = lcg_state_init(
+      rng_state.rng_pixel, rng_state.rng_offset, rng_state.sample, 0x70686f76u);
+
+  VolumeIntegrateState vstate ccl_optional_struct_init;
+  volume_integrate_state_init(kg, state, VOLUME_SAMPLE_NONE, &rng_state, ray->tmin, vstate);
+  vstate.vspg = false;
+
+  EquiangularCoefficients equiangular_coeffs = {zero_float3(), {ray->tmin, ray->tmax}};
+  VolumeIntegrateResult result = {};
+  volume_integrate_result_init(state, ray, vstate, equiangular_coeffs, result);
+
+  if (volume_is_homogeneous<false>(kg, state)) {
+    volume_integrate_homogeneous(
+        kg, state, ray, &sd, &rng_state, nullptr, vstate, equiangular_coeffs.t_range, result);
+  }
+  else {
+    volume_integrate_heterogeneous(kg, state, ray, &sd, rng_state, nullptr, vstate, result);
+  }
+
+  if (sd.runtime_flag & SR_CACHE_MISS) {
+    return PHOTON_VOLUME_CACHE_MISS;
+  }
+
+  *power = result.indirect_throughput;
+  if (!isfinite_safe(*power)) {
+    return PHOTON_VOLUME_ATTENUATED;
+  }
+  if (result.indirect_scatter) {
+    *scatter_P = ray->P + result.indirect_t * ray->D;
+    return PHOTON_VOLUME_SCATTERED;
+  }
+  return PHOTON_VOLUME_ATTENUATED;
+}
+#  endif
+
 /* Path tracing: sample point on light using equiangular sampling. */
 ccl_device_forceinline bool integrate_volume_sample_direct_light(
     KernelGlobals kg,
@@ -2605,6 +2660,249 @@ ccl_device_forceinline void integrate_volume_direct_light(
   integrator_state_copy_volume_stack_to_shadow(kg, shadow_state, state);
 }
 
+#  ifdef __KERNEL_METAL__
+ccl_device_inline bool photon_mapping_volume_matches(KernelGlobals kg,
+                                                     const ccl_global KernelPhoton *photon,
+                                                     const int receiver_object,
+                                                     const int time_bin,
+                                                     const float3 P,
+                                                     const float radius2,
+                                                     const bool camera_spectral,
+                                                     const float camera_wavelength)
+{
+  if (photon->receiver_object != photon_volume_receiver_object(receiver_object) ||
+      photon_time_bin(photon_unpack_time(photon->time_wavelength)) != time_bin ||
+      len_squared(photon->P - P) > radius2)
+  {
+    return false;
+  }
+
+#    ifdef __SPECTRAL__
+  if (camera_spectral && photon_is_spectral(photon->time_wavelength)) {
+    const float photon_wavelength = sample_wavelength(
+        photon_unpack_wavelength_rand(photon->time_wavelength));
+    if (photon_spectral_kernel(photon_wavelength, camera_wavelength) == 0.0f) {
+      return false;
+    }
+  }
+#    else
+  (void)camera_spectral;
+  (void)camera_wavelength;
+#    endif
+
+#    ifdef __LIGHT_LINKING__
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_LINKING) &&
+      !light_link_object_match(kg, receiver_object, photon->emitter_object))
+  {
+    return false;
+  }
+#    endif
+  return true;
+}
+
+/* Return the photon estimate of incident radiance integrated against the receiver phase function.
+ * Collision-photon density contains one factor of sigma_s; divide it out because the camera's
+ * sampled volume throughput already contains the receiver sigma_s. */
+ccl_device_inline Spectrum
+photon_mapping_volume_gather(KernelGlobals kg,
+                             IntegratorState state,
+                             ccl_private ShaderData *sd,
+                             const ccl_private ShaderVolumePhases *phases,
+                             ccl_global float *ccl_restrict render_buffer)
+{
+  if (!kernel_data.integrator.use_photon_mapping || !kernel_integrator_state.photons ||
+      kernel_integrator_state.photon_hash_size == 0 || phases->num_closure == 0)
+  {
+    return zero_spectrum();
+  }
+
+  const float radius = kernel_integrator_state.photon_volume_radius;
+  const float radius2 = sqr(radius);
+  const float cell_size = kernel_integrator_state.photon_radius;
+  const int cell_radius = max(float_to_int(ceilf(radius / cell_size)), 1);
+  const int3 base = photon_cell(sd->P, cell_size);
+  const int time_bin = photon_time_bin(INTEGRATOR_STATE(state, ray, time));
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  const bool camera_spectral = (path_flag & PATH_RAY_SPECTRAL) != 0u;
+#    ifdef __SPECTRAL__
+  const float camera_wavelength_rand = path_rng_1D(kg,
+                                                   INTEGRATOR_STATE(state, path, rng_pixel),
+                                                   INTEGRATOR_STATE(state, path, sample),
+                                                   PRNG_BOUNCE_NUM + PRNG_WAVELENGTH);
+  const float camera_wavelength = sample_wavelength(camera_wavelength_rand);
+#    else
+  const float camera_wavelength = 0.0f;
+#    endif
+
+  int num_valid = 0;
+  for (int z = -cell_radius; z <= cell_radius; z++) {
+    for (int y = -cell_radius; y <= cell_radius; y++) {
+      for (int x = -cell_radius; x <= cell_radius; x++) {
+        const uint bucket = photon_hash_cell(
+            base + make_int3(x, y, z), time_bin, kernel_integrator_state.photon_hash_size);
+        uint node = kernel_integrator_state.photon_hash[bucket];
+        uint traversed = 0;
+        while (node != 0u && traversed++ < kernel_integrator_state.photon_capacity) {
+          if (node > kernel_integrator_state.photon_capacity) {
+            break;
+          }
+          const ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[node - 1u];
+          node = photon->next;
+          if (photon_mapping_volume_matches(kg,
+                                            photon,
+                                            sd->object,
+                                            time_bin,
+                                            sd->P,
+                                            radius2,
+                                            camera_spectral,
+                                            camera_wavelength))
+          {
+            num_valid++;
+          }
+        }
+      }
+    }
+  }
+  if (num_valid == 0) {
+    return zero_spectrum();
+  }
+
+  Spectrum sigma_s = zero_spectrum();
+  for (int i = 0; i < phases->num_closure; i++) {
+    sigma_s += phases->closure[i].weight;
+  }
+  if (reduce_max(sigma_s) <= 0.0f) {
+    return zero_spectrum();
+  }
+
+  const float selection_probability = min(
+      1.0f, float(kernel_data.integrator.photon_gather_max) / float(num_valid));
+  const float selection_weight = 1.0f / selection_probability;
+  const float selection_offset = hash_uint3_to_float(INTEGRATOR_STATE(state, path, rng_pixel),
+                                                     uint(INTEGRATOR_STATE(state, path, sample)),
+                                                     uint(INTEGRATOR_STATE(state, path, bounce)));
+  int valid_index = 0;
+  Spectrum sum = zero_spectrum();
+  const float kernel_normalization = 15.0f / (8.0f * M_PI_F * radius * radius2);
+
+  for (int z = -cell_radius; z <= cell_radius; z++) {
+    for (int y = -cell_radius; y <= cell_radius; y++) {
+      for (int x = -cell_radius; x <= cell_radius; x++) {
+        const uint bucket = photon_hash_cell(
+            base + make_int3(x, y, z), time_bin, kernel_integrator_state.photon_hash_size);
+        uint node = kernel_integrator_state.photon_hash[bucket];
+        uint traversed = 0;
+        while (node != 0u && traversed++ < kernel_integrator_state.photon_capacity) {
+          if (node > kernel_integrator_state.photon_capacity) {
+            break;
+          }
+          const ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[node - 1u];
+          node = photon->next;
+          if (!photon_mapping_volume_matches(kg,
+                                             photon,
+                                             sd->object,
+                                             time_bin,
+                                             sd->P,
+                                             radius2,
+                                             camera_spectral,
+                                             camera_wavelength))
+          {
+            continue;
+          }
+
+          bool selected = true;
+          if (selection_probability < 1.0f) {
+            const float before = floorf(float(valid_index) * selection_probability +
+                                        selection_offset);
+            const float after = floorf(float(valid_index + 1) * selection_probability +
+                                       selection_offset);
+            selected = after > before;
+          }
+          valid_index++;
+          if (!selected) {
+            continue;
+          }
+
+          packed_normal photon_direction;
+          photon_direction.value = photon->direction;
+          BsdfEval phase_eval ccl_optional_struct_init;
+          float unused_pdf = volume_shader_phase_eval(
+              kg, state, sd, phases, -photon_direction.decode(), &phase_eval, SHADER_USE_MIS);
+          (void)unused_pdf;
+          Spectrum photon_power = rgb_to_spectrum(make_float3(photon->power));
+#    ifdef __SPECTRAL__
+          if (photon_is_spectral(photon->time_wavelength)) {
+            const float wavelength_rand = photon_unpack_wavelength_rand(photon->time_wavelength);
+            if (camera_spectral) {
+              float wavelength_pdf;
+              const float wavelength = sample_wavelength(wavelength_rand, &wavelength_pdf);
+              photon_power *= photon_spectral_kernel(wavelength, camera_wavelength) /
+                              wavelength_pdf;
+            }
+            else {
+              photon_power *= dispersion_throughput_weight(kg, wavelength_rand);
+            }
+          }
+#    endif
+          const float q = len_squared(photon->P - sd->P) / radius2;
+          const float kernel_weight = kernel_normalization * (1.0f - q);
+          const Spectrum photon_L = safe_divide_color(
+              photon_power * bsdf_eval_sum(&phase_eval) *
+                  (kernel_weight * selection_weight *
+                   float(kernel_data.integrator.photon_time_bins)),
+              sigma_s);
+          sum += photon_L;
+
+#    ifdef __PASSES__
+          if (kernel_data.film.pass_lightgroup != PASS_UNUSED &&
+              !(path_flag & PATH_RAY_SHADOW_CATCHER_HIT))
+          {
+            const int lightgroup = object_lightgroup(kg, photon->emitter_object);
+            if (lightgroup != LIGHTGROUP_NONE) {
+              Spectrum group_contribution = INTEGRATOR_STATE(state, path, throughput) * photon_L;
+              film_clamp_light(
+                  kg, &group_contribution, max(int(INTEGRATOR_STATE(state, path, bounce)), 1));
+              ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+              film_write_pass_spectrum(buffer + kernel_data.film.pass_lightgroup + 3 * lightgroup,
+                                       group_contribution);
+            }
+          }
+#    endif
+        }
+      }
+    }
+  }
+  return sum;
+}
+
+ccl_device_inline void photon_mapping_volume_write(KernelGlobals kg,
+                                                   ConstIntegratorState state,
+                                                   const Spectrum L,
+                                                   ccl_global float *ccl_restrict render_buffer)
+{
+  Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L;
+  film_clamp_light(kg, &contribution, max(int(INTEGRATOR_STATE(state, path, bounce)), 1));
+  if (is_zero(contribution)) {
+    return;
+  }
+
+  ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+  film_write_combined_pass(kg,
+                           INTEGRATOR_STATE(state, path, visibility),
+                           INTEGRATOR_STATE(state, path, flag),
+                           INTEGRATOR_STATE(state, path, sample),
+                           contribution,
+                           buffer);
+#    ifdef __PASSES__
+  if (kernel_data.film.pass_volume_indirect != PASS_UNUSED &&
+      !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SHADOW_CATCHER_HIT))
+  {
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_volume_indirect, contribution);
+  }
+#    endif
+}
+#  endif
+
 /* Path tracing: scatter in new direction using phase function */
 ccl_device_forceinline bool integrate_volume_phase_scatter(
     KernelGlobals kg,
@@ -2724,8 +3022,12 @@ volume_integrate_event(KernelGlobals kg,
                        ccl_private ShaderData *sd,
                        const ccl_private RNGState *rng_state,
                        ccl_private LightSample &ls,
-                       ccl_private VolumeIntegrateResult &result)
+                       ccl_private VolumeIntegrateResult &result,
+                       ccl_global float *ccl_restrict render_buffer)
 {
+#  ifndef __KERNEL_METAL__
+  (void)render_buffer;
+#  endif
 #  if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
   /* The current path throughput which is used later to calculate per-segment throughput. */
   const float3 initial_throughput = INTEGRATOR_STATE(state, path, throughput);
@@ -2827,6 +3129,14 @@ volume_integrate_event(KernelGlobals kg,
   if (result.indirect_scatter) {
     sd->P = ray->P + result.indirect_t * ray->D;
 
+#  ifdef __KERNEL_METAL__
+    if (kernel_data.integrator.use_photon_mapping) {
+      const Spectrum photon_L = photon_mapping_volume_gather(
+          kg, state, sd, &result.indirect_phases, render_buffer);
+      photon_mapping_volume_write(kg, state, photon_L, render_buffer);
+    }
+#  endif
+
 #  if defined(__PATH_GUIDING__)
     if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
 #    if PATH_GUIDING_LEVEL >= 1
@@ -2847,6 +3157,12 @@ volume_integrate_event(KernelGlobals kg,
 #  endif
 
     if (integrate_volume_phase_scatter(kg, state, sd, ray, rng_state, &result.indirect_phases)) {
+#  ifdef __KERNEL_METAL__
+      if (kernel_data.integrator.use_photon_mapping) {
+        INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_RECEIVER;
+        INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;
+      }
+#  endif
       return VOLUME_PATH_SCATTERED;
     }
     return VOLUME_PATH_MISSED;
@@ -2898,7 +3214,7 @@ ccl_device VolumeIntegrateEvent volume_integrate(KernelGlobals kg,
     return VOLUME_PATH_CACHE_MISS;
   }
 
-  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result);
+  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result, render_buffer);
 }
 
 ccl_device VolumeIntegrateEvent
@@ -2939,7 +3255,7 @@ volume_integrate_ray_marching(KernelGlobals kg,
     return VOLUME_PATH_CACHE_MISS;
   }
 
-  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result);
+  return volume_integrate_event(kg, state, ray, &sd, &rng_state, ls, result, render_buffer);
 }
 
 #endif

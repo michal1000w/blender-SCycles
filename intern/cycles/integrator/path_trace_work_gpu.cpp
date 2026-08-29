@@ -348,6 +348,9 @@ void PathTraceWorkGPU::alloc_photon_mapping()
   integrator_state_gpu_.photon_capacity = capacity;
   integrator_state_gpu_.photon_iteration = 0;
   integrator_state_gpu_.photon_radius = device_scene_->data.integrator.photon_radius;
+  integrator_state_gpu_.photon_volume_radius =
+      device_scene_->data.integrator.photon_radius *
+      device_scene_->data.integrator.photon_volume_radius_scale;
 }
 
 void PathTraceWorkGPU::init_execution()
@@ -545,6 +548,14 @@ void PathTraceWorkGPU::enqueue_photon_mapping(const int start_sample)
   integrator_state_gpu_.photon_radius = max(
       device_scene_->data.integrator.photon_radius *
           powf(float(iteration + 1), -device_scene_->data.integrator.photon_radius_decay),
+      1.0e-6f);
+  /* A three-dimensional point estimate needs N*r^3 to grow. Keep its shrink exponent safely
+   * below 1/3 even when the surface estimator is configured to converge more aggressively. */
+  const float volume_decay = min(device_scene_->data.integrator.photon_radius_decay, 0.3f);
+  integrator_state_gpu_.photon_volume_radius = max(
+      device_scene_->data.integrator.photon_radius *
+          device_scene_->data.integrator.photon_volume_radius_scale *
+          powf(float(iteration + 1), -volume_decay),
       1.0e-6f);
   device_->const_copy_to(
       "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));

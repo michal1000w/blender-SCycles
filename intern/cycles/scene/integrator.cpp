@@ -233,6 +233,7 @@ NODE_DEFINE(Integrator)
   SOCKET_INT(photon_count, "Photon Count", 65536);
   SOCKET_FLOAT(photon_radius, "Photon Radius", 0.1f);
   SOCKET_FLOAT(photon_radius_decay, "Photon Radius Decay", 0.25f);
+  SOCKET_FLOAT(photon_volume_radius_scale, "Photon Volume Radius Scale", 2.0f);
   SOCKET_INT(photon_max_bounces, "Photon Max Bounces", 8);
   SOCKET_INT(photon_gather_max, "Photon Gather Maximum", 64);
   SOCKET_INT(photon_map_update_samples, "Photon Map Update Samples", 32);
@@ -407,6 +408,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->photon_count = clamp(photon_count, 1024, 4 * 1024 * 1024);
   kintegrator->photon_radius = max(photon_radius, 1.0e-6f);
   kintegrator->photon_radius_decay = clamp(photon_radius_decay, 0.0f, 0.5f);
+  kintegrator->photon_volume_radius_scale = clamp(photon_volume_radius_scale, 1.0f, 8.0f);
   kintegrator->photon_max_bounces = clamp(photon_max_bounces, 1, 64);
   kintegrator->photon_gather_max = clamp(photon_gather_max, 1, 1024);
   kintegrator->photon_map_update_samples = clamp(photon_map_update_samples, 1, 1024);

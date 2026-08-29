@@ -87,6 +87,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(int, photon_count)
   NODE_SOCKET_API(float, photon_radius)
   NODE_SOCKET_API(float, photon_radius_decay)
+  NODE_SOCKET_API(float, photon_volume_radius_scale)
   NODE_SOCKET_API(int, photon_max_bounces)
   NODE_SOCKET_API(int, photon_gather_max)
   NODE_SOCKET_API(int, photon_map_update_samples)

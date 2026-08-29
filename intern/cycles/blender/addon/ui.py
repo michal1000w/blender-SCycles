@@ -718,6 +718,7 @@ class CYCLES_RENDER_PT_light_paths_photon_mapping(CyclesButtonsPanel, Panel):
         col.prop(cscene, "photon_count")
         col.prop(cscene, "photon_radius")
         col.prop(cscene, "photon_radius_decay")
+        col.prop(cscene, "photon_volume_radius_scale")
 
         col = layout.column(align=True)
         col.prop(cscene, "photon_max_bounces")
