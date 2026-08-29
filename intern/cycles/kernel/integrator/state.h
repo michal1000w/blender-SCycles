@@ -220,6 +220,7 @@ struct IntegratorStateGPU {
   uint photon_capacity;
   uint photon_iteration;
   float photon_radius;
+  float photon_volume_radius;
 };
 
 /* Abstraction
