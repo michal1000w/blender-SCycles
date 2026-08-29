@@ -79,7 +79,9 @@ ccl_device void integrator_volume_stack_update_for_subsurface(KernelGlobals kg,
 #  endif
 }
 
-ccl_device void integrator_volume_stack_init(KernelGlobals kg, IntegratorState state)
+ccl_device void integrator_volume_stack_init(KernelGlobals kg,
+                                             IntegratorState state,
+                                             const PathRayVisibility visibility)
 {
   PROFILING_INIT(kg, PROFILING_INTERSECT_VOLUME_STACK);
 
@@ -103,8 +105,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg, IntegratorState s
   int enclosed_index = 0;
 
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-  const PathRayVisibility visibility = SHADOW_CATCHER_PATH_VISIBILITY(path_flag,
-                                                                      PATH_RAY_VISIBILITY_CAMERA);
+  const PathRayVisibility stack_visibility = SHADOW_CATCHER_PATH_VISIBILITY(path_flag, visibility);
 
   /* Initialize volume stack with background volume For shadow catcher the
    * background volume is always assumed to be CG. */
@@ -124,7 +125,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg, IntegratorState s
 #  ifdef __VOLUME_RECORD_ALL__
   Intersection hits[2 * MAX_VOLUME_STACK_SIZE + 1];
   const uint num_hits = scene_intersect_volume(
-      kg, &volume_ray, hits, 2 * volume_stack_size, visibility);
+      kg, &volume_ray, hits, 2 * volume_stack_size, stack_visibility);
   if (num_hits > 0) {
     int enclosed_volumes[MAX_VOLUME_STACK_SIZE];
     Intersection *isect = hits;
@@ -174,7 +175,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg, IntegratorState s
          step < 2 * volume_stack_size)
   {
     Intersection isect;
-    if (!scene_intersect_volume(kg, &volume_ray, &isect, visibility)) {
+    if (!scene_intersect_volume(kg, &volume_ray, &isect, stack_visibility)) {
       break;
     }
 
@@ -230,7 +231,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg, IntegratorState s
 ccl_device void integrator_intersect_volume_stack(KernelGlobals kg, IntegratorState state)
 {
 #ifdef __VOLUME__
-  integrator_volume_stack_init(kg, state);
+  integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_CAMERA);
 
 #  ifdef __SHADOW_CATCHER__
   if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SHADOW_CATCHER_PASS) {
