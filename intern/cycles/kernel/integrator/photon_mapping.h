@@ -136,6 +136,44 @@ ccl_device_inline Spectrum photon_eval_triangle_emission(KernelGlobals kg,
   return (sd->runtime_flag & SR_CACHE_MISS) ? zero_spectrum() : surface_shader_emission(sd);
 }
 
+/* Sample a point spotlight proportional to its angular falloff. Sampling the full sphere and
+ * rejecting rays outside the cone is catastrophically inefficient for narrow spots (a 24 degree
+ * spot, for example, discards about 99% of its photon paths). Smoothstep integrates to one half
+ * over the blend interval, giving the closed-form normalization below. Rejection sampling within
+ * the outer cone then has at least 50% acceptance for every valid spot blend. */
+ccl_device_inline float3 photon_sample_point_spot_direction(KernelGlobals kg,
+                                                            ccl_global const KernelLight *klight,
+                                                            ccl_private uint *rng,
+                                                            ccl_private float *attenuation,
+                                                            ccl_private float *pdf)
+{
+  const float one_minus_cos_angle = 1.0f - klight->spot.cos_half_spot_angle;
+  if (!(one_minus_cos_angle > 0.0f)) {
+    *attenuation = 1.0f;
+    *pdf = 1.0f;
+    return klight->spot.dir;
+  }
+
+  float3 D;
+  do {
+    float unused_cosine;
+    float unused_pdf;
+    D = sample_uniform_cone(klight->spot.dir,
+                            one_minus_cos_angle,
+                            make_float2(lcg_step_float(rng), lcg_step_float(rng)),
+                            &unused_cosine,
+                            &unused_pdf);
+    *attenuation = spot_light_attenuation(&klight->spot, spot_light_to_local(kg, klight, D));
+  } while (lcg_step_float(rng) >= *attenuation);
+
+  const float blend_width = isfinite_safe(klight->spot.spot_smooth) ?
+                                1.0f / klight->spot.spot_smooth :
+                                0.0f;
+  const float integrated_cosine = max(one_minus_cos_angle - 0.5f * blend_width, 1.0e-20f);
+  *pdf = *attenuation / (M_2PI_F * integrated_cosine);
+  return D;
+}
+
 /* Sample an emitted ray and its total flux divided by the emitter-selection and ray PDFs. */
 ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                              IntegratorState state,
@@ -267,11 +305,21 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       }
       else {
         ray->P = klight->co;
-        ray->D = sample_uniform_sphere(make_float2(lcg_step_float(rng), lcg_step_float(rng)));
-        ray_pdf = M_1_2PI_F * 0.5f;
+        if (type == LIGHT_SPOT) {
+          float spot_attenuation;
+          ray->D = photon_sample_point_spot_direction(
+              kg, klight, rng, &spot_attenuation, &ray_pdf);
+          eval_fac = klight->spot.eval_fac * spot_attenuation;
+        }
+        else {
+          ray->D = sample_uniform_sphere(make_float2(lcg_step_float(rng), lcg_step_float(rng)));
+          ray_pdf = M_1_2PI_F * 0.5f;
+        }
       }
-      eval_fac = klight->spot.eval_fac;
-      if (type == LIGHT_SPOT) {
+      if (klight->spot.is_sphere) {
+        eval_fac = klight->spot.eval_fac;
+      }
+      if (type == LIGHT_SPOT && klight->spot.is_sphere) {
         const float3 local_ray = spot_light_to_local(kg, klight, ray->D);
         eval_fac *= spot_light_attenuation(&klight->spot, local_ray);
       }
