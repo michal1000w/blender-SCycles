@@ -602,6 +602,30 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     if (sd.runtime_flag & SR_CACHE_MISS) {
       return;
     }
+
+#ifdef __VOLUME__
+    /* A pure volume boundary has no BSDF closure. Camera paths pass through it transparently
+     * while updating their volume stack; photon paths must do the same or emitters outside a
+     * volume can never reach and scatter inside it. This is not a caustic-forming event. Keep the
+     * ray origin and advance tmin past this intersection, matching
+     * integrate_surface_volume_only_bounce(). */
+    if (sd.shader_flag & SD_HAS_ONLY_VOLUME) {
+      if (!path_state_volume_next(state)) {
+        return;
+      }
+      volume_stack_enter_exit<false>(kg, state, &sd);
+      ray.tmin = intersection_t_offset(sd.ray_length);
+      ray.tmax = FLT_MAX;
+      ray.self.prim = sd.prim;
+      ray.self.object = sd.object;
+      ray.self.light_prim = PRIM_NONE;
+      ray.self.light_object = OBJECT_NONE;
+      /* Volume bounds are transparent bookkeeping intersections, not transport bounces. */
+      bounce--;
+      continue;
+    }
+#endif
+
 #ifdef __SPECTRAL__
     if (sd.runtime_flag & (SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION)) {
       /* Keep raw photon power and defer the wavelength PDF/color-matching weight until gather.
