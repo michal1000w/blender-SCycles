@@ -46,7 +46,14 @@ def configure_metal():
 
 
 def build_scene(
-    use_photons, heterogeneous, surface_only, samples, photon_count, volume_radius_scale, output
+    use_photons,
+    heterogeneous,
+    surface_only,
+    outside_light,
+    samples,
+    photon_count,
+    volume_radius_scale,
+    output,
 ):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     configure_metal()
@@ -83,7 +90,9 @@ def build_scene(
         links.new(diffuse.outputs["BSDF"], output_node.inputs["Surface"])
         receiver.data.materials.append(material)
     else:
-        bpy.ops.mesh.primitive_cube_add(location=(0.0, 0.0, 1.0), scale=(3.8, 5.0, 3.0))
+        volume_location = (0.0, 0.5, 1.0) if outside_light else (0.0, 0.0, 1.0)
+        volume_scale = (3.8, 2.2, 3.0) if outside_light else (3.8, 5.0, 3.0)
+        bpy.ops.mesh.primitive_cube_add(location=volume_location, scale=volume_scale)
         volume = bpy.context.object
         volume.name = "Homogeneous Photon Receiver"
         material, nodes, links, output_node = material_with_output("Homogeneous Volume")
@@ -104,7 +113,10 @@ def build_scene(
         links.new(volume_node.outputs["Volume"], output_node.inputs["Volume"])
         volume.data.materials.append(material)
 
-    bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=24, location=(0.0, -1.0, 1.0), radius=0.8)
+    lens_y = 0.0 if outside_light else -1.0
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=48, ring_count=24, location=(0.0, lens_y, 1.0), radius=0.8
+    )
     lens = bpy.context.object
     lens.name = "Glass Caustic Caster"
     material, nodes, links, output_node = material_with_output("Glass Lens")
@@ -143,7 +155,7 @@ def build_scene(
     print(
         "PHOTON_VOLUME_SMOKE "
         f"photon={int(use_photons)} heterogeneous={int(heterogeneous)} "
-        f"surface_only={int(surface_only)} "
+        f"surface_only={int(surface_only)} outside_light={int(outside_light)} "
         f"mean={mean:.9g} peak={peak:.9g}"
     )
 
@@ -154,6 +166,7 @@ def main():
     parser.add_argument("--photon", action="store_true")
     parser.add_argument("--heterogeneous", action="store_true")
     parser.add_argument("--surface-only", action="store_true")
+    parser.add_argument("--outside-light", action="store_true")
     parser.add_argument("--samples", type=int, default=16)
     parser.add_argument("--photons", type=int, default=65536)
     parser.add_argument("--volume-radius-scale", type=float, default=2.0)
@@ -163,6 +176,7 @@ def main():
         options.photon,
         options.heterogeneous,
         options.surface_only,
+        options.outside_light,
         options.samples,
         options.photons,
         options.volume_radius_scale,

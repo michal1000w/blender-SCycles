@@ -110,12 +110,15 @@ direction, flux, emitter, time, and spectral metadata retain their existing repr
    detect background or enclosing volumes.
 2. In `integrator_photon_emit`, limit each surface intersection to a volume segment, sample that
    segment with native volume tracking, and store/terminate at a qualified collision.
-3. Update the photon volume stack after transmitted surface events.
-4. Add a volume matching/gather routine beside the current surface gather.
-5. Invoke volume gather at the selected indirect volume collision before phase continuation and
+3. Pass through pure volume-boundary meshes with the same transparent boundary transition as
+   camera paths, then update the photon volume stack. This is required for emitters outside the
+   medium and does not consume photon transport bounce depth.
+4. Update the photon volume stack after transmitted surface events.
+5. Add a volume matching/gather routine beside the current surface gather.
+6. Invoke volume gather at the selected indirect volume collision before phase continuation and
    write the contribution through the standard volume indirect/combined pass paths.
-6. Mark the camera volume event as a photon-map receiver before its phase bounce.
-7. Reuse the existing host-computed sharp-caster bounds to importance-sample point-light emission.
+7. Mark the camera volume event as a photon-map receiver before its phase bounce.
+8. Reuse the existing host-computed sharp-caster bounds to importance-sample point-light emission.
 
 ## Validation matrix
 
@@ -124,8 +127,8 @@ direction, flux, emitter, time, and spectral metadata retain their existing repr
 - Compile: Metal kernel compilation plus normal C++ build; feature-off compilation must not add
   work to other backends.
 - Render A/B: homogeneous fog behind glass, heterogeneous VDB behind glass, anisotropic phase,
-  colored absorption, multiple overlapping volumes, world volume, motion blur, emissive mesh and
-  point/spot/sun sources.
+  colored absorption, multiple overlapping volumes, world volume, motion blur, emitters both
+  inside and outside volume bounds, and emissive mesh/point/spot/sun sources.
 - Convergence: compare photon mapping off/on against a high-sample path-traced reference; track
   mean luminance, RMSE, and temporal/sample variance at several photon counts and radii.
 - Regression: photon mapping off must be image-identical; surface photon caustics must remain
