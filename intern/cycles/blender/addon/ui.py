@@ -722,6 +722,7 @@ class CYCLES_RENDER_PT_light_paths_photon_mapping(CyclesButtonsPanel, Panel):
         col = layout.column(align=True)
         col.prop(cscene, "photon_max_bounces")
         col.prop(cscene, "photon_gather_max")
+        col.prop(cscene, "photon_map_update_samples")
         col.prop(cscene, "photon_roughness_threshold")
         col.prop(cscene, "photon_normal_threshold")
 

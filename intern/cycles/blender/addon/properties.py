@@ -696,7 +696,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         name="Max Bounces",
         description="Maximum number of surface interactions along each photon path",
         min=1, max=64,
-        default=8,
+        default=32,
     )
 
     photon_gather_max: IntProperty(
@@ -705,6 +705,14 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         min=1, max=1024,
         soft_max=256,
         default=64,
+    )
+
+    photon_map_update_samples: IntProperty(
+        name="Map Update Samples",
+        description="Build an independent photon map after this many camera samples; lower values converge more reliably but trace photons more often",
+        min=1, max=1024,
+        soft_max=64,
+        default=8,
     )
 
     photon_roughness_threshold: FloatProperty(

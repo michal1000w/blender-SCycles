@@ -395,51 +395,75 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
   work_tile_scheduler_.set_max_num_path_states(max_num_paths_ / 8);
   work_tile_scheduler_.set_accelerated_rt(
       (device_->get_bvh_layout_mask(device_scene_->data.kernel_features) & BVH_LAYOUT_OPTIX) != 0);
-  work_tile_scheduler_.reset(effective_buffer_params_,
-                             start_sample,
-                             samples_num,
-                             sample_offset,
-                             device_scene_->data.integrator.scrambling_distance);
-
-  enqueue_reset();
-  enqueue_photon_mapping(start_sample);
 
   int num_iterations = 0;
   uint64_t num_busy_accum = 0;
+  const int map_update_samples = device_scene_->data.integrator.use_photon_mapping ?
+                                     device_scene_->data.integrator.photon_map_update_samples :
+                                     samples_num;
 
-  /* TODO: set a hard limit in case of undetected kernel failures? */
-  while (true) {
-    /* Enqueue work from the scheduler, on start or when there are not enough
-     * paths to keep the device occupied. */
-    bool finished;
-    if (enqueue_work_tiles(finished)) {
-      if (!update_queue_counter_and_cache()) {
-        break; /* Stop on error. */
+  /* A finite photon map is one Monte Carlo realization. Reusing it for an arbitrarily large
+   * camera batch leaves its density-estimation noise frozen in the image, regardless of the
+   * displayed sample count. Bound the reuse interval so offline renders and long-running viewport
+   * renders average independent maps and advance the progressive radius on the actual sample
+   * index. */
+  for (int samples_done = 0; samples_done < samples_num;) {
+    const int batch_samples = min(map_update_samples, samples_num - samples_done);
+    const int batch_start_sample = start_sample + samples_done;
+    work_tile_scheduler_.reset(effective_buffer_params_,
+                               batch_start_sample,
+                               batch_samples,
+                               sample_offset,
+                               device_scene_->data.integrator.scrambling_distance);
+
+    enqueue_reset();
+    enqueue_photon_mapping(batch_start_sample);
+
+    bool batch_complete = false;
+    /* TODO: set a hard limit in case of undetected kernel failures? */
+    while (true) {
+      /* Enqueue work from the scheduler, on start or when there are not enough
+       * paths to keep the device occupied. */
+      bool finished;
+      if (enqueue_work_tiles(finished)) {
+        if (!update_queue_counter_and_cache()) {
+          batch_complete = false;
+          break; /* Stop on error. */
+        }
       }
-    }
 
-    if (is_cancel_requested()) {
-      break;
-    }
-
-    /* Stop if no more work remaining. */
-    if (finished) {
-      break;
-    }
-
-    /* Enqueue on of the path iteration kernels. */
-    if (enqueue_path_iteration()) {
-      if (!update_queue_counter_and_cache()) {
-        break; /* Stop on error. */
+      if (is_cancel_requested()) {
+        batch_complete = false;
+        break;
       }
+
+      /* Stop if no more work remaining. */
+      if (finished) {
+        batch_complete = true;
+        break;
+      }
+
+      /* Enqueue one of the path iteration kernels. */
+      if (enqueue_path_iteration()) {
+        if (!update_queue_counter_and_cache()) {
+          batch_complete = false;
+          break; /* Stop on error. */
+        }
+      }
+
+      if (is_cancel_requested()) {
+        batch_complete = false;
+        break;
+      }
+
+      num_busy_accum += num_active_main_paths_paths();
+      ++num_iterations;
     }
 
-    if (is_cancel_requested()) {
+    if (!batch_complete) {
       break;
     }
-
-    num_busy_accum += num_active_main_paths_paths();
-    ++num_iterations;
+    samples_done += batch_samples;
   }
 
   if (num_iterations) {
