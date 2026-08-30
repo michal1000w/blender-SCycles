@@ -795,6 +795,78 @@ def main():
         "BDPT absorption transmittance differs from PT by at least 1%",
     )
 
+    volume_pt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "volume_scatter_pt",
+        [
+            "--no-glass",
+            "--volume-only",
+            "--samples",
+            "16384",
+            "--resolution",
+            "64",
+            "--world-scatter",
+            "0.18",
+        ],
+    )
+    volume_bdpt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "volume_scatter_bdpt",
+        [
+            "--bdpt",
+            "--no-glass",
+            "--volume-only",
+            "--samples",
+            "512",
+            "--resolution",
+            "64",
+            "--max-bounces",
+            "8",
+            "--light-paths",
+            "1048576",
+            "--update-samples",
+            "512",
+            "--world-scatter",
+            "0.18",
+        ],
+    )
+    require(
+        relative_error(volume_bdpt["mean"], volume_pt["mean"]) < 0.015,
+        "BDPT volume scattering differs from PT by at least 1.5%",
+    )
+
+    volume_light_tracing = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "volume_scatter_light_tracing",
+        [
+            "--bdpt",
+            "--no-glass",
+            "--volume-only",
+            "--samples",
+            "1",
+            "--resolution",
+            "64",
+            "--max-bounces",
+            "8",
+            "--light-paths",
+            "1048576",
+            "--update-samples",
+            "1",
+            "--world-scatter",
+            "0.18",
+        ],
+    )
+    require(
+        relative_error(volume_light_tracing["mean"], volume_pt["mean"]) < 0.08,
+        "Dense volume light tracing did not reconstruct the PT reference within 8%",
+    )
+
     print(f"BDPT_METAL_REGRESSION PASS seconds={time.perf_counter() - started:.3f} output={output_dir}")
     if output_context:
         output_context.cleanup()
