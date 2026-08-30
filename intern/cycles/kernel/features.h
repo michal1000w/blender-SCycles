@@ -82,8 +82,8 @@ CCL_NAMESPACE_BEGIN
 /* Light tree. */
 #define KERNEL_FEATURE_LIGHT_TREE (1ULL << 31ULL)
 
-/* Gaussian splats. */
-#define KERNEL_FEATURE_GSPLATS (1ULL << 32ULL)
+/* Metal bidirectional path tracing state. */
+#define KERNEL_FEATURE_BDPT (1ULL << 32ULL)
 
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 

@@ -574,10 +574,12 @@ void LightManager::device_update_distribution(Device * /*unused*/,
                                               Progress &progress)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  /* Photon emission needs a view-independent emitter CDF even when camera paths use the light
-   * tree. Building both is intentional; the regular light sampler continues using the tree. */
+  /* Photon and bidirectional light-subpath emission need a view-independent emitter CDF even when
+   * camera paths use the light tree. Building both is intentional; regular NEE keeps using the
+   * tree. */
   if (kintegrator->use_light_tree &&
-      !scene->integrator->use_photon_mapping_on_device(scene->device))
+      !scene->integrator->use_photon_mapping_on_device(scene->device) &&
+      !scene->integrator->use_bidirectional_path_tracing_on_device(scene->device))
   {
     dscene->light_distribution.free();
     return;
@@ -1425,7 +1427,13 @@ void LightManager::count_lights(KernelIntegrator *kintegrator, const Scene *scen
 void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  kintegrator->use_light_tree = scene->integrator->get_use_light_tree();
+  /* BDPT's emitted subpaths use the flat, emitter-independent distribution. Keep NEE on the same
+   * distribution so recursive MIS compares densities in the same sampling measure. Supporting a
+   * camera-dependent light-tree selection density on one endpoint requires carrying that density
+   * per connection and is intentionally not approximated. */
+  kintegrator->use_light_tree = scene->integrator->get_use_light_tree() &&
+                                !scene->integrator->use_bidirectional_path_tracing_on_device(
+                                    scene->device);
   kintegrator->use_light_mis = scene->use_light_mis();
 
   /* Create KernelLight for every portal and enabled light in the scene. */
