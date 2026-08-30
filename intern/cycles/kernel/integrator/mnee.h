@@ -796,7 +796,9 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
                                                           const int vertex_count,
                                                           ccl_private ManifoldVertex *vertices,
                                                           ccl_private Spectrum *throughput,
-                                                          ccl_private float3 *r_receiver_wo)
+                                                          ccl_private float3 *r_receiver_wo,
+                                                          ccl_private float3 *r_light_wo,
+                                                          ccl_private float *r_light_distance)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -933,6 +935,13 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
     const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo);
     *throughput *= bsdf_contribution;
   }
+  if (r_light_wo != nullptr) {
+    /* Direction from the finite endpoint back toward the last manifold vertex. */
+    *r_light_wo = -wo;
+  }
+  if (r_light_distance != nullptr) {
+    *r_light_distance = wo_len;
+  }
 
   /* Restore original state path bounce info. */
   INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
@@ -951,7 +960,11 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                            ccl_private LightSample *ls,
                                                            ccl_private Spectrum *throughput,
                                                            ccl_private float3 *r_receiver_wo,
-                                                           ccl_private int &r_vertex_count)
+                                                           ccl_private int &r_vertex_count,
+                                                           ccl_private float3 *r_light_wo = nullptr,
+                                                           const bool consider_all_refractive = false,
+                                                           ccl_private float *r_light_distance = nullptr,
+                                                           const float wavelength_rand_override = -1.0f)
 {
   /*
    * 1. send seed ray from shading point to light sample position (or along sampled light
@@ -994,7 +1007,7 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
     }
 
     const uint object_flags = intersection_get_object_flags(kg, &probe_isect);
-    if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
+    if (consider_all_refractive || (object_flags & SD_OBJECT_CAUSTICS_CASTER)) {
 
       /* Do we have enough slots. */
       if (vertex_count >= MNEE_MAX_CAUSTIC_CASTERS) {
@@ -1012,7 +1025,12 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
       shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
 
 #ifdef __SPECTRAL__
-      shader_setup_wavelength(kg, sd_mnee, state);
+      if (wavelength_rand_override >= 0.0f) {
+        sd_mnee->rand_wavelength = wavelength_rand_override;
+      }
+      else {
+        shader_setup_wavelength(kg, sd_mnee, state);
+      }
 #endif
 
       /* Reject caster if smooth normals are not available: Manifold exploration assumes local
@@ -1139,7 +1157,9 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                      vertex_count,
                                                      vertices,
                                                      throughput,
-                                                     r_receiver_wo);
+                                                     r_receiver_wo,
+                                                     r_light_wo,
+                                                     r_light_distance);
 
     /* TODO: Cache misses are not handled correctly.
      * - PATH_MNEE_VALID flag is not handled properly
