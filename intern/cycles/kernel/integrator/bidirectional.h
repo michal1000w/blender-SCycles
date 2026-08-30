@@ -42,7 +42,6 @@ ccl_device_inline bool bdpt_enabled_for_surface_path(ConstIntegratorState state)
 {
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_camera_supported() &&
-         INTEGRATOR_STATE(state, path, volume_bounce) == 0 &&
          !(path_flag & (PATH_RAY_SHADOW_CATCHER_HIT | PATH_RAY_SHADOW_CATCHER_PASS));
 }
 
@@ -341,8 +340,11 @@ ccl_device_inline float bdpt_nee_mis_weight(KernelGlobals kg,
   return 1.0f / (1.0f + w_light + w_camera);
 }
 
-ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
-                                                    const ccl_private ShaderData *sd)
+ccl_device_inline void bdpt_recursive_mis_before_measure_conversion(
+    IntegratorState state,
+    const ccl_private ShaderData *sd,
+    ccl_private float *d_vcm_out,
+    ccl_private float *d_vc_out)
 {
   float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm);
   float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc);
@@ -382,8 +384,6 @@ ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
       const float3 image_y = transform_perspective(
           &raster_to_camera, make_float3(0.0f, 1.0f, 0.0f));
       const float image_pixel_area = len(cross(image_x - image_origin, image_y - image_origin));
-      /* The orthographic endpoint is delta in direction and sampled in position. Express its
-       * projected-area density in the solid-angle recurrence used below. */
       inverse_camera_pdf_w = image_pixel_area /
                              sqr(max(sd->ray_length, 1.0e-10f));
     }
@@ -404,13 +404,113 @@ ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
                                        (dy1 - dy0) * (0.5f / h)));
     }
     else {
-      /* Compact differentials are a conservative fallback for non-pinhole camera models. */
       const float camera_footprint = max(INTEGRATOR_STATE(state, ray, dD), 1.0e-8f);
       inverse_camera_pdf_w = sqr(camera_footprint);
     }
     d_vcm = kernel_integrator_state.bdpt_light_path_sample_ratio * inverse_camera_pdf_w;
     d_vc = 0.0f;
   }
+
+  *d_vcm_out = d_vcm;
+  *d_vc_out = d_vc;
+}
+
+#ifdef __VOLUME__
+/* Volume analogue of bdpt_nee_mis_weight(). Medium vertices use volume rather than projected-area
+ * measure, so neither the recursive density nor its reverse phase density carries a cosine. */
+ccl_device_inline float bdpt_volume_nee_mis_weight(
+    KernelGlobals kg,
+    IntegratorState state,
+    ccl_private ShaderData *sd,
+    const ccl_private ShaderVolumePhases *phases,
+    const float3 P,
+    const ccl_private LightSample *ls,
+    const float phase_pdf)
+{
+  const float direct_pdf = bdpt_safe_pdf(ls->pdf);
+  float w_light = phase_pdf / direct_pdf;
+
+  const float3 original_wi = sd->wi;
+  sd->wi = ls->D;
+  BsdfEval reverse_eval;
+  const float reverse_pdf = volume_shader_phase_eval(
+      kg, state, sd, phases, original_wi, &reverse_eval, SHADER_USE_MIS);
+  sd->wi = original_wi;
+
+  const float3 original_P = sd->P;
+  const float original_ray_length = sd->ray_length;
+  sd->P = P;
+  sd->ray_length = len(P - sd->ray_P);
+  float d_vcm;
+  float d_vc;
+  bdpt_recursive_mis_before_measure_conversion(state, sd, &d_vcm, &d_vc);
+  d_vcm *= sqr(max(sd->ray_length, 1.0e-10f));
+  sd->P = original_P;
+  sd->ray_length = original_ray_length;
+
+  float emission_position_pdf = 0.0f;
+  float emission_side_pdf = 1.0f;
+  float w_camera = 0.0f;
+  if (ls->type == LIGHT_TRIANGLE) {
+    emission_position_pdf = kernel_data.integrator.distribution_pdf_triangles;
+    const int shader_flags = kernel_data_fetch(shaders, ls->shader & SHADER_MASK).flags;
+    if ((shader_flags & SD_MIS_FRONT) && (shader_flags & SD_MIS_BACK)) {
+      emission_side_pdf = 0.5f;
+    }
+  }
+  else if (ls->type == LIGHT_AREA) {
+    const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
+    const float area = area_light_is_ellipse(&klight->area) ?
+                           M_PI_F * klight->area.len_u * klight->area.len_v * 0.25f :
+                           klight->area.len_u * klight->area.len_v;
+    emission_position_pdf = kernel_data.integrator.distribution_pdf_lights /
+                            max(area, 1.0e-20f);
+  }
+  else if (ls->type == LIGHT_BACKGROUND || ls->type == LIGHT_SUN) {
+    if (ls->type == LIGHT_SUN) {
+      const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
+      if (klight->sun.angle == 0.0f) {
+        w_light = 0.0f;
+      }
+    }
+    w_camera = bdpt_infinite_position_pdf(P, -ls->D) *
+               (d_vcm + d_vc * reverse_pdf);
+  }
+  else if (ls->type == LIGHT_POINT || ls->type == LIGHT_SPOT) {
+    const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
+    if (klight->spot.is_sphere) {
+      const float area = 4.0f * M_PI_F * sqr(klight->spot.radius);
+      emission_position_pdf = kernel_data.integrator.distribution_pdf_lights /
+                              max(area, 1.0e-20f);
+    }
+    else if (klight->spot.radius > 0.0f) {
+      return light_sample_mis_weight_nee(kg, ls->pdf, phase_pdf);
+    }
+    else {
+      w_light = 0.0f;
+      const float emission_pdf_w = kernel_data.integrator.distribution_pdf_lights *
+                                   ((ls->type == LIGHT_SPOT) ?
+                                        bdpt_spot_emission_direction_pdf(kg, klight, -ls->D) :
+                                        bdpt_point_emission_direction_pdf(klight->co, -ls->D));
+      w_camera = emission_pdf_w / direct_pdf * (d_vcm + d_vc * reverse_pdf);
+    }
+  }
+
+  if (emission_position_pdf > 0.0f) {
+    const float emission_to_direct = emission_position_pdf * emission_side_pdf /
+                                     (M_PI_F * direct_pdf);
+    w_camera = emission_to_direct * (d_vcm + d_vc * reverse_pdf);
+  }
+  return 1.0f / (1.0f + w_light + w_camera);
+}
+#endif
+
+ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
+                                                    const ccl_private ShaderData *sd)
+{
+  float d_vcm;
+  float d_vc;
+  bdpt_recursive_mis_before_measure_conversion(state, sd, &d_vcm, &d_vc);
 
   const float distance2 = sqr(max(sd->ray_length, 1.0e-10f));
   const float cos_fixed = max(fabsf(dot(sd->N, sd->wi)), 1.0e-8f);
@@ -420,6 +520,31 @@ ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm;
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
 }
+
+#ifdef __VOLUME__
+ccl_device_inline void bdpt_recursive_mis_after_volume_hit(IntegratorState state,
+                                                           const ccl_private ShaderData *sd,
+                                                           const float distance)
+{
+  float d_vcm;
+  float d_vc;
+  bdpt_recursive_mis_before_measure_conversion(state, sd, &d_vcm, &d_vc);
+  d_vcm *= sqr(max(distance, 1.0e-10f));
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
+}
+
+ccl_device_inline void bdpt_recursive_mis_after_phase(IntegratorState state,
+                                                      const float forward_pdf,
+                                                      const float reverse_pdf)
+{
+  const float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm);
+  const float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc);
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) =
+      (d_vc * reverse_pdf + d_vcm) / bdpt_safe_pdf(forward_pdf);
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 1.0f / bdpt_safe_pdf(forward_pdf);
+}
+#endif
 
 ccl_device_inline void bdpt_recursive_mis_after_scatter(IntegratorState state,
                                                         const int label,
@@ -530,6 +655,24 @@ ccl_device_inline bool bdpt_setup_light_vertex(KernelGlobals kg,
   light_ray.dP = differential_zero_compact();
   light_ray.dD = differential_zero_compact();
 #endif
+
+  if (light_vertex->type == PRIMITIVE_VOLUME) {
+#ifdef __VOLUME__
+    light_ray.P = light_vertex->P;
+    light_ray.tmin = 0.0f;
+    shader_setup_from_volume(light_sd, &light_ray, light_vertex->object);
+    light_sd->P = light_vertex->P;
+#  ifdef __SPECTRAL__
+    light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
+#  endif
+    VolumeShaderCoefficients coeff;
+    return volume_shader_sample(kg, state, light_sd, &coeff) &&
+           (light_sd->runtime_flag & SR_SCATTER) &&
+           !(light_sd->runtime_flag & SR_CACHE_MISS);
+#else
+    return false;
+#endif
+  }
 
   Intersection light_isect;
   light_isect.t = 1.0f;
@@ -835,6 +978,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
    * specular manifold used by Cycles MNEE, but in reverse: camera -> interfaces -> cached light
    * vertex. This yields both the physically valid endpoint direction and its transfer Jacobian. */
   if ((kernel_data.kernel_features & KERNEL_FEATURE_MNEE) &&
+      light_vertex->type != PRIMITIVE_VOLUME &&
       CameraType(kernel_data.cam.type) == CAMERA_PERSPECTIVE)
   {
     ShaderDataTinyStorage camera_sd_storage;
@@ -959,41 +1103,68 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   camera_ray.dP = differential_zero_compact();
   camera_ray.dD = differential_zero_compact();
 #endif
-  Intersection camera_isect;
-  camera_isect.t = 1.0f;
-  camera_isect.u = light_vertex->u;
-  camera_isect.v = light_vertex->v;
-  camera_isect.prim = light_vertex->prim;
-  camera_isect.object = light_vertex->object;
-  camera_isect.type = light_vertex->type;
-  shader_setup_from_ray(kg, light_sd, &camera_ray, &camera_isect);
-#ifdef __SPECTRAL__
-  light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
-#endif
-  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(kg,
-                                                        state,
-                                                        light_sd,
-                                                        nullptr,
-                                                        PATH_RAY_VISIBILITY_CAMERA,
-                                                        PATH_RAY_MIS_SKIP |
-                                                            PATH_RAY_TRANSPARENT_BACKGROUND);
-  if (light_sd->runtime_flag & SR_CACHE_MISS) {
-    return;
-  }
-  surface_shader_prepare_closures(kg, state, light_sd, PATH_RAY_VISIBILITY_CAMERA);
-
+  const bool volume_vertex = light_vertex->type == PRIMITIVE_VOLUME;
   BsdfEval light_eval;
-  float roughness_squared = 0.0f;
-  const uint emitter_shader_flags = (light_vertex->path_length == 2u) ?
-                                        (light_vertex->emitter_shader_flags | SHADER_USE_MIS) :
-                                        SHADER_USE_MIS;
-  const float light_pdf = surface_shader_bsdf_eval(kg,
-                                                   state,
-                                                   light_sd,
-                                                   light_incoming,
-                                                   &light_eval,
-                                                   emitter_shader_flags,
-                                                   roughness_squared);
+  float light_pdf = 0.0f;
+  if (volume_vertex) {
+#ifdef __VOLUME__
+    camera_ray.P = light_vertex->P;
+    camera_ray.tmin = 0.0f;
+    shader_setup_from_volume(light_sd, &camera_ray, light_vertex->object);
+    light_sd->P = light_vertex->P;
+#  ifdef __SPECTRAL__
+    light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
+#  endif
+    VolumeShaderCoefficients coeff;
+    if (!volume_shader_sample(kg, state, light_sd, &coeff) ||
+        !(light_sd->runtime_flag & SR_SCATTER) || (light_sd->runtime_flag & SR_CACHE_MISS))
+    {
+      return;
+    }
+    ShaderVolumePhases phases;
+    volume_shader_copy_phases(&phases, light_sd);
+    light_pdf = volume_shader_phase_eval(
+        kg, state, light_sd, &phases, light_incoming, &light_eval, SHADER_USE_MIS);
+#else
+    return;
+#endif
+  }
+  else {
+    Intersection camera_isect;
+    camera_isect.t = 1.0f;
+    camera_isect.u = light_vertex->u;
+    camera_isect.v = light_vertex->v;
+    camera_isect.prim = light_vertex->prim;
+    camera_isect.object = light_vertex->object;
+    camera_isect.type = light_vertex->type;
+    shader_setup_from_ray(kg, light_sd, &camera_ray, &camera_isect);
+#ifdef __SPECTRAL__
+    light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
+#endif
+    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(kg,
+                                                          state,
+                                                          light_sd,
+                                                          nullptr,
+                                                          PATH_RAY_VISIBILITY_CAMERA,
+                                                          PATH_RAY_MIS_SKIP |
+                                                              PATH_RAY_TRANSPARENT_BACKGROUND);
+    if (light_sd->runtime_flag & SR_CACHE_MISS) {
+      return;
+    }
+    surface_shader_prepare_closures(kg, state, light_sd, PATH_RAY_VISIBILITY_CAMERA);
+
+    float roughness_squared = 0.0f;
+    const uint emitter_shader_flags = (light_vertex->path_length == 2u) ?
+                                          (light_vertex->emitter_shader_flags | SHADER_USE_MIS) :
+                                          SHADER_USE_MIS;
+    light_pdf = surface_shader_bsdf_eval(kg,
+                                         state,
+                                         light_sd,
+                                         light_incoming,
+                                         &light_eval,
+                                         emitter_shader_flags,
+                                         roughness_squared);
+  }
   if (!(light_pdf > 0.0f) || bsdf_eval_is_zero(&light_eval)) {
     return;
   }
@@ -1001,9 +1172,11 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
    * the reverse density required by the light-side recursive MIS term. */
   const float reverse_pdf = light_pdf;
 
-  const float cos_at_surface = max(fabsf(dot(light_sd->N, direction)), 1.0e-8f);
+  const float cos_at_surface = volume_vertex ? 1.0f :
+                                               max(fabsf(dot(light_sd->N, direction)), 1.0e-8f);
   const float camera_pdf_area = connection_jacobian * cos_at_surface;
-  const float cos_to_light = max(fabsf(dot(light_sd->N, light_incoming)), 1.0e-8f);
+  const float cos_to_light = volume_vertex ? 1.0f :
+                                             max(fabsf(dot(light_sd->N, light_incoming)), 1.0e-8f);
 
   const float light_path_count = float(kernel_integrator_state.bdpt_light_path_count);
   const float light_path_sample_ratio = max(
@@ -1029,8 +1202,9 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   }
 
   Ray shadow_ray ccl_optional_struct_init;
-  bool skip_self = true;
-  shadow_ray.P = shadow_ray_offset(kg, light_sd, direction, &skip_self);
+  bool skip_self = !volume_vertex;
+  shadow_ray.P = volume_vertex ? light_vertex->P :
+                                 shadow_ray_offset(kg, light_sd, direction, &skip_self);
   shadow_ray.D = direction;
   shadow_ray.tmin = 0.0f;
   /* Manifold visibility was validated explicitly above. Use a tiny terminal segment so the
@@ -1070,23 +1244,24 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = contribution;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = light_vertex->light_group + 1;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = PATH_RAY_VISIBILITY_CAMERA;
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = PATH_RAY_SURFACE_PASS;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = volume_vertex ?
+                                                                PATH_RAY_VOLUME_PASS :
+                                                                PATH_RAY_SURFACE_PASS;
   if (!(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_TREE)) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bsdf_eval_average) = average(
         bsdf_eval_sum(&light_eval));
   }
   if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, pass_diffuse_weight) = PackedSpectrum(
-        bsdf_eval_pass_diffuse_weight(&light_eval));
+        volume_vertex ? one_spectrum() : bsdf_eval_pass_diffuse_weight(&light_eval));
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, pass_glossy_weight) = PackedSpectrum(
-        bsdf_eval_pass_glossy_weight(&light_eval));
+        volume_vertex ? zero_spectrum() : bsdf_eval_pass_glossy_weight(&light_eval));
   }
 }
 
 /* Generate one complete light subpath. The pass deliberately uses the same intersection, shader
  * evaluation, closure sampling, volume attenuation/boundary handling and Russian roulette
- * conventions as camera paths. Volume scattering vertices are not yet connectible and terminate
- * this surface-only light-subpath strategy as a valid zero sample. */
+ * conventions as camera paths. */
 ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                                IntegratorState state,
                                                const uint light_path_index,
@@ -1183,15 +1358,80 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
       float3 scatter_P;
       int receiver_object = OBJECT_NONE;
+      ShaderVolumePhases phases;
       const PhotonVolumeSampleEvent volume_event = photon_volume_sample_segment(
-          kg, state, &ray, &throughput, &scatter_P, &receiver_object);
+          kg, state, &ray, &throughput, &scatter_P, &receiver_object, &phases);
       if (volume_event == PHOTON_VOLUME_CACHE_MISS) {
         return;
       }
       if (volume_event == PHOTON_VOLUME_SCATTERED) {
-        /* Surface connections get a valid zero sample for this light path. Do not let an
-         * unattenuated ray incorrectly reach the surface after a sampled medium collision. */
-        return;
+        ShaderData volume_sd;
+        shader_setup_from_volume(&volume_sd, &ray, receiver_object);
+        volume_sd.P = scatter_P;
+        volume_sd.ray_length = len(scatter_P - ray.P);
+
+        /* Generalized path space uses volume measure for a medium vertex. Convert the preceding
+         * directional density with 1/r^2, but unlike a surface vertex there is no projected-area
+         * cosine. Infinite emitters already sample their launch disk in projected-area measure. */
+        if (!(bounce == 0 && !is_finite_emitter)) {
+          d_vcm *= max(len_squared(scatter_P - ray.P), 1.0e-20f);
+        }
+
+        if (uint(bounce) == cache_bounce) {
+          bdpt_store_light_vertex(kg,
+                                  &volume_sd,
+                                  &ray,
+                                  throughput,
+                                  emitter_object,
+                                  light_group,
+                                  d_vcm,
+                                  d_vc,
+                                  uint(bounce + 2),
+                                  INTEGRATOR_STATE(state, path, flag),
+                                  emitter_shader_flags,
+                                  light_wavelength_rand);
+        }
+
+        RNGState rng_state;
+        path_state_rng_load(state, &rng_state);
+        float2 rand_phase = path_state_rng_2D(kg, &rng_state, PRNG_VOLUME_PHASE);
+        const ccl_private ShaderVolumeClosure *svc = volume_shader_phase_pick(&phases,
+                                                                              &rand_phase);
+        BsdfEval phase_eval;
+        float3 phase_wo;
+        float phase_pdf = 0.0f;
+        float sampled_roughness = 1.0f;
+        const int label = volume_shader_phase_sample(&volume_sd,
+                                                     &phases,
+                                                     svc,
+                                                     rand_phase,
+                                                     &phase_eval,
+                                                     &phase_wo,
+                                                     &phase_pdf,
+                                                     &sampled_roughness);
+        if (!(phase_pdf > 0.0f) || bsdf_eval_is_zero(&phase_eval)) {
+          return;
+        }
+        throughput *= bsdf_eval_sum(&phase_eval) / phase_pdf;
+        if (!isfinite_safe(throughput)) {
+          return;
+        }
+
+        /* Phase functions use solid-angle measure on both sides and have no cosine factors. */
+        const float reverse_pdf = phase_pdf;
+        d_vc = (d_vc * reverse_pdf + d_vcm) / bdpt_safe_pdf(phase_pdf);
+        d_vcm = 1.0f / bdpt_safe_pdf(phase_pdf);
+
+        path_state_next(kg, state, label, volume_sd.runtime_flag);
+        ray.P = scatter_P;
+        ray.D = normalize(phase_wo);
+        ray.tmin = 0.0f;
+        ray.tmax = FLT_MAX;
+        ray.self.prim = PRIM_NONE;
+        ray.self.object = OBJECT_NONE;
+        ray.self.light_prim = PRIM_NONE;
+        ray.self.light_object = OBJECT_NONE;
+        continue;
       }
     }
 #endif
@@ -1424,6 +1664,22 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
   photon_state_init(state, rng, iteration);
   INTEGRATOR_STATE_WRITE(state, path, flag) = light_vertex.flag;
   INTEGRATOR_STATE_WRITE(state, path, bounce) = light_vertex.path_length - 1u;
+
+#ifdef __VOLUME__
+  /* Dedicated sensor work does not inherit the generating light path's medium stack. Rebuild the
+   * containing media at a cached medium vertex so the connection shadow ray receives the same
+   * transmittance treatment as ordinary volume NEE. */
+  if (light_vertex.type == PRIMITIVE_VOLUME && kernel_data.integrator.use_volumes) {
+    packed_normal packed_incoming;
+    packed_incoming.value = light_vertex.incoming;
+    INTEGRATOR_STATE_WRITE(state, ray, P) = light_vertex.P;
+    INTEGRATOR_STATE_WRITE(state, ray, D) = packed_incoming.decode();
+    INTEGRATOR_STATE_WRITE(state, ray, tmin) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, ray, tmax) = FLT_MAX;
+    INTEGRATOR_STATE_WRITE(state, ray, time) = photon_unpack_time(light_vertex.time_wavelength);
+    integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_CAMERA);
+  }
+#endif
 
   ShaderData light_sd;
   if (!bdpt_setup_light_vertex(kg, state, &light_vertex, &light_sd)) {

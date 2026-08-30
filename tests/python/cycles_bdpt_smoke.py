@@ -150,18 +150,28 @@ def build_scene(options):
         world.node_tree.links.new(
             absorption.outputs["Volume"], world.node_tree.nodes["World Output"].inputs["Volume"]
         )
+    if options.world_scatter > 0.0:
+        scatter = world.node_tree.nodes.new("ShaderNodeVolumeScatter")
+        scatter.inputs["Color"].default_value = (0.72, 0.82, 0.95, 1.0)
+        scatter.inputs["Density"].default_value = options.world_scatter
+        scatter.inputs["Anisotropy"].default_value = 0.35
+        world.node_tree.links.new(
+            scatter.outputs["Volume"], world.node_tree.nodes["World Output"].inputs["Volume"]
+        )
     scene.world = world
 
-    bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0.0, 0.0, 0.0))
-    floor = bpy.context.object
-    if options.hair_bsdf:
-        floor.data.materials.append(hair_material("Hair Closure Receiver", (0.65, 0.68, 0.72)))
-    else:
-        floor.data.materials.append(
-            diffuse_material("Diffuse Receiver", (0.65, 0.68, 0.72))
-            if options.diffuse_node
-            else principled_material("Diffuse Receiver", (0.65, 0.68, 0.72))
-        )
+    floor = None
+    if not options.volume_only:
+        bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0.0, 0.0, 0.0))
+        floor = bpy.context.object
+        if options.hair_bsdf:
+            floor.data.materials.append(hair_material("Hair Closure Receiver", (0.65, 0.68, 0.72)))
+        else:
+            floor.data.materials.append(
+                diffuse_material("Diffuse Receiver", (0.65, 0.68, 0.72))
+                if options.diffuse_node
+                else principled_material("Diffuse Receiver", (0.65, 0.68, 0.72))
+            )
 
     if options.ray_portal:
         bpy.ops.mesh.primitive_plane_add(size=7.0, location=(0.0, 0.0, 2.7))
@@ -189,7 +199,7 @@ def build_scene(options):
             principled_material("Diffuse Backdrop", (0.45, 0.5, 0.58), roughness=0.55)
         )
 
-    if not options.no_glass:
+    if not options.no_glass and not options.volume_only:
         bpy.ops.mesh.primitive_uv_sphere_add(
             segments=64, ring_count=32, radius=1.0, location=(0.0, 0.0, 1.25)
         )
@@ -244,7 +254,7 @@ def build_scene(options):
         if options.light_link != "ALL":
             receivers = bpy.data.collections.new("BDPT Test Light Receivers")
             scene.collection.children.link(receivers)
-            if options.light_link == "FLOOR":
+            if options.light_link == "FLOOR" and floor is not None:
                 receivers.objects.link(floor)
             else:
                 dummy = bpy.data.objects.new("Unlit Receiver", None)
@@ -391,6 +401,8 @@ def main():
     parser.add_argument("--camera-type", choices=("PERSP", "PANO", "ORTHO"), default="PERSP")
     parser.add_argument("--ortho-scale", type=float, default=7.0)
     parser.add_argument("--world-absorption", type=float, default=0.0)
+    parser.add_argument("--world-scatter", type=float, default=0.0)
+    parser.add_argument("--volume-only", action="store_true")
     parser.add_argument("--camera-motion", action="store_true")
     parser.add_argument("--top-camera", action="store_true")
     parser.add_argument("--output", default="/tmp/cycles_bdpt_smoke.exr")
