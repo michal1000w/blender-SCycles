@@ -74,6 +74,34 @@ def diffuse_material(name, color):
     return material
 
 
+def hair_material(name, color):
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputMaterial")
+    hair = nodes.new("ShaderNodeBsdfHair")
+    hair.inputs["Color"].default_value = (*color, 1.0)
+    hair.inputs["RoughnessU"].default_value = 0.35
+    hair.inputs["RoughnessV"].default_value = 0.35
+    material.node_tree.links.new(hair.outputs["BSDF"], output.inputs["Surface"])
+    return material
+
+
+def ray_portal_material(name, position, direction):
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputMaterial")
+    portal = nodes.new("ShaderNodeBsdfRayPortal")
+    portal.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    portal.inputs["Position"].default_value = position
+    portal.inputs["Direction"].default_value = direction
+    material.node_tree.links.new(portal.outputs["BSDF"], output.inputs["Surface"])
+    return material
+
+
 def build_scene(options):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     if options.device == "GPU":
@@ -126,11 +154,23 @@ def build_scene(options):
 
     bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0.0, 0.0, 0.0))
     floor = bpy.context.object
-    floor.data.materials.append(
-        diffuse_material("Diffuse Receiver", (0.65, 0.68, 0.72))
-        if options.diffuse_node
-        else principled_material("Diffuse Receiver", (0.65, 0.68, 0.72))
-    )
+    if options.hair_bsdf:
+        floor.data.materials.append(hair_material("Hair Closure Receiver", (0.65, 0.68, 0.72)))
+    else:
+        floor.data.materials.append(
+            diffuse_material("Diffuse Receiver", (0.65, 0.68, 0.72))
+            if options.diffuse_node
+            else principled_material("Diffuse Receiver", (0.65, 0.68, 0.72))
+        )
+
+    if options.ray_portal:
+        bpy.ops.mesh.primitive_plane_add(size=7.0, location=(0.0, 0.0, 2.7))
+        portal_object = bpy.context.object
+        portal_object.name = "BDPT Ray Portal"
+        portal_object.visible_camera = False
+        portal_object.data.materials.append(
+            ray_portal_material("BDPT Ray Portal", (0.0, 0.0, 2.55), (0.0, 0.0, -1.0))
+        )
 
     blocker = None
     if options.shadow_link_blocker:
@@ -344,6 +384,8 @@ def main():
     parser.add_argument("--crop-border", action="store_true")
     parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--diffuse-node", action="store_true")
+    parser.add_argument("--hair-bsdf", action="store_true")
+    parser.add_argument("--ray-portal", action="store_true")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--lens", type=float, default=52.0)
     parser.add_argument("--camera-type", choices=("PERSP", "PANO", "ORTHO"), default="PERSP")
