@@ -867,6 +867,49 @@ def main():
         "Dense volume light tracing did not reconstruct the PT reference within 8%",
     )
 
+    subsurface_pt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "subsurface_pt",
+        [
+            "--no-glass",
+            "--no-floor",
+            "--subsurface",
+            "--samples",
+            "8192",
+            "--resolution",
+            "64",
+        ],
+    )
+    subsurface_bdpt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "subsurface_bdpt",
+        [
+            "--bdpt",
+            "--no-glass",
+            "--no-floor",
+            "--subsurface",
+            "--samples",
+            "8192",
+            "--resolution",
+            "64",
+            "--max-bounces",
+            "8",
+            "--light-paths",
+            "1048576",
+            "--update-samples",
+            "8192",
+        ],
+    )
+    require(
+        relative_error(subsurface_bdpt["mean"], subsurface_pt["mean"]) < 0.015,
+        "BDPT mode changed BSSRDF transport by at least 1.5%",
+    )
+    require(subsurface_bdpt["peak"] > 5.0, "BDPT mode lost the subsurface highlight")
+
     print(f"BDPT_METAL_REGRESSION PASS seconds={time.perf_counter() - started:.3f} output={output_dir}")
     if output_context:
         output_context.cleanup()
