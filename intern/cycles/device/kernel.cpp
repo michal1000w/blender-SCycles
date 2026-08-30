@@ -23,6 +23,7 @@ bool device_kernel_has_shading(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_DISPLACE ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_CURVE_SHADOW_TRANSPARENCY ||
@@ -39,6 +40,7 @@ bool device_kernel_has_intersection(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE ||
           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE);
 }
 
@@ -120,6 +122,8 @@ const char *device_kernel_as_string(DeviceKernel kernel)
       return "integrator_photon_emit";
     case DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE:
       return "integrator_bdpt_light_generate";
+    case DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT:
+      return "integrator_bdpt_sensor_connect";
     case DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS:
       return "integrator_shadow_catcher_count_possible_splits";
 

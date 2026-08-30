@@ -31,7 +31,9 @@ def configure_metal():
         raise RuntimeError("No Metal Cycles device available")
 
 
-def principled_material(name, base_color, transmission=0.0, roughness=0.4, ior=1.5):
+def principled_material(
+    name, base_color, transmission=0.0, roughness=0.4, ior=1.5, dispersion=0.0
+):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     bsdf = material.node_tree.nodes.get("Principled BSDF")
@@ -40,6 +42,9 @@ def principled_material(name, base_color, transmission=0.0, roughness=0.4, ior=1
     bsdf.inputs["IOR"].default_value = ior
     transmission_input = bsdf.inputs.get("Transmission Weight") or bsdf.inputs.get("Transmission")
     transmission_input.default_value = transmission
+    if dispersion > 0.0:
+        bsdf.inputs["Transmission Dispersion Scale"].default_value = dispersion
+        bsdf.inputs["Transmission Dispersion Abbe Number"].default_value = 9.0
     return material
 
 
@@ -156,6 +161,7 @@ def build_scene(options):
                 transmission=1.0,
                 roughness=0.0,
                 ior=1.52,
+                dispersion=options.dispersion,
             )
         )
 
@@ -220,6 +226,46 @@ def build_scene(options):
     camera.data.dof.use_dof = options.aperture > 0.0
     camera.data.dof.aperture_fstop = options.aperture if options.aperture > 0.0 else 2.8
     look_at(camera, (0.0, 0.0, 0.0) if options.top_camera else (0.0, 0.2, 0.7))
+    if options.view_glass:
+        if options.top_camera:
+            raise RuntimeError("--view-glass requires the perspective test camera")
+        pane_target = (0.0, 0.2, 0.7)
+        pane_location = tuple(
+            (camera_location[index] + pane_target[index]) * 0.5 for index in range(3)
+        )
+        half_size = 2.4
+        half_thickness = 0.035
+        vertices = [
+            (-half_size, -half_size, -half_thickness),
+            (half_size, -half_size, -half_thickness),
+            (half_size, half_size, -half_thickness),
+            (-half_size, half_size, -half_thickness),
+            (-half_size, -half_size, half_thickness),
+            (half_size, -half_size, half_thickness),
+            (half_size, half_size, half_thickness),
+            (-half_size, half_size, half_thickness),
+        ]
+        pane_mesh = bpy.data.meshes.new("Camera Glass Pane Mesh")
+        # Disconnected parallel interfaces give each triangle a smooth, constant differential
+        # normal field without the edge-normal averaging of a smooth-shaded cube.
+        pane_mesh.from_pydata(vertices, [], [(0, 3, 2, 1), (4, 5, 6, 7)])
+        pane_mesh.update()
+        for polygon in pane_mesh.polygons:
+            polygon.use_smooth = True
+        pane = bpy.data.objects.new("Camera Glass Pane", pane_mesh)
+        scene.collection.objects.link(pane)
+        pane.location = pane_location
+        pane.name = "Camera Glass Pane"
+        look_at(pane, pane_target)
+        pane.data.materials.append(
+            principled_material(
+                "Camera Glass Pane",
+                (1.0, 1.0, 1.0),
+                transmission=1.0,
+                roughness=0.0,
+                ior=1.45,
+            )
+        )
     if options.camera_motion:
         scene.render.use_motion_blur = True
         scene.frame_set(0)
@@ -251,6 +297,11 @@ def build_scene(options):
     if max(rgb) <= 0.0 and not options.allow_empty:
         raise RuntimeError("Render contains no light")
     ordered = sorted(rgb)
+    colors = [tuple(pixels[index : index + 3]) for index in range(0, len(pixels), 4)]
+    bright_colors = sorted(colors, key=sum)[-max(1, len(colors) // 100) :]
+    top_chroma = sum(
+        (max(color) - min(color)) / (sum(color) / 3.0 + 1.0e-12) for color in bright_colors
+    ) / len(bright_colors)
     percentile_99 = ordered[min(int(0.99 * len(ordered)), len(ordered) - 1)]
     percentile_999 = ordered[min(int(0.999 * len(ordered)), len(ordered) - 1)]
     print(
@@ -259,7 +310,8 @@ def build_scene(options):
         f"seconds={elapsed:.9g} "
         f"samples={options.samples} "
         f"light_paths={options.light_paths} mean={sum(rgb) / len(rgb):.9g} "
-        f"p99={percentile_99:.9g} p999={percentile_999:.9g} peak={max(rgb):.9g}"
+        f"p99={percentile_99:.9g} p999={percentile_999:.9g} peak={max(rgb):.9g} "
+        f"top_chroma={top_chroma:.9g}"
     )
 
 
@@ -274,6 +326,8 @@ def main():
     parser.add_argument("--max-bounces", type=int, default=8)
     parser.add_argument("--backdrop", action="store_true")
     parser.add_argument("--no-glass", action="store_true")
+    parser.add_argument("--view-glass", action="store_true")
+    parser.add_argument("--dispersion", type=float, default=0.0)
     parser.add_argument("--no-light-tree", action="store_true")
     parser.add_argument("--aperture", type=float, default=0.0)
     parser.add_argument("--mesh-light", action="store_true")

@@ -19,6 +19,9 @@
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/state_util.h"
 #include "kernel/integrator/surface_shader.h"
+#ifdef __MNEE__
+#  include "kernel/integrator/mnee.h"
+#endif
 #include "kernel/sample/lcg.h"
 #include "util/atomic.h"
 
@@ -46,6 +49,37 @@ ccl_device_inline bool bdpt_enabled_for_surface_path(ConstIntegratorState state)
 ccl_device_inline float bdpt_safe_pdf(const float pdf)
 {
   return max(pdf, 1.0e-20f);
+}
+
+ccl_device_inline Spectrum bdpt_light_vertex_spectral_weight(
+    KernelGlobals kg,
+    ConstIntegratorState state,
+    const uint time_wavelength,
+    const bool camera_spectral)
+{
+#ifdef __SPECTRAL__
+  if (photon_is_spectral(time_wavelength)) {
+    const float light_rand = photon_unpack_wavelength_rand(time_wavelength);
+    if (camera_spectral) {
+      const float camera_rand = path_rng_1D(kg,
+                                            INTEGRATOR_STATE(state, path, rng_pixel),
+                                            INTEGRATOR_STATE(state, path, sample),
+                                            PRNG_BOUNCE_NUM + PRNG_WAVELENGTH);
+      float light_pdf;
+      const float light_wavelength = sample_wavelength(light_rand, &light_pdf);
+      const float camera_wavelength = sample_wavelength(camera_rand);
+      return Spectrum(photon_spectral_kernel(light_wavelength, camera_wavelength) /
+                      bdpt_safe_pdf(light_pdf));
+    }
+    return dispersion_throughput_weight(kg, light_rand);
+  }
+#else
+  (void)kg;
+  (void)state;
+  (void)time_wavelength;
+  (void)camera_spectral;
+#endif
+  return one_spectrum();
 }
 
 ccl_device_inline float bdpt_infinite_position_pdf(const float3 P, const float3 direction)
@@ -419,13 +453,15 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
                                               const float d_vc,
                                               const uint path_length,
                                               const uint flag,
-                                              const uint emitter_shader_flags)
+                                              const uint emitter_shader_flags,
+                                              const float wavelength_rand)
 {
   stored_vertex->P = sd->P;
   stored_vertex->throughput = PackedSpectrum(throughput);
   stored_vertex->u = sd->u;
   stored_vertex->v = sd->v;
-  stored_vertex->time = ray->time;
+  stored_vertex->time_wavelength = photon_pack_time_wavelength(
+      ray->time, wavelength_rand, (flag & PATH_RAY_SPECTRAL) != 0u);
   stored_vertex->incoming = packed_normal(ray->D).value;
   stored_vertex->prim = sd->prim;
   stored_vertex->object = sd->object;
@@ -449,7 +485,8 @@ ccl_device_inline void bdpt_store_light_vertex(KernelGlobals kg,
                                                const float d_vc,
                                                const uint path_length,
                                                const uint flag,
-                                               const uint emitter_shader_flags)
+                                               const uint emitter_shader_flags,
+                                               const float wavelength_rand)
 {
   const uint slot = atomic_fetch_and_add_uint32(kernel_integrator_state.bdpt_vertex_count, 1);
   if (slot >= kernel_integrator_state.bdpt_vertex_capacity) {
@@ -467,7 +504,8 @@ ccl_device_inline void bdpt_store_light_vertex(KernelGlobals kg,
                          d_vc,
                          path_length,
                          flag,
-                         emitter_shader_flags);
+                         emitter_shader_flags,
+                         wavelength_rand);
   *(&kernel_integrator_state.bdpt_vertices[slot]) = local_vertex;
 }
 
@@ -487,7 +525,7 @@ ccl_device_inline bool bdpt_setup_light_vertex(KernelGlobals kg,
   light_ray.D = light_incoming;
   light_ray.tmin = 0.0f;
   light_ray.tmax = 1.0f;
-  light_ray.time = light_vertex->time;
+  light_ray.time = photon_unpack_time(light_vertex->time_wavelength);
 #ifdef __RAY_DIFFERENTIALS__
   light_ray.dP = differential_zero_compact();
   light_ray.dD = differential_zero_compact();
@@ -503,7 +541,7 @@ ccl_device_inline bool bdpt_setup_light_vertex(KernelGlobals kg,
 
   shader_setup_from_ray(kg, light_sd, &light_ray, &light_isect);
 #ifdef __SPECTRAL__
-  shader_setup_wavelength(kg, light_sd, state);
+  light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #endif
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
@@ -544,6 +582,7 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
                                                    ccl_private float3 *sensor_P,
                                                    ccl_private float *connection_jacobian)
 {
+  const float vertex_time = photon_unpack_time(light_vertex->time_wavelength);
   const CameraType camera_type = CameraType(kernel_data.cam.type);
   if (kernel_data.cam.interocular_offset != 0.0f || camera_type == CAMERA_CUSTOM) {
     return false;
@@ -555,7 +594,7 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
       transform_motion_array_interpolate(&camera_to_world,
                                          kernel_data_array(camera_motion),
                                          kernel_data.cam.num_motion_steps,
-                                         light_vertex->time);
+                                         vertex_time);
     }
     const Transform world_to_camera = transform_inverse(camera_to_world);
     const float3 camera_space_P = transform_point(&world_to_camera, light_vertex->P);
@@ -574,12 +613,12 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
       projection_camera = lens_P + (camera_space_P - lens_P) * focus_t;
     }
 
-    const float3 image_origin = bdpt_perspective_image_point(zero_float3(), light_vertex->time);
+    const float3 image_origin = bdpt_perspective_image_point(zero_float3(), vertex_time);
     const float3 image_dx = bdpt_perspective_image_point(make_float3(1.0f, 0.0f, 0.0f),
-                                                         light_vertex->time) -
+                                                         vertex_time) -
                             image_origin;
     const float3 image_dy = bdpt_perspective_image_point(make_float3(0.0f, 1.0f, 0.0f),
-                                                         light_vertex->time) -
+                                                         vertex_time) -
                             image_origin;
     const float3 projected_on_image = projection_camera *
                                       (image_origin.z / projection_camera.z);
@@ -597,11 +636,11 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
         (rx * yy - ry * xy) / determinant, (ry * xx - rx * xy) / determinant, 0.0f);
     *sensor_P = transform_point(&camera_to_world, lens_P);
 
-    const float3 image_P = bdpt_perspective_image_point(*raster, light_vertex->time);
+    const float3 image_P = bdpt_perspective_image_point(*raster, vertex_time);
     const float3 image_X = bdpt_perspective_image_point(
-        make_float3(raster->x + 1.0f, raster->y, raster->z), light_vertex->time);
+        make_float3(raster->x + 1.0f, raster->y, raster->z), vertex_time);
     const float3 image_Y = bdpt_perspective_image_point(
-        make_float3(raster->x, raster->y + 1.0f, raster->z), light_vertex->time);
+        make_float3(raster->x, raster->y + 1.0f, raster->z), vertex_time);
     const float3 sensor_plane_P = use_dof ?
                                       image_P * (kernel_data.cam.focaldistance / image_P.z) :
                                       image_P;
@@ -684,6 +723,80 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
          raster->y < kernel_data.cam.height && *connection_jacobian > 0.0f;
 }
 
+/* Invert a perspective camera ray after a manifold walk. The manifold contribution is expressed
+ * per unit camera solid angle, so this returns only the sensor's solid-angle-to-pixel Jacobian
+ * (the endpoint-to-surface geometry is already in the manifold transfer determinant). */
+ccl_device_inline bool bdpt_perspective_ray_to_raster(const float3 sensor_P,
+                                                      const float3 camera_wo,
+                                                      const float time,
+                                                      ccl_private float3 *raster,
+                                                      ccl_private float *sensor_jacobian)
+{
+  if (CameraType(kernel_data.cam.type) != CAMERA_PERSPECTIVE) {
+    return false;
+  }
+  Transform camera_to_world = kernel_data.cam.cameratoworld;
+  if (kernel_data.cam.num_motion_steps) {
+    transform_motion_array_interpolate(
+        &camera_to_world, kernel_data_array(camera_motion), kernel_data.cam.num_motion_steps, time);
+  }
+  const Transform world_to_camera = transform_inverse(camera_to_world);
+  const float3 lens_P = transform_point(&world_to_camera, sensor_P);
+  const float3 camera_D = transform_direction(&world_to_camera, camera_wo);
+  if (!(camera_D.z > 1.0e-8f)) {
+    return false;
+  }
+
+  float3 projection_camera = lens_P + camera_D;
+  if (kernel_data.cam.aperturesize > 0.0f) {
+    projection_camera = lens_P + camera_D * (kernel_data.cam.focaldistance / camera_D.z);
+  }
+  const float3 image_origin = bdpt_perspective_image_point(zero_float3(), time);
+  const float3 image_dx = bdpt_perspective_image_point(make_float3(1.0f, 0.0f, 0.0f), time) -
+                          image_origin;
+  const float3 image_dy = bdpt_perspective_image_point(make_float3(0.0f, 1.0f, 0.0f), time) -
+                          image_origin;
+  const float3 projected_on_image = projection_camera *
+                                    (image_origin.z / projection_camera.z);
+  const float3 image_delta = projected_on_image - image_origin;
+  const float xx = dot(image_dx, image_dx);
+  const float xy = dot(image_dx, image_dy);
+  const float yy = dot(image_dy, image_dy);
+  const float determinant = xx * yy - xy * xy;
+  if (!(determinant > 1.0e-20f)) {
+    return false;
+  }
+  const float rx = dot(image_delta, image_dx);
+  const float ry = dot(image_delta, image_dy);
+  *raster = make_float3(
+      (rx * yy - ry * xy) / determinant, (ry * xx - rx * xy) / determinant, 0.0f);
+
+  const float3 image_P = bdpt_perspective_image_point(*raster, time);
+  const float3 image_X = bdpt_perspective_image_point(
+      make_float3(raster->x + 1.0f, raster->y, raster->z), time);
+  const float3 image_Y = bdpt_perspective_image_point(
+      make_float3(raster->x, raster->y + 1.0f, raster->z), time);
+  const bool use_dof = kernel_data.cam.aperturesize > 0.0f;
+  const float focus_scale = use_dof ? kernel_data.cam.focaldistance / image_P.z : 1.0f;
+  const float3 sensor_plane_P = image_P * focus_scale;
+  const float3 sensor_plane_X = use_dof ? image_X * (kernel_data.cam.focaldistance / image_X.z) :
+                                         image_X;
+  const float3 sensor_plane_Y = use_dof ? image_Y * (kernel_data.cam.focaldistance / image_Y.z) :
+                                         image_Y;
+  const float image_pixel_area = len(
+      cross(sensor_plane_X - sensor_plane_P, sensor_plane_Y - sensor_plane_P));
+  const float3 sensor_to_plane = sensor_plane_P - lens_P;
+  const float image_distance2 = len_squared(sensor_to_plane);
+  const float cos_at_camera = fabsf(sensor_to_plane.z) /
+                              sqrtf(max(image_distance2, 1.0e-20f));
+  if (!(image_pixel_area > 0.0f) || !(cos_at_camera > 0.0f)) {
+    return false;
+  }
+  *sensor_jacobian = image_distance2 / (cos_at_camera * image_pixel_area);
+  return raster->x >= 0.0f && raster->y >= 0.0f && raster->x < kernel_data.cam.width &&
+         raster->y < kernel_data.cam.height;
+}
+
 /* Splat one reservoir-selected light vertex onto a built-in sensor. */
 ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     KernelGlobals kg,
@@ -706,6 +819,117 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   {
     return;
   }
+  float3 delta = sensor_P - light_vertex->P;
+  float distance2 = len_squared(delta);
+  if (!(distance2 > 1.0e-12f)) {
+    return;
+  }
+  float distance = sqrtf(distance2);
+  float3 direction = delta / distance;
+  Spectrum manifold_throughput = one_spectrum();
+  bool manifold_connection = false;
+
+#ifdef __MNEE__
+  /* A cached diffuse light vertex viewed through one or more specular interfaces is the SDS
+   * transport class that ordinary BDPT sensor splats cannot connect. Walk the same exact
+   * specular manifold used by Cycles MNEE, but in reverse: camera -> interfaces -> cached light
+   * vertex. This yields both the physically valid endpoint direction and its transfer Jacobian. */
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_MNEE) &&
+      CameraType(kernel_data.cam.type) == CAMERA_PERSPECTIVE)
+  {
+    ShaderDataTinyStorage camera_sd_storage;
+    ccl_private ShaderData *camera_sd = AS_SHADER_DATA(&camera_sd_storage);
+    camera_sd->P = sensor_P;
+    camera_sd->N = -direction;
+    camera_sd->Ng = -direction;
+    camera_sd->object = OBJECT_NONE;
+    camera_sd->prim = PRIM_NONE;
+    camera_sd->time = photon_unpack_time(light_vertex->time_wavelength);
+#  ifdef __RAY_DIFFERENTIALS__
+    camera_sd->dP = 0.0f;
+#  endif
+
+    LightSample sensor_target ccl_optional_struct_init;
+    sensor_target.P = light_vertex->P;
+    sensor_target.Ng = light_sd->N;
+    sensor_target.t = distance;
+    sensor_target.D = -direction;
+    sensor_target.pdf = 1.0f;
+    sensor_target.pdf_selection = 1.0f;
+    sensor_target.eval_fac = 1.0f;
+    sensor_target.object = light_vertex->object;
+    sensor_target.prim = light_vertex->prim;
+    sensor_target.shader = light_sd->shader;
+    sensor_target.group = light_vertex->light_group;
+    sensor_target.type = LIGHT_TRIANGLE;
+    sensor_target.emitter_id = EMITTER_NONE;
+
+    ShaderDataCausticsStorage manifold_sd_storage;
+    ccl_private ShaderData *manifold_sd = AS_SHADER_DATA(&manifold_sd_storage);
+    RNGState rng_state;
+    path_state_rng_load(state, &rng_state);
+    Spectrum candidate_throughput = zero_spectrum();
+    float3 camera_wo = zero_float3();
+    float3 light_wo = zero_float3();
+    float light_distance = 0.0f;
+    int manifold_vertex_count = 0;
+    const ShaderEvalResult manifold_result = kernel_path_mnee_sample(kg,
+                                                                     state,
+                                                                     camera_sd,
+                                                                     manifold_sd,
+                                                                     &rng_state,
+                                                                     &sensor_target,
+                                                                     &candidate_throughput,
+                                                                     &camera_wo,
+                                                                     manifold_vertex_count,
+                                                                     &light_wo,
+                                                                     true,
+                                                                     &light_distance,
+                                                                     photon_unpack_wavelength_rand(
+                                                                         light_vertex
+                                                                             ->time_wavelength));
+    if (manifold_result == SHADER_EVAL_CACHE_MISS) {
+      return;
+    }
+    float3 manifold_raster;
+    float sensor_jacobian;
+    if (manifold_vertex_count > 0 && isfinite_safe(candidate_throughput) &&
+        bdpt_perspective_ray_to_raster(sensor_P,
+                                      camera_wo,
+                                      camera_sd->time,
+                                      &manifold_raster,
+                                      &sensor_jacobian))
+    {
+      /* The manifold routine validates camera-to-interface segments. Check the final free segment
+       * from the cached endpoint back to the last interface; the hit at its upper bound is the
+       * intended manifold vertex, while anything earlier is a true blocker. */
+      Ray verify_ray ccl_optional_struct_init;
+      bool verify_skip_self = true;
+      verify_ray.P = shadow_ray_offset(kg, light_sd, light_wo, &verify_skip_self);
+      verify_ray.D = light_wo;
+      verify_ray.tmin = 0.0f;
+      verify_ray.tmax = light_distance;
+      verify_ray.time = camera_sd->time;
+      verify_ray.self.object = verify_skip_self ? light_sd->object : OBJECT_NONE;
+      verify_ray.self.prim = verify_skip_self ? light_sd->prim : PRIM_NONE;
+      Intersection verify_isect;
+      const bool early_blocker = scene_intersect(
+                                     kg,
+                                     &verify_ray,
+                                     PATH_RAY_VISIBILITY_TRANSMIT,
+                                     &verify_isect) &&
+                                 verify_isect.t < light_distance - MNEE_MIN_DISTANCE;
+      if (!early_blocker) {
+        raster = manifold_raster;
+        direction = light_wo;
+        connection_jacobian = sensor_jacobian;
+        manifold_throughput = candidate_throughput;
+        manifold_connection = true;
+      }
+    }
+  }
+#endif
+
   const int pixel_x = int(raster.x);
   const int pixel_y = int(raster.y);
   const int buffer_min_x = kernel_integrator_state.bdpt_buffer_full_x;
@@ -717,13 +941,6 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   {
     return;
   }
-  const float3 delta = sensor_P - light_vertex->P;
-  const float distance2 = len_squared(delta);
-  if (!(distance2 > 1.0e-12f)) {
-    return;
-  }
-  const float distance = sqrtf(distance2);
-  const float3 direction = delta / distance;
 
   /* Shader graphs and some layered closures build direction-dependent data from ShaderData::wi.
    * A light subpath prepared this shader with the direction toward the emitter. For a sensor
@@ -737,7 +954,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   camera_ray.D = -direction;
   camera_ray.tmin = 0.0f;
   camera_ray.tmax = 1.0f;
-  camera_ray.time = light_vertex->time;
+  camera_ray.time = photon_unpack_time(light_vertex->time_wavelength);
 #ifdef __RAY_DIFFERENTIALS__
   camera_ray.dP = differential_zero_compact();
   camera_ray.dD = differential_zero_compact();
@@ -751,7 +968,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   camera_isect.type = light_vertex->type;
   shader_setup_from_ray(kg, light_sd, &camera_ray, &camera_isect);
 #ifdef __SPECTRAL__
-  shader_setup_wavelength(kg, light_sd, state);
+  light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #endif
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(kg,
                                                         state,
@@ -802,8 +1019,10 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   const Spectrum sensor_eval = bsdf_eval_sum(&light_eval) * (cos_at_surface / cos_to_light);
   const float normalization = float(candidate_count) * float(batch_samples) /
                               max(light_path_count, 1.0f);
-  const Spectrum contribution = Spectrum(light_vertex->throughput) *
-                                sensor_eval *
+  const Spectrum spectral_weight = bdpt_light_vertex_spectral_weight(
+      kg, state, light_vertex->time_wavelength, false);
+  const Spectrum contribution = Spectrum(light_vertex->throughput) * spectral_weight *
+                                manifold_throughput * sensor_eval *
                                 (mis_weight * normalization * connection_jacobian);
   if (!isfinite_safe(contribution) || is_zero(contribution)) {
     return;
@@ -814,8 +1033,11 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   shadow_ray.P = shadow_ray_offset(kg, light_sd, direction, &skip_self);
   shadow_ray.D = direction;
   shadow_ray.tmin = 0.0f;
-  shadow_ray.tmax = distance;
-  shadow_ray.time = light_vertex->time;
+  /* Manifold visibility was validated explicitly above. Use a tiny terminal segment so the
+   * ordinary shadow kernel performs film/pass accumulation without incorrectly treating the
+   * refractive interfaces as opaque blockers. */
+  shadow_ray.tmax = manifold_connection ? 1.0e-6f : distance;
+  shadow_ray.time = photon_unpack_time(light_vertex->time_wavelength);
   shadow_ray.self.object = skip_self ? light_sd->object : OBJECT_NONE;
   shadow_ray.self.prim = skip_self ? light_sd->prim : PRIM_NONE;
   shadow_ray.self.light_object = light_vertex->emitter_object;
@@ -877,6 +1099,15 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   uint rng = lcg_init(hash_uint3(
       light_path_index, iteration, uint(kernel_data.integrator.seed) ^ 0x62647074u));
   photon_state_init(state, rng, iteration);
+#ifdef __SPECTRAL__
+  /* Keep one immutable wavelength sample for the complete light subpath. Cached vertices must
+   * retain this identity: reconstructing them with the camera path wavelength collapses
+   * dispersive caustics back to RGB. */
+  const float light_wavelength_rand = path_rng_1D(
+      kg, rng, iteration, PRNG_BOUNCE_NUM + PRNG_WAVELENGTH);
+#else
+  const float light_wavelength_rand = 0.0f;
+#endif
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 1.0f;
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = 0.0f;
 
@@ -911,6 +1142,15 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     return;
   }
 
+#ifdef __SPECTRAL__
+  const int emitter_shader = int(emitter_shader_flags) & SHADER_MASK;
+  if (kernel_data_fetch(shaders, emitter_shader).flags & SD_REQUIRES_WAVELENGTH) {
+    /* Wavelength-dependent emitters begin a monochromatic path before the first surface. Keep
+     * their raw sampled spectrum and defer the wavelength PDF/CMF weight to the connection. */
+    INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;
+  }
+#endif
+
   float d_vcm = direct_pdf / bdpt_safe_pdf(emission_pdf);
   float d_vc = is_delta_emitter ? 0.0f :
                                   (is_finite_emitter ? emission_cosine : 1.0f) /
@@ -930,9 +1170,6 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 #endif
 
   const uint cache_bounce = min(
-      uint(lcg_step_float(&rng) * float(kernel_data.integrator.bdpt_max_bounces)),
-      uint(kernel_data.integrator.bdpt_max_bounces - 1));
-  const uint camera_bounce = min(
       uint(lcg_step_float(&rng) * float(kernel_data.integrator.bdpt_max_bounces)),
       uint(kernel_data.integrator.bdpt_max_bounces - 1));
   for (int bounce = 0; bounce < kernel_data.integrator.bdpt_max_bounces; bounce++) {
@@ -975,6 +1212,14 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_TERMINATE) {
       return;
     }
+
+#ifdef __SPECTRAL__
+    if (sd.runtime_flag & (SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION)) {
+      /* As with photon paths, retain raw monochromatic power. The sensor/camera connection adds
+       * the wavelength PDF and color-matching weight exactly once. */
+      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_SPECTRAL;
+    }
+#endif
 
 #ifdef __LIGHT_LINKING__
     if (bounce == 0 && (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_LINKING) &&
@@ -1027,41 +1272,10 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                 d_vc,
                                 uint(bounce + 2),
                                 INTEGRATOR_STATE(state, path, flag),
-                                emitter_shader_flags);
+                                emitter_shader_flags,
+                                light_wavelength_rand);
       }
 
-      /* Select one fixed possible bounce before tracing. Unreached selected bounces are valid zero
-       * samples; multiplying by the selection support gives an unbiased sum over light-subpath
-       * lengths while limiting every light path to one sensor shadow. */
-      if (uint(bounce) == camera_bounce) {
-        const float2 rand_lens = make_float2(lcg_step_float(&rng), lcg_step_float(&rng));
-        KernelBDPTVertex camera_vertex;
-        bdpt_fill_light_vertex(&camera_vertex,
-                               &sd,
-                               &ray,
-                               throughput,
-                               emitter_object,
-                               light_group,
-                               d_vcm,
-                               d_vc,
-                               uint(bounce + 2),
-                               INTEGRATOR_STATE(state, path, flag),
-                               emitter_shader_flags);
-        bdpt_connect_light_vertex_to_camera(kg,
-                                            state,
-                                            &camera_vertex,
-                                            &sd,
-                                            uint(kernel_data.integrator.bdpt_max_bounces),
-                                            iteration,
-                                            batch_samples,
-                                            rand_lens);
-
-        /* The sensor endpoint evaluation reorients ShaderData to the camera. Restore the original
-         * light-transport closures before sampling the next light-subpath segment. */
-        if (!bdpt_setup_light_vertex(kg, state, &camera_vertex, &sd)) {
-          return;
-        }
-      }
     }
 
     if (float(bounce) >= emitter_max_bounces) {
@@ -1070,8 +1284,37 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
     float3 rand_bsdf = lcg_step_float3(&rng);
     const ccl_private ShaderClosure *sc = surface_shader_bsdf_bssrdf_pick(&sd, &rand_bsdf);
-    if (!CLOSURE_IS_BSDF(sc->type) || CLOSURE_IS_RAY_PORTAL(sc->type) ||
-        surface_shader_is_hair_closure(sc->type) ||
+    if (CLOSURE_IS_RAY_PORTAL(sc->type)) {
+      const ccl_private RayPortalClosure *pc = (const ccl_private RayPortalClosure *)sc;
+      float sum_sample_weight = 0.0f;
+      for (int i = 0; i < sd.num_closure; i++) {
+        if (CLOSURE_IS_BSDF_OR_BSSRDF(sd.closure[i].type)) {
+          sum_sample_weight += sd.closure[i].sample_weight;
+        }
+      }
+      if (!(sum_sample_weight > 0.0f)) {
+        break;
+      }
+      const float pick_pdf = pc->sample_weight / sum_sample_weight;
+      throughput *= pc->weight / bdpt_safe_pdf(pick_pdf);
+      if (!isfinite_safe(throughput)) {
+        break;
+      }
+
+      const bool moved_origin = len_squared(sd.P - pc->P) > 1.0e-9f;
+      ray.P = moved_origin ? pc->P : ray_offset(sd.P, dot(sd.Ng, pc->D) >= 0.0f ? sd.Ng : -sd.Ng);
+      ray.D = pc->D;
+      ray.tmin = 0.0f;
+      ray.tmax = FLT_MAX;
+      ray.self.prim = moved_origin ? PRIM_NONE : sd.prim;
+      ray.self.object = moved_origin ? OBJECT_NONE : sd.object;
+      ray.self.light_prim = PRIM_NONE;
+      ray.self.light_object = OBJECT_NONE;
+      d_vcm = 0.0f;
+      path_state_next(kg, state, LABEL_TRANSMIT | LABEL_RAY_PORTAL, sd.runtime_flag);
+      continue;
+    }
+    if (!CLOSURE_IS_BSDF(sc->type) ||
         (bounce == 0 && _surface_shader_exclude(sc->type, emitter_shader_flags)))
     {
       break;
@@ -1154,6 +1397,47 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     }
   }
 
+}
+
+/* Sensor connections are deliberately isolated from light generation. The manifold solver has a
+ * large live working set; keeping it in a separate Metal kernel avoids inflating compile time and
+ * register pressure for every emitted light path. The compact cache already contains one
+ * uniformly selected potential bounce per path, so it is also an unbiased sensor reservoir. */
+ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
+                                               IntegratorState state,
+                                               const uint vertex_index,
+                                               const uint iteration,
+                                               const uint batch_samples)
+{
+  if (!kernel_integrator_state.bdpt_vertex_count || !kernel_integrator_state.bdpt_vertices) {
+    return;
+  }
+  const uint vertex_count = min(*kernel_integrator_state.bdpt_vertex_count,
+                                kernel_integrator_state.bdpt_vertex_capacity);
+  if (vertex_index >= vertex_count) {
+    return;
+  }
+
+  KernelBDPTVertex light_vertex = kernel_integrator_state.bdpt_vertices[vertex_index];
+  uint rng = lcg_init(
+      hash_uint3(vertex_index, iteration, uint(kernel_data.integrator.seed) ^ 0x73656e73u));
+  photon_state_init(state, rng, iteration);
+  INTEGRATOR_STATE_WRITE(state, path, flag) = light_vertex.flag;
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = light_vertex.path_length - 1u;
+
+  ShaderData light_sd;
+  if (!bdpt_setup_light_vertex(kg, state, &light_vertex, &light_sd)) {
+    return;
+  }
+  const float2 rand_lens = make_float2(lcg_step_float(&rng), lcg_step_float(&rng));
+  bdpt_connect_light_vertex_to_camera(kg,
+                                      state,
+                                      &light_vertex,
+                                      &light_sd,
+                                      uint(kernel_data.integrator.bdpt_max_bounces),
+                                      iteration,
+                                      batch_samples,
+                                      rand_lens);
 }
 
 CCL_NAMESPACE_END
