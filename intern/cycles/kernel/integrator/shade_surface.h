@@ -733,6 +733,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   /* BSSRDF closure, we schedule subsurface intersection kernel. */
   if (CLOSURE_IS_BSSRDF(sc->type)) {
 #  ifdef __KERNEL_METAL__
+    if (kernel_data.integrator.use_bidirectional_path_tracing) {
+      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_UNSUPPORTED;
+    }
     if (kernel_data.integrator.use_photon_mapping) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;

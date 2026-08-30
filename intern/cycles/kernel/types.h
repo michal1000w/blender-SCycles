@@ -297,6 +297,11 @@ enum PathRayFlag : uint32_t {
   /* The last camera-path event is a non-delta surface closure represented by the photon map.
    * Sharp transport after it is removed from path tracing to keep the estimators disjoint. */
   PATH_RAY_PHOTON_MAPPING_RECEIVER = (1U << 29U),
+
+  /* A nonlocal scattering event is not represented by the compact BDPT recursive MIS state.
+   * Continue the complete camera estimator, but do not assign weight to unavailable light-side
+   * strategies after such an event. Currently used for BSSRDF transport. */
+  PATH_RAY_BDPT_UNSUPPORTED = (1U << 30U),
 };
 
 // 8bit enum, just in case we need to move more variables in it
