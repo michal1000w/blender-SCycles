@@ -715,6 +715,13 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=64,
     )
 
+    photon_camera_samples: IntProperty(
+        name="Camera Samples",
+        description="Complete camera paths traced per render sample while reusing each photon map; higher values reduce volume free-flight noise without retracing photons (fixed sampling only)",
+        min=1, max=4,
+        default=2,
+    )
+
     photon_map_update_samples: IntProperty(
         name="Map Update Samples",
         description="Build an independent photon map after this many camera samples; lower values converge more reliably but trace photons more often",

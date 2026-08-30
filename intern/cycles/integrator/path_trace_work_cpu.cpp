@@ -69,7 +69,8 @@ void PathTraceWorkCPU::deinit_execution()
 void PathTraceWorkCPU::render_samples(RenderStatistics &statistics,
                                       const int start_sample,
                                       const int samples_num,
-                                      const int sample_offset)
+                                      const int sample_offset,
+                                      const bool /*adaptive_sampling*/)
 {
   const int64_t image_width = effective_buffer_params_.width;
   const int64_t image_height = effective_buffer_params_.height;

@@ -407,6 +407,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_photon_volume_radius_scale(get_float(cscene, "photon_volume_radius_scale"));
   integrator->set_photon_max_bounces(get_int(cscene, "photon_max_bounces"));
   integrator->set_photon_gather_max(get_int(cscene, "photon_gather_max"));
+  integrator->set_photon_camera_samples(get_int(cscene, "photon_camera_samples"));
   integrator->set_photon_map_update_samples(get_int(cscene, "photon_map_update_samples"));
   integrator->set_photon_roughness_threshold(get_float(cscene, "photon_roughness_threshold"));
   integrator->set_photon_normal_threshold(get_float(cscene, "photon_normal_threshold"));

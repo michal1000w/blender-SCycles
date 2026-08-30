@@ -236,6 +236,7 @@ NODE_DEFINE(Integrator)
   SOCKET_FLOAT(photon_volume_radius_scale, "Photon Volume Radius Scale", 2.0f);
   SOCKET_INT(photon_max_bounces, "Photon Max Bounces", 8);
   SOCKET_INT(photon_gather_max, "Photon Gather Maximum", 64);
+  SOCKET_INT(photon_camera_samples, "Photon Camera Samples", 2);
   SOCKET_INT(photon_map_update_samples, "Photon Map Update Samples", 32);
   SOCKET_FLOAT(photon_roughness_threshold, "Photon Roughness Threshold", 0.1f);
   SOCKET_FLOAT(photon_normal_threshold, "Photon Normal Threshold", 0.5f);
@@ -411,6 +412,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->photon_volume_radius_scale = clamp(photon_volume_radius_scale, 1.0f, 8.0f);
   kintegrator->photon_max_bounces = clamp(photon_max_bounces, 1, 64);
   kintegrator->photon_gather_max = clamp(photon_gather_max, 1, 1024);
+  kintegrator->photon_camera_samples = clamp(photon_camera_samples, 1, 4);
   kintegrator->photon_map_update_samples = clamp(photon_map_update_samples, 1, 1024);
   /* A small 4D hash dimension keeps moving caustics at approximately the camera-ray time without
    * penalizing static scenes. Four strata are a useful quality/memory-neutral compromise. */

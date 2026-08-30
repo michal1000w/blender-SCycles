@@ -389,7 +389,8 @@ bool PathTraceWorkGPU::update_queue_counter_and_cache()
 void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
                                       const int start_sample,
                                       const int samples_num,
-                                      const int sample_offset)
+                                      const int sample_offset,
+                                      const bool adaptive_sampling)
 {
   /* Limit number of states for the tile and rely on a greedy scheduling of tiles. This allows to
    * add more work (because tiles are smaller, so there is higher chance that more paths will
@@ -401,22 +402,32 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
 
   int num_iterations = 0;
   uint64_t num_busy_accum = 0;
+  /* Adaptive sampling schedules convergence checks in the requested sample index domain. Keep
+   * that contract intact until the render scheduler can account for photon camera oversampling. */
+  const int camera_samples = device_scene_->data.integrator.use_photon_mapping &&
+                                     !adaptive_sampling ?
+                                 device_scene_->data.integrator.photon_camera_samples :
+                                 1;
+  /* Camera oversampling is deliberately amortized over fewer photon maps. The expensive emitted
+   * path budget stays approximately constant while the mapped volume term receives more complete
+   * free-flight samples. */
   const int map_update_samples = device_scene_->data.integrator.use_photon_mapping ?
-                                     device_scene_->data.integrator.photon_map_update_samples :
+                                     device_scene_->data.integrator.photon_map_update_samples *
+                                         camera_samples :
                                      samples_num;
 
   /* A finite photon map is one Monte Carlo realization. Reusing it for an arbitrarily large
    * camera batch leaves its density-estimation noise frozen in the image, regardless of the
    * displayed sample count. Bound the reuse interval so offline renders and long-running viewport
-   * renders average independent maps and advance the progressive radius on the actual sample
-   * index. */
+   * renders average independent maps and advance the progressive radius on the requested render
+   * sample index. */
   for (int samples_done = 0; samples_done < samples_num;) {
     const int batch_samples = min(map_update_samples, samples_num - samples_done);
     const int batch_start_sample = start_sample + samples_done;
     work_tile_scheduler_.reset(effective_buffer_params_,
-                               batch_start_sample,
-                               batch_samples,
-                               sample_offset,
+                               batch_start_sample * camera_samples,
+                               batch_samples * camera_samples,
+                               sample_offset * camera_samples,
                                device_scene_->data.integrator.scrambling_distance);
 
     enqueue_reset();

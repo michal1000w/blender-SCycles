@@ -63,6 +63,14 @@ Primary sources:
 - Novak et al., [*Monte Carlo Methods for Volumetric Light Transport
   Simulation*](https://cs.dartmouth.edu/~wjarosz/publications/novak18monte.html) (CGF 2018).
 - Herholz et al., *Volume Path Guiding Based on Zero-Variance Random Walk Theory* (TOG 2019).
+- Kettunen et al., [*Lightweight Photon
+  Mapping*](https://cgg.mff.cuni.cz/~jaroslav/papers/2018-lwpm/index.htm) (TOG 2018).
+- Lin et al., [*Fast Volume Rendering with Spatiotemporal Reservoir
+  Resampling*](https://research.nvidia.com/publication/2021-11_fast-volume-rendering-spatiotemporal-reservoir-resampling)
+  (SIGGRAPH Asia 2021).
+- Kutz et al., [*Spectral and Decomposition Tracking for Rendering Heterogeneous
+  Volumes*](https://disneyanimation.com/publications/spectral-and-decomposition-tracking-for-rendering-heterogeneous-volumes/)
+  (TOG 2017).
 
 ## Selected estimator
 
@@ -134,6 +142,62 @@ direction, flux, emitter, time, and spectral metadata retain their existing repr
 - Regression: photon mapping off must be image-identical; surface photon caustics must remain
   unchanged; CPU and unsupported GPU devices must retain prior behavior.
 
+## Low-sample convergence study
+
+Profiling `prism-volume.blend` showed that low-sample error is dominated by camera-path volume
+free-flight sampling, not by the number of gathered neighbors. The photon map is expensive enough
+that rebuilding it more often can consume most of the render time without adding camera samples.
+This suggested amortizing an independent map across a small number of complete camera paths.
+
+The selected implementation adds **Camera Samples**, clamped to 1--4 and defaulting to 2. For fixed
+sampling, Cycles traces that many complete camera paths per requested render sample and increases
+the map reuse interval by the same factor. Consequently, Camera Samples 2 doubles independent
+camera free-flight samples while keeping the approximate number of emitted photon paths constant.
+Film normalization uses the actual per-pixel sample count, so this remains the original raw
+estimator rather than a denoiser, clamp, partial-path split, or post-process. Camera Samples 1 uses
+the legacy sample indices and map schedule.
+
+Adaptive sampling convergence tests operate in the render scheduler's requested-sample domain.
+Until that scheduler can account for internal photon-camera oversampling, adaptive renders safely
+fall back to one camera path per requested sample. This also leaves CPU and other unsupported
+devices unchanged. The UI describes the optimization as fixed-sampling only.
+
+### Controlled Metal result
+
+The benchmark used the supplied scene at 256 by 256 pixels, 32 requested samples, 4,194,304 photons
+per map, gather limit 256, radius 0.04, volume-radius scale 2.26, no radius decay, no denoising, and
+no adaptive sampling. Four seeds were compared as raw linear EXRs against a 512-sample photon-map
+reference from the same scene and settings.
+
+| Configuration | Camera paths | Photon maps | Mean RMSE | Current render time |
+| --- | ---: | ---: | ---: | ---: |
+| Legacy, Camera Samples 1 | 32 | 4 | 0.131890 | 5.56 s (representative rerun) |
+| Camera Samples 2 | 64 | 2 | 0.093615 | 5.584 s average |
+
+The new schedule reduced mean RMSE by **29.0%** at effectively equal measured time. Its four-seed
+mean radiance was 0.132345, compared with 0.132282 for the 512-sample reference. This small 0.05%
+difference is far below the seed-to-seed noise and does not indicate an energy shift. Metal photon
+insertion is not bit-deterministic because concurrent records race for finite hash capacity;
+repeat legacy renders differed by RMSE 0.00729, so compatibility is assessed by schedule, radiance,
+and convergence statistics rather than bit equality.
+
+### Rejected alternatives
+
+- Branching only the volume free-flight estimator changed mean radiance by roughly 7--10% because
+  its state/weight partition did not match the complete Cycles path estimator.
+- A quasi-Monte Carlo photon-bounce sampler preserved the mean but did not improve RMSE and was
+  slower in this scene.
+- A stratified line-integral gather shifted energy by about 23%; it is not a valid point-estimator
+  substitution without a proper beam formulation and transmittance measure.
+- Smaller, more frequently refreshed maps made camera sampling cheaper, but produced a persistent
+  photon-count-dependent low bias of about 3.4% even at high camera samples.
+- Raising the gather cap from 256 to 1024 produced negligible improvement, confirming that camera
+  free-flight noise was the useful target for the current backend.
+
+These failures are why the production change reuses maps only across complete camera paths. More
+aggressive reuse or splitting needs a derived multiple-proposal/MIS estimator, not an empirical
+gain.
+
 ## Deferred SOTA upgrade
 
 The next backend should store photon path segments and implement point-beam gathering along the
@@ -146,3 +210,7 @@ The collision-point implementation is deliberately the production-safe first sta
 that points are the lowest-variance volumetric estimator. Camera-side free-flight sampling remains
 the dominant noise source around very sharp volume caustics at low samples; point-beam integration
 is the researched next step for removing that variance rather than hiding it with a gain or clamp.
+Reservoir reuse is also promising once candidates can be represented with cheap proposal weights
+and an unbiased final volume evaluation. Lightweight Photon Mapping's emission guiding could reduce
+wasted launches further, but should be trained from useful camera/light connections and retain a
+support-preserving mixture, as the current target-bound point-light launcher does.
