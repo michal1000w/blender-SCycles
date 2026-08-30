@@ -125,6 +125,32 @@ def main():
         "Lambertian pure light tracing differs from PT by at least 1%",
     )
 
+    diffuse_passes = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "diffuse_light_trace_passes",
+        common
+        + [
+            "--diffuse-node",
+            "--bdpt",
+            "--samples",
+            "1",
+            "--update-samples",
+            "1",
+            "--max-bounces",
+            "1",
+            "--light-paths",
+            "1048576",
+            "--report-passes",
+        ],
+    )
+    require(
+        diffuse_passes["diffuse_direct_mean"] > 0.1
+        and diffuse_passes["diffuse_indirect_mean"] == 0.0,
+        "A first-bounce sensor splat was not routed exclusively to the direct pass",
+    )
+
     principled_pt = run_render(
         options.blender, options.smoke, output_dir, "principled_pt", common + ["--samples", "4096"]
     )
@@ -530,6 +556,44 @@ def main():
         "Unsupported camera fallback still schedules substantial BDPT work",
     )
 
+    shadow_catcher_pt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "shadow_catcher_pt",
+        common
+        + ["--shadow-catcher", "--allow-empty", "--samples", "512", "--report-passes"],
+    )
+    shadow_catcher_bdpt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "shadow_catcher_bdpt_fallback",
+        common
+        + [
+            "--shadow-catcher",
+            "--allow-empty",
+            "--bdpt",
+            "--samples",
+            "512",
+            "--light-paths",
+            "65536",
+            "--report-passes",
+        ],
+    )
+    require(
+        shadow_catcher_bdpt["mean"] == shadow_catcher_pt["mean"]
+        and shadow_catcher_bdpt["peak"] == shadow_catcher_pt["peak"]
+        and shadow_catcher_bdpt["shadow_catcher_mean"]
+        == shadow_catcher_pt["shadow_catcher_mean"]
+        and shadow_catcher_bdpt["shadow_catcher_mean"] > 0.0,
+        "Shadow catcher mode did not fall back exactly to regular path tracing",
+    )
+    require(
+        shadow_catcher_bdpt["seconds"] < 2.0 * shadow_catcher_pt["seconds"],
+        "Shadow catcher fallback still schedules substantial BDPT work",
+    )
+
     for light_type in ("POINT", "SPOT", "SUN", "MESH", "WORLD"):
         emitter_pt = run_render(
             options.blender,
@@ -865,6 +929,60 @@ def main():
     require(
         relative_error(volume_light_tracing["mean"], volume_pt["mean"]) < 0.08,
         "Dense volume light tracing did not reconstruct the PT reference within 8%",
+    )
+
+    multiscatter_volume_pt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "volume_multiscatter_pt",
+        [
+            "--no-glass",
+            "--volume-only",
+            "--samples",
+            "16384",
+            "--resolution",
+            "32",
+            "--volume-bounces",
+            "8",
+            "--world-scatter",
+            "0.18",
+        ],
+    )
+    multiscatter_volume_bdpt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "volume_multiscatter_bdpt",
+        [
+            "--bdpt",
+            "--no-glass",
+            "--volume-only",
+            "--samples",
+            "2048",
+            "--resolution",
+            "32",
+            "--max-bounces",
+            "8",
+            "--volume-bounces",
+            "8",
+            "--light-paths",
+            "1048576",
+            "--update-samples",
+            "2048",
+            "--world-scatter",
+            "0.18",
+            "--report-passes",
+        ],
+    )
+    require(
+        relative_error(multiscatter_volume_bdpt["mean"], multiscatter_volume_pt["mean"]) < 0.015,
+        "BDPT mode changed multiple-scattering volume energy by at least 1.5%",
+    )
+    require(
+        multiscatter_volume_bdpt["volume_direct_mean"] > 0.0
+        and multiscatter_volume_bdpt["volume_indirect_mean"] > 0.0,
+        "Multiple-scattering volume transport was not split into direct and indirect passes",
     )
 
     subsurface_pt = run_render(
