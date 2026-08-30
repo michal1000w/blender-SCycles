@@ -32,7 +32,13 @@ def configure_metal():
 
 
 def principled_material(
-    name, base_color, transmission=0.0, roughness=0.4, ior=1.5, dispersion=0.0
+    name,
+    base_color,
+    transmission=0.0,
+    roughness=0.4,
+    ior=1.5,
+    dispersion=0.0,
+    subsurface=0.0,
 ):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
@@ -42,6 +48,10 @@ def principled_material(
     bsdf.inputs["IOR"].default_value = ior
     transmission_input = bsdf.inputs.get("Transmission Weight") or bsdf.inputs.get("Transmission")
     transmission_input.default_value = transmission
+    if subsurface > 0.0:
+        bsdf.inputs["Subsurface Weight"].default_value = subsurface
+        bsdf.inputs["Subsurface Radius"].default_value = (0.65, 0.32, 0.16)
+        bsdf.inputs["Subsurface Scale"].default_value = 0.45
     if dispersion > 0.0:
         bsdf.inputs["Transmission Dispersion Scale"].default_value = dispersion
         bsdf.inputs["Transmission Dispersion Abbe Number"].default_value = 9.0
@@ -161,7 +171,7 @@ def build_scene(options):
     scene.world = world
 
     floor = None
-    if not options.volume_only:
+    if not options.volume_only and not options.no_floor:
         bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0.0, 0.0, 0.0))
         floor = bpy.context.object
         if options.hair_bsdf:
@@ -199,7 +209,15 @@ def build_scene(options):
             principled_material("Diffuse Backdrop", (0.45, 0.5, 0.58), roughness=0.55)
         )
 
-    if not options.no_glass and not options.volume_only:
+    if options.subsurface and not options.volume_only:
+        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=5, radius=1.0, location=(0.0, 0.0, 1.25))
+        subsurface_object = bpy.context.object
+        subsurface_object.data.materials.append(
+            principled_material(
+                "Subsurface Receiver", (0.72, 0.22, 0.08), roughness=0.42, subsurface=1.0
+            )
+        )
+    elif not options.no_glass and not options.volume_only:
         bpy.ops.mesh.primitive_uv_sphere_add(
             segments=64, ring_count=32, radius=1.0, location=(0.0, 0.0, 1.25)
         )
@@ -395,6 +413,7 @@ def main():
     parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--diffuse-node", action="store_true")
     parser.add_argument("--hair-bsdf", action="store_true")
+    parser.add_argument("--subsurface", action="store_true")
     parser.add_argument("--ray-portal", action="store_true")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--lens", type=float, default=52.0)
@@ -403,6 +422,7 @@ def main():
     parser.add_argument("--world-absorption", type=float, default=0.0)
     parser.add_argument("--world-scatter", type=float, default=0.0)
     parser.add_argument("--volume-only", action="store_true")
+    parser.add_argument("--no-floor", action="store_true")
     parser.add_argument("--camera-motion", action="store_true")
     parser.add_argument("--top-camera", action="store_true")
     parser.add_argument("--output", default="/tmp/cycles_bdpt_smoke.exr")
