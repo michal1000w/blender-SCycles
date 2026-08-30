@@ -291,7 +291,7 @@ def main():
         options.smoke,
         output_dir,
         "glass_caustic_through_glass_pt",
-        ["--samples", "256", "--resolution", "64", "--view-glass"],
+        ["--samples", "256", "--resolution", "64", "--view-glass", "--flat-view-glass"],
     )
     view_glass_bdpt = run_render(
         options.blender,
@@ -311,6 +311,7 @@ def main():
             "--max-bounces",
             "8",
             "--view-glass",
+            "--flat-view-glass",
         ],
     )
     require(
@@ -929,6 +930,66 @@ def main():
     require(
         relative_error(volume_light_tracing["mean"], volume_pt["mean"]) < 0.08,
         "Dense volume light tracing did not reconstruct the PT reference within 8%",
+    )
+
+    volume_direct_only = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "glass_volume_direct_only",
+        [
+            "--bdpt",
+            "--no-floor",
+            "--samples",
+            "1",
+            "--resolution",
+            "64",
+            "--max-bounces",
+            "1",
+            "--light-paths",
+            "1048576",
+            "--update-samples",
+            "1",
+            "--volume-bounces",
+            "0",
+            "--world-scatter",
+            "0.12",
+            "--report-passes",
+        ],
+    )
+    volume_caustic = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "glass_volume_caustic",
+        [
+            "--bdpt",
+            "--no-floor",
+            "--samples",
+            "1",
+            "--resolution",
+            "64",
+            "--max-bounces",
+            "8",
+            "--light-paths",
+            "1048576",
+            "--update-samples",
+            "1",
+            "--volume-bounces",
+            "0",
+            "--world-scatter",
+            "0.12",
+            "--report-passes",
+        ],
+    )
+    require(
+        volume_direct_only["volume_indirect_mean"] == 0.0
+        and volume_caustic["volume_indirect_mean"] > 0.005,
+        "Specular light subpaths did not produce a volume-indirect caustic contribution",
+    )
+    require(
+        volume_caustic["p999"] > 1.2 * volume_direct_only["p999"],
+        "Post-glass volume connection did not create a focused volumetric highlight",
     )
 
     multiscatter_volume_pt = run_render(
