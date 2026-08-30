@@ -174,6 +174,61 @@ def main():
         "Full BDPT strategy mixture differs from PT by at least 1%",
     )
 
+    hair_pt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "hair_bsdf_pt",
+        common + ["--hair-bsdf", "--samples", "4096"],
+    )
+    hair_lt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "hair_bsdf_light_trace",
+        common
+        + [
+            "--hair-bsdf",
+            "--bdpt",
+            "--samples",
+            "1",
+            "--update-samples",
+            "1",
+            "--max-bounces",
+            "1",
+            "--light-paths",
+            "1048576",
+        ],
+    )
+    require(
+        relative_error(hair_lt["mean"], hair_pt["mean"]) < 0.01,
+        "Hair BSDF adjoint light tracing differs from PT by at least 1%",
+    )
+
+    ray_portal = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "ray_portal_light_trace",
+        common
+        + [
+            "--ray-portal",
+            "--bdpt",
+            "--samples",
+            "1",
+            "--update-samples",
+            "1",
+            "--max-bounces",
+            "2",
+            "--light-paths",
+            "1048576",
+        ],
+    )
+    require(
+        ray_portal["peak"] > 10.0,
+        "Ray Portal BSDF did not remap a BDPT light subpath",
+    )
+
     caustic_pt = run_render(
         options.blender,
         options.smoke,
