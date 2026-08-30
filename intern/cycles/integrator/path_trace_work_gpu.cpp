@@ -671,6 +671,7 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
       "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
   const DeviceKernelArguments args(&num_light_paths, &iteration, &batch_samples);
   queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE, num_light_paths, args);
+  queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT, num_light_paths, args);
 
   /* Light tracing can enqueue at most one sensor shadow per light path. Synchronize this single
    * counter before camera work starts so later shadow compaction cannot overwrite those paths. */

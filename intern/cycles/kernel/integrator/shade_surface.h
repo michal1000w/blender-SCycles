@@ -564,7 +564,7 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   light_ray.D = light_incoming;
   light_ray.tmin = 0.0f;
   light_ray.tmax = 1.0f;
-  light_ray.time = light_vertex->time;
+  light_ray.time = photon_unpack_time(light_vertex->time_wavelength);
 #  ifdef __RAY_DIFFERENTIALS__
   light_ray.dP = differential_zero_compact();
   light_ray.dD = differential_zero_compact();
@@ -581,7 +581,7 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   ShaderData light_sd;
   shader_setup_from_ray(kg, &light_sd, &light_ray, &light_isect);
 #  ifdef __SPECTRAL__
-  shader_setup_wavelength(kg, &light_sd, state);
+  light_sd.rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #  endif
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, &light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
@@ -613,7 +613,7 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   light_ray.D = direction;
   shader_setup_from_ray(kg, &light_sd, &light_ray, &light_isect);
 #  ifdef __SPECTRAL__
-  shader_setup_wavelength(kg, &light_sd, state);
+  light_sd.rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #  endif
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, &light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
@@ -654,8 +654,14 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
 
   const Spectrum light_connection_eval = bsdf_eval_sum(&light_adjoint_eval) *
                                          (cos_light / cos_light_previous);
-  Spectrum connection = Spectrum(light_vertex->throughput) * bsdf_eval_sum(&camera_eval) *
-                        light_connection_eval * (cache_scale * mis_weight / distance2);
+  const Spectrum spectral_weight = bdpt_light_vertex_spectral_weight(
+      kg,
+      state,
+      light_vertex->time_wavelength,
+      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u);
+  Spectrum connection = Spectrum(light_vertex->throughput) * spectral_weight *
+                        bsdf_eval_sum(&camera_eval) * light_connection_eval *
+                        (cache_scale * mis_weight / distance2);
   if (!isfinite_safe(connection) || is_zero(connection)) {
     return false;
   }

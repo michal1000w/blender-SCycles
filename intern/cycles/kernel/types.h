@@ -1597,7 +1597,8 @@ struct ccl_align(16) KernelBDPTVertex {
   PackedSpectrum throughput;
   float u;
   float v;
-  float time;
+  /* Half precision shutter time, 15-bit wavelength sample and a spectral-path tag. */
+  uint time_wavelength;
   uint incoming;
   int prim;
   int object;
@@ -1856,6 +1857,7 @@ enum DeviceKernel : int {
   DEVICE_KERNEL_INTEGRATOR_RESET,
   DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT,
   DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE,
+  DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT,
   DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS,
 
   DEVICE_KERNEL_SHADER_EVAL_DISPLACE,

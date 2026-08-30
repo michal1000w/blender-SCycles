@@ -205,6 +205,65 @@ def main():
         "BDPT did not resolve the focused glass caustic",
     )
 
+    view_glass_pt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "glass_caustic_through_glass_pt",
+        ["--samples", "256", "--resolution", "64", "--view-glass"],
+    )
+    view_glass_bdpt = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "glass_caustic_through_glass_bdpt",
+        [
+            "--bdpt",
+            "--samples",
+            "256",
+            "--resolution",
+            "64",
+            "--light-paths",
+            "65536",
+            "--update-samples",
+            "8",
+            "--max-bounces",
+            "8",
+            "--view-glass",
+        ],
+    )
+    require(
+        view_glass_bdpt["peak"] > 5.0 * view_glass_pt["peak"]
+        and view_glass_bdpt["peak"] > 20.0,
+        "BDPT manifold connection did not retain the caustic through refractive glass",
+    )
+
+    spectral_caustic = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "glass_caustic_spectral_bdpt",
+        [
+            "--bdpt",
+            "--samples",
+            "64",
+            "--resolution",
+            "64",
+            "--light-paths",
+            "65536",
+            "--update-samples",
+            "8",
+            "--max-bounces",
+            "8",
+            "--dispersion",
+            "1.0",
+        ],
+    )
+    require(
+        spectral_caustic["top_chroma"] > 2.0 * caustic_bdpt["top_chroma"],
+        "BDPT dispersive caustic did not retain spectral wavelength separation",
+    )
+
     caustic_dof = run_render(
         options.blender,
         options.smoke,

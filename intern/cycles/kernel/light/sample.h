@@ -439,15 +439,16 @@ ccl_device_forceinline void light_sample_update(KernelGlobals kg,
                                                 const float3 N,
                                                 const uint32_t path_flag)
 {
-  const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
-
   if (ls->type == LIGHT_POINT) {
+    const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
     point_light_mnee_sample_update(klight, ls, P, N, path_flag);
   }
   else if (ls->type == LIGHT_SPOT) {
+    const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
     spot_light_mnee_sample_update(kg, klight, ls, P, N, path_flag);
   }
   else if (ls->type == LIGHT_AREA) {
+    const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
     area_light_mnee_sample_update(klight, ls, P);
   }
   else {

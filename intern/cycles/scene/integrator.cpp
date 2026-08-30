@@ -667,7 +667,10 @@ uint64_t Integrator::get_kernel_features() const
   }
 
   if (get_use_bidirectional_path_tracing()) {
-    kernel_features |= KERNEL_FEATURE_BDPT;
+    /* BDPT sensor connections use the manifold solver for specular chains between a cached light
+     * vertex and the camera. This is intrinsic bidirectional transport and does not require the
+     * user-facing shadow-caustics caster/receiver annotations. */
+    kernel_features |= KERNEL_FEATURE_BDPT | KERNEL_FEATURE_MNEE;
   }
 
   return kernel_features;
