@@ -133,6 +133,7 @@ def build_scene(options):
     scene.cycles.bdpt_max_bounces = options.max_bounces
     scene.cycles.bdpt_update_samples = options.update_samples
     scene.cycles.max_bounces = 10
+    scene.cycles.volume_bounces = options.volume_bounces
     scene.cycles.blur_glossy = 0.0
     scene.cycles.pixel_filter_type = "BOX"
     scene.render.resolution_x = options.resolution
@@ -147,6 +148,20 @@ def build_scene(options):
         scene.render.border_max_y = 0.75
     scene.render.image_settings.file_format = "OPEN_EXR"
     scene.render.filepath = options.output
+    if options.report_passes:
+        scene.render.image_settings.media_type = "MULTI_LAYER_IMAGE"
+        scene.render.image_settings.file_format = "OPEN_EXR_MULTILAYER"
+        view_layer = scene.view_layers[0]
+        view_layer.use_pass_diffuse_direct = True
+        view_layer.use_pass_diffuse_indirect = True
+        view_layer.use_pass_glossy_direct = True
+        view_layer.use_pass_glossy_indirect = True
+        view_layer.use_pass_transmission_direct = True
+        view_layer.use_pass_transmission_indirect = True
+        view_layer.cycles.use_pass_volume_direct = True
+        view_layer.cycles.use_pass_volume_indirect = True
+        if options.shadow_catcher:
+            view_layer.cycles.use_pass_shadow_catcher = True
 
     world = bpy.data.worlds.new("Black World")
     world.use_nodes = True
@@ -232,6 +247,10 @@ def build_scene(options):
                 dispersion=options.dispersion,
             )
         )
+
+    if options.shadow_catcher and floor is not None:
+        floor.is_shadow_catcher = True
+        scene.render.film_transparent = True
 
     light = None
     light_type = "MESH" if options.mesh_light else options.light_type
@@ -357,21 +376,73 @@ def build_scene(options):
     bpy.ops.render.render(write_still=True)
     elapsed = time.perf_counter() - start
 
-    image = bpy.data.images.load(options.output, check_existing=False)
-    pixels = list(image.pixels)
-    rgb = [pixels[index] for index in range(len(pixels)) if index % 4 != 3]
+    if options.report_passes:
+        import OpenImageIO as oiio
+
+        combined_input = oiio.ImageInput.open(options.output)
+        if combined_input is None or not combined_input.seek_subimage(0, 0):
+            raise RuntimeError(f"Could not open combined result {options.output}")
+        combined = combined_input.read_image(format=oiio.FLOAT)[..., :3]
+        combined_input.close()
+        rgb = combined.reshape(-1).tolist()
+        colors = [tuple(color) for row in combined for color in row]
+    else:
+        image = bpy.data.images.load(options.output, check_existing=False)
+        pixels = list(image.pixels)
+        rgb = [pixels[index] for index in range(len(pixels)) if index % 4 != 3]
+        colors = [tuple(pixels[index : index + 3]) for index in range(0, len(pixels), 4)]
     if not rgb or not all(math.isfinite(value) for value in rgb):
         raise RuntimeError("Render contains non-finite values")
     if max(rgb) <= 0.0 and not options.allow_empty:
         raise RuntimeError("Render contains no light")
     ordered = sorted(rgb)
-    colors = [tuple(pixels[index : index + 3]) for index in range(0, len(pixels), 4)]
     bright_colors = sorted(colors, key=sum)[-max(1, len(colors) // 100) :]
     top_chroma = sum(
         (max(color) - min(color)) / (sum(color) / 3.0 + 1.0e-12) for color in bright_colors
     ) / len(bright_colors)
     percentile_99 = ordered[min(int(0.99 * len(ordered)), len(ordered) - 1)]
     percentile_999 = ordered[min(int(0.999 * len(ordered)), len(ordered) - 1)]
+    pass_metrics = []
+    if options.report_passes:
+        wanted = {
+            "diffuse direct": "diffuse_direct",
+            "diffuse indirect": "diffuse_indirect",
+            "glossy direct": "glossy_direct",
+            "glossy indirect": "glossy_indirect",
+            "transmission direct": "transmission_direct",
+            "transmission indirect": "transmission_indirect",
+            "volume direct": "volume_direct",
+            "volume indirect": "volume_indirect",
+        }
+        if options.shadow_catcher:
+            wanted["shadow catcher"] = "shadow_catcher"
+        found = {}
+        available = []
+        image_input = oiio.ImageInput.open(options.output)
+        if image_input is None:
+            raise RuntimeError(f"Could not open multilayer result {options.output}")
+        subimage = 0
+        while image_input.seek_subimage(subimage, 0):
+            spec = image_input.spec()
+            subimage_name = spec.get_string_attribute("name", "").lower()
+            channel_names = [name.lower() for name in spec.channelnames]
+            available.append((subimage_name, channel_names))
+            pixels_for_pass = image_input.read_image(format=oiio.FLOAT)
+            for pass_name, metric_name in wanted.items():
+                matching_channels = [
+                    index for index, name in enumerate(channel_names) if pass_name in name
+                ]
+                if pass_name in subimage_name:
+                    matching_channels = list(range(min(3, spec.nchannels)))
+                if len(matching_channels) >= 3:
+                    values = pixels_for_pass[..., matching_channels[:3]]
+                    found[metric_name] = float(values.mean())
+            subimage += 1
+        image_input.close()
+        missing = sorted(set(wanted.values()) - set(found))
+        if missing:
+            raise RuntimeError(f"Missing render passes {missing}; available={available}")
+        pass_metrics.extend(f"{name}_mean={found[name]:.9g}" for name in wanted.values())
     print(
         "BDPT_SMOKE "
         f"bdpt={int(options.bdpt)} camera={options.camera_type} light={light_type} "
@@ -379,7 +450,7 @@ def build_scene(options):
         f"samples={options.samples} "
         f"light_paths={options.light_paths} mean={sum(rgb) / len(rgb):.9g} "
         f"p99={percentile_99:.9g} p999={percentile_999:.9g} peak={max(rgb):.9g} "
-        f"top_chroma={top_chroma:.9g}"
+        f"top_chroma={top_chroma:.9g} " + " ".join(pass_metrics)
     )
 
 
@@ -414,6 +485,8 @@ def main():
     parser.add_argument("--diffuse-node", action="store_true")
     parser.add_argument("--hair-bsdf", action="store_true")
     parser.add_argument("--subsurface", action="store_true")
+    parser.add_argument("--shadow-catcher", action="store_true")
+    parser.add_argument("--report-passes", action="store_true")
     parser.add_argument("--ray-portal", action="store_true")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--lens", type=float, default=52.0)
@@ -421,6 +494,7 @@ def main():
     parser.add_argument("--ortho-scale", type=float, default=7.0)
     parser.add_argument("--world-absorption", type=float, default=0.0)
     parser.add_argument("--world-scatter", type=float, default=0.0)
+    parser.add_argument("--volume-bounces", type=int, default=0)
     parser.add_argument("--volume-only", action="store_true")
     parser.add_argument("--no-floor", action="store_true")
     parser.add_argument("--camera-motion", action="store_true")

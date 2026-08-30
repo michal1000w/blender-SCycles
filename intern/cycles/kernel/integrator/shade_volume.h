@@ -1905,8 +1905,7 @@ ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg
                                                                 const ccl_private Ray *ray,
                                                                 ccl_private Spectrum *power,
                                                                 ccl_private float3 *scatter_P,
-                                                                ccl_private int *receiver_object,
-                                                                ccl_private ShaderVolumePhases *phases = nullptr)
+                                                                ccl_private int *receiver_object)
 {
   if (integrator_state_volume_stack_is_empty(kg, state)) {
     return PHOTON_VOLUME_ATTENUATED;
@@ -1947,9 +1946,6 @@ ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg
   }
   if (result.indirect_scatter) {
     *scatter_P = ray->P + result.indirect_t * ray->D;
-    if (phases != nullptr) {
-      *phases = result.indirect_phases;
-    }
     return PHOTON_VOLUME_SCATTERED;
   }
   return PHOTON_VOLUME_ATTENUATED;
@@ -3024,13 +3020,10 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
 
 #  ifdef __KERNEL_METAL__
   if (bdpt_enabled_for_surface_path(state)) {
-    const float3 original_wi = sd->wi;
-    sd->wi = normalize(phase_wo);
-    BsdfEval reverse_eval;
-    const float reverse_pdf = volume_shader_phase_eval(
-        kg, state, sd, phases, original_wi, &reverse_eval, SHADER_USE_MIS);
-    sd->wi = original_wi;
-    bdpt_recursive_mis_after_phase(state, phase_pdf, reverse_pdf);
+    /* Repeated medium vertices need free-flight strategy densities that are intentionally not
+     * approximated by the compact surface recursion. Keep the complete camera estimator after
+     * the first scatter; only its direct volume NEE competes with a cached medium vertex. */
+    INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_UNSUPPORTED;
   }
 #  endif
 
@@ -3151,14 +3144,6 @@ volume_integrate_event(KernelGlobals kg,
 
   if (result.indirect_scatter) {
     sd->P = ray->P + result.indirect_t * ray->D;
-
-#  ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_surface_path(state)) {
-      const float3 previous_P = ray->P + ray->D * ray->tmin;
-      sd->ray_length = len(sd->P - previous_P);
-      bdpt_recursive_mis_after_volume_hit(state, sd, sd->ray_length);
-    }
-#  endif
 
 #  ifdef __KERNEL_METAL__
     if (kernel_data.integrator.use_photon_mapping) {

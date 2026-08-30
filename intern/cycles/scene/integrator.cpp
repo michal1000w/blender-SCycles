@@ -410,7 +410,11 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   /* Photon mapping is currently scheduled by the GPU path tracer and enabled only on Metal.
    * Keeping the complete configuration in KernelData makes all regular shading kernels see an
    * immutable map description while a render batch is in flight. */
-  kintegrator->use_bidirectional_path_tracing = use_bidirectional_path_tracing_on_device(device);
+  /* Sensor splats do not carry the split foreground/background state required by shadow catcher
+   * compositing. Keep the complete regular estimator for such scenes instead of leaking light
+   * tracing into the combined or catcher passes. */
+  kintegrator->use_bidirectional_path_tracing = use_bidirectional_path_tracing_on_device(device) &&
+                                                !scene->has_shadow_catcher();
   kintegrator->bdpt_light_paths = clamp(bdpt_light_paths, 1024, 4 * 1024 * 1024);
   kintegrator->bdpt_max_bounces = clamp(bdpt_max_bounces, 1, 64);
   kintegrator->bdpt_update_samples = clamp(bdpt_update_samples, 1, 1024);
