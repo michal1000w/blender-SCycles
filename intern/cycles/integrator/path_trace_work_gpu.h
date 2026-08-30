@@ -35,7 +35,8 @@ class PathTraceWorkGPU : public PathTraceWork {
   void render_samples(RenderStatistics &statistics,
                       const int start_sample,
                       const int samples_num,
-                      const int sample_offset) override;
+                      const int sample_offset,
+                      const bool adaptive_sampling) override;
 
   void copy_to_display(PathTraceDisplay *display,
                        PassMode pass_mode,
