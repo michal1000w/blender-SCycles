@@ -50,6 +50,9 @@ KERNEL_STRUCT_MEMBER(path, float, optical_depth, KERNEL_FEATURE_PATH_TRACING)
  * zero and distance. Note that transparency and volume attenuation increase
  * the ray tmin but keep P unmodified so that this works. */
 KERNEL_STRUCT_MEMBER(path, float, mis_ray_pdf, KERNEL_FEATURE_PATH_TRACING)
+/* Recursive balance-heuristic terms for Metal bidirectional path tracing. */
+KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vcm, KERNEL_FEATURE_BDPT)
+KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vc, KERNEL_FEATURE_BDPT)
 /* Object at last scatter point for light linking. */
 KERNEL_STRUCT_MEMBER(path, int, mis_ray_object, KERNEL_FEATURE_LIGHT_LINKING)
 /* Normal at last scatter point for light tree. */

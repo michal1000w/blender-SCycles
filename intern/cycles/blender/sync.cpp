@@ -400,6 +400,11 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
+  integrator->set_use_bidirectional_path_tracing(
+      get_boolean(cscene, "use_bidirectional_path_tracing"));
+  integrator->set_bdpt_light_paths(get_int(cscene, "bdpt_light_paths"));
+  integrator->set_bdpt_max_bounces(get_int(cscene, "bdpt_max_bounces"));
+  integrator->set_bdpt_update_samples(get_int(cscene, "bdpt_update_samples"));
   integrator->set_use_photon_mapping(get_boolean(cscene, "use_photon_mapping"));
   integrator->set_photon_count(get_int(cscene, "photon_count"));
   integrator->set_photon_radius(get_float(cscene, "photon_radius"));

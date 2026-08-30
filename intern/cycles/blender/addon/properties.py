@@ -662,6 +662,37 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    use_bidirectional_path_tracing: BoolProperty(
+        name="Bidirectional Path Tracing",
+        description="Trace light and camera subpaths and connect them with multiple importance sampling (Metal GPU only)",
+        default=False,
+    )
+
+    bdpt_light_paths: IntProperty(
+        name="Light Paths",
+        description="Number of light subpaths generated for each bidirectional update; more paths reduce caustic noise at the cost of time and memory",
+        min=1024,
+        max=4194304,
+        soft_min=16384,
+        soft_max=1048576,
+        default=65536,
+    )
+
+    bdpt_max_bounces: IntProperty(
+        name="Light Max Bounces",
+        description="Maximum number of surface interactions on each light subpath",
+        min=1, max=64,
+        default=8,
+    )
+
+    bdpt_update_samples: IntProperty(
+        name="Update Samples",
+        description="Generate a new independent set of light subpaths after this many camera samples",
+        min=1, max=1024,
+        soft_max=64,
+        default=8,
+    )
+
     use_photon_mapping: BoolProperty(
         name="Photon Mapping",
         description="Use progressive photon density estimates for difficult surface and volume caustics (Metal GPU only)",
@@ -688,14 +719,16 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     photon_radius_decay: FloatProperty(
         name="Radius Decay",
         description="Progressively reduce the gather radius as rendering converges; 0 keeps a fixed radius and 0.5 reduces it fastest",
-        min=0.0, max=0.5,
+        min=0.0,
+        max=0.5,
         default=0.25,
     )
 
     photon_volume_radius_scale: FloatProperty(
         name="Volume Radius Scale",
         description="Multiply the photon gather radius in volumes to provide enough neighbors for the three-dimensional density estimate",
-        min=1.0, max=8.0,
+        min=1.0,
+        max=8.0,
         soft_max=4.0,
         default=2.0,
     )
@@ -710,7 +743,8 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     photon_gather_max: IntProperty(
         name="Gather Limit",
         description="Target maximum number of nearby photons evaluated at one shading point; dense neighborhoods are sampled without losing energy",
-        min=1, max=1024,
+        min=1,
+        max=1024,
         soft_max=256,
         default=64,
     )
@@ -718,14 +752,16 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     photon_camera_samples: IntProperty(
         name="Camera Samples",
         description="Complete camera paths traced per render sample while reusing each photon map; higher values reduce volume free-flight noise without retracing photons (fixed sampling only)",
-        min=1, max=4,
+        min=1,
+        max=4,
         default=2,
     )
 
     photon_map_update_samples: IntProperty(
         name="Map Update Samples",
         description="Build an independent photon map after this many camera samples; lower values converge more reliably but trace photons more often",
-        min=1, max=1024,
+        min=1,
+        max=1024,
         soft_max=64,
         default=8,
     )

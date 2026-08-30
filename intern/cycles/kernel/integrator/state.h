@@ -213,6 +213,10 @@ struct IntegratorStateGPU {
   ccl_global uint *photon_hash;
   ccl_global uint *photon_stored;
 
+  /* Metal bidirectional light-vertex cache. */
+  ccl_global KernelBDPTVertex *bdpt_vertices;
+  ccl_global uint *bdpt_vertex_count;
+
   /* Divisor used to partition active indices by locality when sorting by material. */
   uint sort_partition_divisor;
 
@@ -221,6 +225,16 @@ struct IntegratorStateGPU {
   uint photon_iteration;
   float photon_radius;
   float photon_volume_radius;
+
+  uint bdpt_vertex_capacity;
+  uint bdpt_light_path_count;
+  float bdpt_light_path_sample_ratio;
+  int bdpt_buffer_full_x;
+  int bdpt_buffer_full_y;
+  int bdpt_buffer_width;
+  int bdpt_buffer_height;
+  int bdpt_buffer_offset;
+  int bdpt_buffer_stride;
 };
 
 /* Abstraction

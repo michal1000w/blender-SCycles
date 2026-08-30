@@ -200,6 +200,11 @@ KERNEL_STRUCT_MEMBER(integrator, int, caustics_reflective)
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_refractive)
 KERNEL_STRUCT_MEMBER(integrator, float, filter_glossy)
 KERNEL_STRUCT_MEMBER(integrator, float, differential_widen_scale)
+/* Metal bidirectional path tracing. Light subpaths are cached in render-working memory. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_bidirectional_path_tracing)
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_light_paths)
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_max_bounces)
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_update_samples)
 /* Progressive surface photon mapping. The map itself is render-working memory and its pointers
  * live in IntegratorStateGPU; these values are scene-level controls shared by emission/gather. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_photon_mapping)

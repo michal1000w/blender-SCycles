@@ -51,7 +51,13 @@ static bool device_supports_metal_features(const Device *device)
 
 bool Integrator::use_photon_mapping_on_device(const Device *device) const
 {
-  return get_use_photon_mapping() && device_supports_metal_features(device);
+  return get_use_photon_mapping() && !get_use_bidirectional_path_tracing() &&
+         device_supports_metal_features(device);
+}
+
+bool Integrator::use_bidirectional_path_tracing_on_device(const Device *device) const
+{
+  return get_use_bidirectional_path_tracing() && device_supports_metal_features(device);
 }
 
 static bool photon_input_is_varying(ShaderNode *node, const char *name)
@@ -229,6 +235,11 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
 
+  SOCKET_BOOLEAN(use_bidirectional_path_tracing, "Bidirectional Path Tracing", false);
+  SOCKET_INT(bdpt_light_paths, "BDPT Light Paths", 65536);
+  SOCKET_INT(bdpt_max_bounces, "BDPT Max Bounces", 8);
+  SOCKET_INT(bdpt_update_samples, "BDPT Update Samples", 8);
+
   SOCKET_BOOLEAN(use_photon_mapping, "Photon Mapping", false);
   SOCKET_INT(photon_count, "Photon Count", 65536);
   SOCKET_FLOAT(photon_radius, "Photon Radius", 0.1f);
@@ -399,6 +410,11 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   /* Photon mapping is currently scheduled by the GPU path tracer and enabled only on Metal.
    * Keeping the complete configuration in KernelData makes all regular shading kernels see an
    * immutable map description while a render batch is in flight. */
+  kintegrator->use_bidirectional_path_tracing = use_bidirectional_path_tracing_on_device(device);
+  kintegrator->bdpt_light_paths = clamp(bdpt_light_paths, 1024, 4 * 1024 * 1024);
+  kintegrator->bdpt_max_bounces = clamp(bdpt_max_bounces, 1, 64);
+  kintegrator->bdpt_update_samples = clamp(bdpt_update_samples, 1, 1024);
+
   kintegrator->use_photon_mapping = use_photon_mapping_on_device(device);
   if (kintegrator->use_photon_mapping) {
     /* MNEE and photon mapping estimate the same sharp-caustic transport. The regular camera
@@ -443,7 +459,6 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   else {
     kintegrator->photon_target = kintegrator->photon_scene;
   }
-
   kintegrator->filter_closures = 0;
   if (!use_direct_light) {
     kintegrator->filter_closures |= FILTER_CLOSURE_DIRECT_LIGHT;
@@ -649,6 +664,10 @@ uint64_t Integrator::get_kernel_features() const
 
   if (get_use_light_tree()) {
     kernel_features |= KERNEL_FEATURE_LIGHT_TREE;
+  }
+
+  if (get_use_bidirectional_path_tracing()) {
+    kernel_features |= KERNEL_FEATURE_BDPT;
   }
 
   return kernel_features;

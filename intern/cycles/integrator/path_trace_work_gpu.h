@@ -58,6 +58,8 @@ class PathTraceWorkGPU : public PathTraceWork {
   void alloc_integrator_path_split();
   void alloc_photon_mapping();
   void enqueue_photon_mapping(int start_sample);
+  void alloc_bidirectional_path_tracing();
+  void enqueue_bidirectional_light_paths(int start_sample, int batch_samples);
 
   /* Returns DEVICE_KERNEL_NUM if there are no scheduled kernels. */
   DeviceKernel get_most_queued_kernel() const;
@@ -158,6 +160,10 @@ class PathTraceWorkGPU : public PathTraceWork {
   device_only_memory<KernelPhoton> photons_;
   device_only_memory<uint> photon_hash_;
   device_vector<uint> photon_stored_;
+
+  /* Optional Metal bidirectional light-vertex cache. */
+  device_only_memory<KernelBDPTVertex> bdpt_vertices_;
+  device_vector<uint> bdpt_vertex_count_;
 
   /* Temporary buffer used by the copy_to_display() whenever graphics interoperability is not
    * available. Is allocated on-demand. */

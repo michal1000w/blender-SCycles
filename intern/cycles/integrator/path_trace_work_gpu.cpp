@@ -20,6 +20,22 @@
 
 CCL_NAMESPACE_BEGIN
 
+static bool use_bidirectional_path_tracing(const DeviceScene *device_scene)
+{
+  if (!device_scene->data.integrator.use_bidirectional_path_tracing) {
+    return false;
+  }
+
+  const KernelCamera &camera = device_scene->data.cam;
+  const CameraType camera_type = CameraType(camera.type);
+  if (camera.interocular_offset != 0.0f || camera_type == CAMERA_CUSTOM) {
+    return false;
+  }
+  return camera_type == CAMERA_PERSPECTIVE ||
+         ((camera_type == CAMERA_PANORAMA || camera_type == CAMERA_ORTHOGRAPHIC) &&
+          camera.aperturesize == 0.0f && camera.num_motion_steps == 0);
+}
+
 static size_t estimate_single_state_size(const uint64_t kernel_features)
 {
   size_t state_size = 0;
@@ -99,6 +115,8 @@ PathTraceWorkGPU::PathTraceWorkGPU(Device *device,
       photons_(device, "photon_map"),
       photon_hash_(device, "photon_hash"),
       photon_stored_(device, "photon_stored", MEM_READ_WRITE),
+      bdpt_vertices_(device, "bdpt_light_vertices"),
+      bdpt_vertex_count_(device, "bdpt_light_vertex_count", MEM_READ_WRITE),
       display_rgba_half_(device, "display buffer half", MEM_READ_WRITE),
       max_num_paths_(0),
       min_num_active_main_paths_(0),
@@ -315,6 +333,40 @@ void PathTraceWorkGPU::alloc_work_memory()
   alloc_integrator_sorting();
   alloc_integrator_path_split();
   alloc_photon_mapping();
+  alloc_bidirectional_path_tracing();
+}
+
+void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
+{
+  if (!use_bidirectional_path_tracing(device_scene_)) {
+    bdpt_vertices_.free();
+    bdpt_vertex_count_.free();
+    integrator_state_gpu_.bdpt_vertices = nullptr;
+    integrator_state_gpu_.bdpt_vertex_count = nullptr;
+    integrator_state_gpu_.bdpt_vertex_capacity = 0;
+    integrator_state_gpu_.bdpt_light_path_count = 0;
+    integrator_state_gpu_.bdpt_light_path_sample_ratio = 0.0f;
+    return;
+  }
+
+  const uint light_paths = uint(
+      min(device_scene_->data.integrator.bdpt_light_paths, max_num_paths_));
+  /* Each emitted light path reservoir-selects one potential surface bounce. The connection
+   * estimator carries the selection support explicitly, keeping memory linear in path count. */
+  const uint capacity = light_paths;
+
+  bdpt_vertices_.alloc_to_device(capacity, false);
+  if (bdpt_vertex_count_.size() != 1) {
+    bdpt_vertex_count_.free();
+    bdpt_vertex_count_.alloc(1);
+    bdpt_vertex_count_.zero_to_device();
+  }
+
+  integrator_state_gpu_.bdpt_vertices = (KernelBDPTVertex *)bdpt_vertices_.device_pointer;
+  integrator_state_gpu_.bdpt_vertex_count = (uint *)bdpt_vertex_count_.device_pointer;
+  integrator_state_gpu_.bdpt_vertex_capacity = capacity;
+  integrator_state_gpu_.bdpt_light_path_count = light_paths;
+  integrator_state_gpu_.bdpt_light_path_sample_ratio = float(light_paths);
 }
 
 void PathTraceWorkGPU::alloc_photon_mapping()
@@ -411,10 +463,12 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
   /* Camera oversampling is deliberately amortized over fewer photon maps. The expensive emitted
    * path budget stays approximately constant while the mapped volume term receives more complete
    * free-flight samples. */
-  const int map_update_samples = device_scene_->data.integrator.use_photon_mapping ?
-                                     device_scene_->data.integrator.photon_map_update_samples *
-                                         camera_samples :
-                                     samples_num;
+  const bool use_light_cache = device_scene_->data.integrator.use_photon_mapping ||
+                               use_bidirectional_path_tracing(device_scene_);
+  const int update_samples = device_scene_->data.integrator.use_photon_mapping ?
+                                 device_scene_->data.integrator.photon_map_update_samples :
+                                 device_scene_->data.integrator.bdpt_update_samples;
+  const int map_update_samples = use_light_cache ? update_samples * camera_samples : samples_num;
 
   /* A finite photon map is one Monte Carlo realization. Reusing it for an arbitrarily large
    * camera batch leaves its density-estimation noise frozen in the image, regardless of the
@@ -432,13 +486,17 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
 
     enqueue_reset();
     enqueue_photon_mapping(batch_start_sample);
+    enqueue_bidirectional_light_paths(batch_start_sample, batch_samples);
 
     bool batch_complete = false;
     /* TODO: set a hard limit in case of undetected kernel failures? */
     while (true) {
       /* Enqueue work from the scheduler, on start or when there are not enough
        * paths to keep the device occupied. */
-      bool finished;
+      /* enqueue_work_tiles() may return early while a non-intersection kernel is queued. Keep the
+       * completion flag deterministic in that case; an indeterminate/stale true value would skip
+       * the queued work and prematurely finish a refreshed light-cache batch. */
+      bool finished = false;
       if (enqueue_work_tiles(finished)) {
         if (!update_queue_counter_and_cache()) {
           batch_complete = false;
@@ -541,6 +599,17 @@ void PathTraceWorkGPU::enqueue_reset()
   if (integrator_queue_counter_.host_pointer) {
     memset(integrator_queue_counter_.data(), 0, integrator_queue_counter_.memory_size());
   }
+
+  /* All states have just been invalidated, so allocation of split main and shadow paths must
+   * restart at the beginning of their arrays as well. This normally only mattered once per
+   * render, but photon and BDPT cache refreshes deliberately start multiple independent batches.
+   * Leaving either bump allocator at its previous high-water mark eventually makes valid shadow
+   * branches silently run out of state slots. */
+  integrator_next_main_path_index_.data()[0] = 0;
+  integrator_next_shadow_path_index_.data()[0] = 0;
+  queue_->copy_to_device(integrator_next_main_path_index_);
+  queue_->copy_to_device(integrator_next_shadow_path_index_);
+  max_active_main_path_index_ = 0;
 }
 
 void PathTraceWorkGPU::enqueue_photon_mapping(const int start_sample)
@@ -574,6 +643,39 @@ void PathTraceWorkGPU::enqueue_photon_mapping(const int start_sample)
   const int num_photons = int(integrator_state_gpu_.photon_capacity);
   const DeviceKernelArguments args(&num_photons, &iteration);
   queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT, num_photons, args);
+}
+
+void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
+                                                         const int batch_samples)
+{
+  if (!use_bidirectional_path_tracing(device_scene_) ||
+      integrator_state_gpu_.bdpt_light_path_count == 0)
+  {
+    return;
+  }
+
+  queue_->zero_to_device(bdpt_vertex_count_);
+  const int iteration = max(start_sample, 0);
+  const int num_light_paths = int(integrator_state_gpu_.bdpt_light_path_count);
+  /* MIS operates on the complete estimator for this cache batch: N light subpaths compete with B
+   * camera samples per pixel. The emitted-path normalization still uses N itself. */
+  integrator_state_gpu_.bdpt_light_path_sample_ratio = float(num_light_paths) /
+                                                       float(max(batch_samples, 1));
+  integrator_state_gpu_.bdpt_buffer_full_x = effective_buffer_params_.full_x;
+  integrator_state_gpu_.bdpt_buffer_full_y = effective_buffer_params_.full_y;
+  integrator_state_gpu_.bdpt_buffer_width = effective_buffer_params_.width;
+  integrator_state_gpu_.bdpt_buffer_height = effective_buffer_params_.height;
+  integrator_state_gpu_.bdpt_buffer_offset = effective_buffer_params_.offset;
+  integrator_state_gpu_.bdpt_buffer_stride = effective_buffer_params_.stride;
+  device_->const_copy_to(
+      "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
+  const DeviceKernelArguments args(&num_light_paths, &iteration, &batch_samples);
+  queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE, num_light_paths, args);
+
+  /* Light tracing can enqueue at most one sensor shadow per light path. Synchronize this single
+   * counter before camera work starts so later shadow compaction cannot overwrite those paths. */
+  queue_->copy_from_device(integrator_next_shadow_path_index_);
+  queue_->synchronize();
 }
 
 bool PathTraceWorkGPU::enqueue_path_iteration()
@@ -619,9 +721,20 @@ bool PathTraceWorkGPU::enqueue_path_iteration()
         return true;
       }
     }
-    else if (kernel_creates_ao_paths(kernel)) {
-      /* AO kernel creates two shadow paths, so limit number of states to schedule. */
-      num_paths_limit = available_shadow_paths / 2;
+    else if (kernel_creates_ao_paths(kernel) ||
+             (use_bidirectional_path_tracing(device_scene_) &&
+              (kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE ||
+               kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE)))
+    {
+      /* Surface shading can branch to direct light, AO, and a BDPT vertex connection. */
+      int shadow_paths_per_state = 1;
+      if (kernel_creates_ao_paths(kernel)) {
+        shadow_paths_per_state++;
+      }
+      if (use_bidirectional_path_tracing(device_scene_)) {
+        shadow_paths_per_state++;
+      }
+      num_paths_limit = available_shadow_paths / shadow_paths_per_state;
     }
   }
 

@@ -731,6 +731,37 @@ class CYCLES_RENDER_PT_light_paths_photon_mapping(CyclesButtonsPanel, Panel):
         col.prop(cscene, "photon_normal_threshold")
 
 
+class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
+    bl_label = "Bidirectional Path Tracing"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_bidirectional_path_tracing", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cscene = context.scene.cycles
+        metal_enabled = use_metal(context)
+        layout.active = cscene.use_bidirectional_path_tracing and metal_enabled
+
+        if not metal_enabled:
+            box = layout.box()
+            box.label(text="Requires an active Metal GPU device", icon='INFO')
+
+        col = layout.column(align=True)
+        col.prop(cscene, "bdpt_light_paths")
+        col.prop(cscene, "bdpt_max_bounces")
+        col.prop(cscene, "bdpt_update_samples")
+
+        if cscene.use_photon_mapping:
+            box = layout.box()
+            box.label(text="Photon Mapping is ignored while BDPT is enabled", icon='INFO')
+
+
 class CYCLES_RENDER_PT_light_paths_fast_gi(CyclesButtonsPanel, Panel):
     bl_label = "Fast GI Approximation"
     bl_options = {'DEFAULT_CLOSED'}
@@ -2647,6 +2678,7 @@ classes = (
     CYCLES_RENDER_PT_light_paths_max_bounces,
     CYCLES_RENDER_PT_light_paths_clamping,
     CYCLES_RENDER_PT_light_paths_caustics,
+    CYCLES_RENDER_PT_light_paths_bidirectional,
     CYCLES_RENDER_PT_light_paths_photon_mapping,
     CYCLES_RENDER_PT_light_paths_fast_gi,
     CYCLES_RENDER_PT_volumes,
