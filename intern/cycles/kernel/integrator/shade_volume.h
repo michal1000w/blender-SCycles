@@ -1905,7 +1905,8 @@ ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg
                                                                 const ccl_private Ray *ray,
                                                                 ccl_private Spectrum *power,
                                                                 ccl_private float3 *scatter_P,
-                                                                ccl_private int *receiver_object)
+                                                                ccl_private int *receiver_object,
+                                                                ccl_private ShaderVolumePhases *phases = nullptr)
 {
   if (integrator_state_volume_stack_is_empty(kg, state)) {
     return PHOTON_VOLUME_ATTENUATED;
@@ -1946,6 +1947,9 @@ ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg
   }
   if (result.indirect_scatter) {
     *scatter_P = ray->P + result.indirect_t * ray->D;
+    if (phases != nullptr) {
+      *phases = result.indirect_phases;
+    }
     return PHOTON_VOLUME_SCATTERED;
   }
   return PHOTON_VOLUME_ATTENUATED;
@@ -2501,7 +2505,7 @@ ccl_device_forceinline void volume_integrate_ray_marching(
 ccl_device_forceinline void integrate_volume_direct_light(
     KernelGlobals kg,
     IntegratorState state,
-    const ccl_private ShaderData *ccl_restrict sd,
+    ccl_private ShaderData *ccl_restrict sd,
     const ccl_private RNGState *ccl_restrict rng_state,
     const float3 P,
     const ccl_private ShaderVolumePhases *ccl_restrict phases,
@@ -2554,7 +2558,14 @@ ccl_device_forceinline void integrate_volume_direct_light(
   BsdfEval phase_eval ccl_optional_struct_init;
   const float phase_pdf = volume_shader_phase_eval(
       kg, state, sd, phases, ls.D, &phase_eval, ls.shader);
-  const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, phase_pdf);
+  float mis_weight;
+#  ifdef __KERNEL_METAL__
+  mis_weight = bdpt_enabled_for_surface_path(state) ?
+                   bdpt_volume_nee_mis_weight(kg, state, sd, phases, P, &ls, phase_pdf) :
+                   light_sample_mis_weight_nee(kg, ls.pdf, phase_pdf);
+#  else
+  mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, phase_pdf);
+#  endif
   bsdf_eval_mul(&phase_eval, light_shader_eval * ls.eval_fac / ls.pdf * mis_weight);
 
   /* Path termination for constant light shader. */
@@ -3011,6 +3022,18 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   }
 #  endif
 
+#  ifdef __KERNEL_METAL__
+  if (bdpt_enabled_for_surface_path(state)) {
+    const float3 original_wi = sd->wi;
+    sd->wi = normalize(phase_wo);
+    BsdfEval reverse_eval;
+    const float reverse_pdf = volume_shader_phase_eval(
+        kg, state, sd, phases, original_wi, &reverse_eval, SHADER_USE_MIS);
+    sd->wi = original_wi;
+    bdpt_recursive_mis_after_phase(state, phase_pdf, reverse_pdf);
+  }
+#  endif
+
   path_state_next(kg, state, label, sd->runtime_flag);
   return true;
 }
@@ -3128,6 +3151,14 @@ volume_integrate_event(KernelGlobals kg,
 
   if (result.indirect_scatter) {
     sd->P = ray->P + result.indirect_t * ray->D;
+
+#  ifdef __KERNEL_METAL__
+    if (bdpt_enabled_for_surface_path(state)) {
+      const float3 previous_P = ray->P + ray->D * ray->tmin;
+      sd->ray_length = len(sd->P - previous_P);
+      bdpt_recursive_mis_after_volume_hit(state, sd, sd->ray_length);
+    }
+#  endif
 
 #  ifdef __KERNEL_METAL__
     if (kernel_data.integrator.use_photon_mapping) {
