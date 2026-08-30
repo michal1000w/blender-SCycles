@@ -522,31 +522,6 @@ ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
 }
 
-#ifdef __VOLUME__
-ccl_device_inline void bdpt_recursive_mis_after_volume_hit(IntegratorState state,
-                                                           const ccl_private ShaderData *sd,
-                                                           const float distance)
-{
-  float d_vcm;
-  float d_vc;
-  bdpt_recursive_mis_before_measure_conversion(state, sd, &d_vcm, &d_vc);
-  d_vcm *= sqr(max(distance, 1.0e-10f));
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm;
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
-}
-
-ccl_device_inline void bdpt_recursive_mis_after_phase(IntegratorState state,
-                                                      const float forward_pdf,
-                                                      const float reverse_pdf)
-{
-  const float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm);
-  const float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc);
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) =
-      (d_vc * reverse_pdf + d_vcm) / bdpt_safe_pdf(forward_pdf);
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 1.0f / bdpt_safe_pdf(forward_pdf);
-}
-#endif
-
 ccl_device_inline void bdpt_recursive_mis_after_scatter(IntegratorState state,
                                                         const int label,
                                                         const float cos_out,
@@ -1241,7 +1216,9 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, diffuse_bounce) = 1;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, glossy_bounce) = 0;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transmission_bounce) = 0;
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = light_vertex->path_length - 1u;
+  /* path_length includes both endpoints. A first light-side scattering vertex is the camera
+   * path's bounce zero and belongs in the direct pass. */
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = light_vertex->path_length - 2u;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = contribution;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = light_vertex->light_group + 1;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = PATH_RAY_VISIBILITY_CAMERA;
@@ -1359,9 +1336,8 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
       float3 scatter_P;
       int receiver_object = OBJECT_NONE;
-      ShaderVolumePhases phases;
       const PhotonVolumeSampleEvent volume_event = photon_volume_sample_segment(
-          kg, state, &ray, &throughput, &scatter_P, &receiver_object, &phases);
+          kg, state, &ray, &throughput, &scatter_P, &receiver_object);
       if (volume_event == PHOTON_VOLUME_CACHE_MISS) {
         return;
       }
@@ -1378,7 +1354,10 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
           d_vcm *= max(len_squared(scatter_P - ray.P), 1.0e-20f);
         }
 
-        if (uint(bounce) == cache_bounce) {
+        /* The compact recursion does not carry repeated free-flight strategy densities. Cache the
+         * first light-to-medium vertex (balanced against volume NEE), then return a valid zero
+         * sample for longer light-side medium paths. Camera paths retain full multiple scattering. */
+        if (bounce == 0 && cache_bounce == 0u) {
           bdpt_store_light_vertex(kg,
                                   &volume_sd,
                                   &ray,
@@ -1393,46 +1372,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                   light_wavelength_rand);
         }
 
-        RNGState rng_state;
-        path_state_rng_load(state, &rng_state);
-        float2 rand_phase = path_state_rng_2D(kg, &rng_state, PRNG_VOLUME_PHASE);
-        const ccl_private ShaderVolumeClosure *svc = volume_shader_phase_pick(&phases,
-                                                                              &rand_phase);
-        BsdfEval phase_eval;
-        float3 phase_wo;
-        float phase_pdf = 0.0f;
-        float sampled_roughness = 1.0f;
-        const int label = volume_shader_phase_sample(&volume_sd,
-                                                     &phases,
-                                                     svc,
-                                                     rand_phase,
-                                                     &phase_eval,
-                                                     &phase_wo,
-                                                     &phase_pdf,
-                                                     &sampled_roughness);
-        if (!(phase_pdf > 0.0f) || bsdf_eval_is_zero(&phase_eval)) {
-          return;
-        }
-        throughput *= bsdf_eval_sum(&phase_eval) / phase_pdf;
-        if (!isfinite_safe(throughput)) {
-          return;
-        }
-
-        /* Phase functions use solid-angle measure on both sides and have no cosine factors. */
-        const float reverse_pdf = phase_pdf;
-        d_vc = (d_vc * reverse_pdf + d_vcm) / bdpt_safe_pdf(phase_pdf);
-        d_vcm = 1.0f / bdpt_safe_pdf(phase_pdf);
-
-        path_state_next(kg, state, label, volume_sd.runtime_flag);
-        ray.P = scatter_P;
-        ray.D = normalize(phase_wo);
-        ray.tmin = 0.0f;
-        ray.tmax = FLT_MAX;
-        ray.self.prim = PRIM_NONE;
-        ray.self.object = OBJECT_NONE;
-        ray.self.light_prim = PRIM_NONE;
-        ray.self.light_object = OBJECT_NONE;
-        continue;
+        return;
       }
     }
 #endif
@@ -1664,7 +1604,7 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
       hash_uint3(vertex_index, iteration, uint(kernel_data.integrator.seed) ^ 0x73656e73u));
   photon_state_init(state, rng, iteration);
   INTEGRATOR_STATE_WRITE(state, path, flag) = light_vertex.flag;
-  INTEGRATOR_STATE_WRITE(state, path, bounce) = light_vertex.path_length - 1u;
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = light_vertex.path_length - 2u;
 
 #ifdef __VOLUME__
   /* Dedicated sensor work does not inherit the generating light path's medium stack. Rebuild the
