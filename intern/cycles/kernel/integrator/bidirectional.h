@@ -42,7 +42,8 @@ ccl_device_inline bool bdpt_enabled_for_surface_path(ConstIntegratorState state)
 {
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_camera_supported() &&
-         !(path_flag & (PATH_RAY_SHADOW_CATCHER_HIT | PATH_RAY_SHADOW_CATCHER_PASS));
+         !(path_flag & (PATH_RAY_SHADOW_CATCHER_HIT | PATH_RAY_SHADOW_CATCHER_PASS |
+                        PATH_RAY_BDPT_UNSUPPORTED));
 }
 
 ccl_device_inline float bdpt_safe_pdf(const float pdf)
