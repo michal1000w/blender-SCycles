@@ -338,7 +338,7 @@ def build_scene(options):
         pane_mesh.from_pydata(vertices, [], [(0, 3, 2, 1), (4, 5, 6, 7)])
         pane_mesh.update()
         for polygon in pane_mesh.polygons:
-            polygon.use_smooth = True
+            polygon.use_smooth = not options.flat_view_glass
         pane = bpy.data.objects.new("Camera Glass Pane", pane_mesh)
         scene.collection.objects.link(pane)
         pane.location = pane_location
@@ -466,6 +466,7 @@ def main():
     parser.add_argument("--backdrop", action="store_true")
     parser.add_argument("--no-glass", action="store_true")
     parser.add_argument("--view-glass", action="store_true")
+    parser.add_argument("--flat-view-glass", action="store_true")
     parser.add_argument("--dispersion", type=float, default=0.0)
     parser.add_argument("--no-light-tree", action="store_true")
     parser.add_argument("--aperture", type=float, default=0.0)

@@ -1354,10 +1354,13 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
           d_vcm *= max(len_squared(scatter_P - ray.P), 1.0e-20f);
         }
 
-        /* The compact recursion does not carry repeated free-flight strategy densities. Cache the
-         * first light-to-medium vertex (balanced against volume NEE), then return a valid zero
-         * sample for longer light-side medium paths. Camera paths retain full multiple scattering. */
-        if (bounce == 0 && cache_bounce == 0u) {
+        /* This is the first light-side medium collision, but it may follow any number of surface
+         * events. In particular, L-S+-V-E is the volumetric-caustic transport class produced by a
+         * prism. Cache it with the same uniformly selected path-length strategy as surface
+         * vertices. We return immediately below because repeated free-flight strategy densities
+         * are not represented by the compact recursion; camera paths retain full multiple
+         * scattering after their first collision. */
+        if (uint(bounce) == cache_bounce) {
           bdpt_store_light_vertex(kg,
                                   &volume_sd,
                                   &ray,
