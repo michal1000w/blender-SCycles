@@ -180,20 +180,33 @@ ccl_device_inline void mnee_setup_manifold_vertex(KernelGlobals kg,
     vtx->ng = -vtx->ng;
   }
 
-  /* Shading normals: Interpolate normals between vertices. */
-  float n_len;
-  vtx->n = normalize_len(normals[0] * (1.0f - sd_vtx->u - sd_vtx->v) + normals[1] * sd_vtx->u +
-                             normals[2] * sd_vtx->v,
-                         &n_len);
+  float3 dn_du;
+  float3 dn_dv;
+  if (sd_vtx->shader & SHADER_SMOOTH_NORMAL) {
+    /* Shading normals: Interpolate normals between vertices. */
+    float n_len;
+    vtx->n = normalize_len(normals[0] * (1.0f - sd_vtx->u - sd_vtx->v) +
+                               normals[1] * sd_vtx->u + normals[2] * sd_vtx->v,
+                           &n_len);
 
-  /* Shading normal derivatives WRT barycentric (u, v)
-   * we calculate the derivative of n = |u*n0 + v*n1 + (1-u-v)*n2| using:
-   * d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)| - f(u)/|f(u)|^3 <f(u), d/du f(u)>. */
-  const float inv_n_len = 1.f / n_len;
-  float3 dn_du = inv_n_len * (normals[1] - normals[0]);
-  float3 dn_dv = inv_n_len * (normals[2] - normals[0]);
-  dn_du -= vtx->n * dot(vtx->n, dn_du);
-  dn_dv -= vtx->n * dot(vtx->n, dn_dv);
+    /* Shading normal derivatives WRT barycentric (u, v)
+     * we calculate the derivative of n = |u*n0 + v*n1 + (1-u-v)*n2| using:
+     * d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)| - f(u)/|f(u)|^3 <f(u), d/du f(u)>. */
+    const float inv_n_len = 1.f / n_len;
+    dn_du = inv_n_len * (normals[1] - normals[0]);
+    dn_dv = inv_n_len * (normals[2] - normals[0]);
+    dn_du -= vtx->n * dot(vtx->n, dn_du);
+    dn_dv -= vtx->n * dot(vtx->n, dn_dv);
+  }
+  else {
+    /* A flat triangle is still a differentiable planar manifold in its interior. Its shading
+     * normal is the geometric normal and its derivatives are exactly zero. This is essential for
+     * faceted optical elements such as prisms; requiring interpolated normals incorrectly removes
+     * all specular connections through them. Normal-mapped flat faces are rejected by the caller. */
+    vtx->n = vtx->ng;
+    dn_du = zero_float3();
+    dn_dv = zero_float3();
+  }
 
   /* Orthonormalize (dp_du,dp_dv) using a linear transformation, which
    * we use on (dn_du,dn_dv) as well so the new (u,v) are consistent. */
@@ -1033,13 +1046,6 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
       }
 #endif
 
-      /* Reject caster if smooth normals are not available: Manifold exploration assumes local
-       * differential geometry can be created at any point on the surface which is not possible if
-       * normals are not smooth. */
-      if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
-        return SHADER_EVAL_EMPTY;
-      }
-
       /* Last bool argument is the MNEE flag (for TINY_MAX_CLOSURE cap in kernel_shader.h). */
       surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
           kg, state, sd_mnee, nullptr, PATH_RAY_VISIBILITY_DIFFUSE, PATH_RAY_FLAG_NONE, true);
@@ -1067,6 +1073,14 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
         ccl_private ShaderClosure *bsdf = &sd_mnee->closure[ci];
         if (CLOSURE_IS_REFRACTION(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type)) {
           /* Note that Glass closures are treated as refractive further below. */
+
+          /* Flat faces have an exact zero normal derivative, but a bump/normal-mapped flat face
+           * does not. Do not silently use the geometric derivative for a perturbed closure. */
+          if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL) &&
+              dot(bsdf->N, sd_mnee->Ng) < 1.0f - 1.0e-5f)
+          {
+            return SHADER_EVAL_EMPTY;
+          }
 
           found_refractive_microfacet_bsdf = true;
           ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
