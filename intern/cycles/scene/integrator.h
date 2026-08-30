@@ -41,6 +41,7 @@ class Integrator : public Node {
   NODE_DECLARE
 
   bool use_photon_mapping_on_device(const Device *device) const;
+  bool use_bidirectional_path_tracing_on_device(const Device *device) const;
 
   NODE_SOCKET_API(int, min_bounce)
   NODE_SOCKET_API(int, max_bounce)
@@ -82,6 +83,11 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(float, filter_glossy)
+
+  NODE_SOCKET_API(bool, use_bidirectional_path_tracing)
+  NODE_SOCKET_API(int, bdpt_light_paths)
+  NODE_SOCKET_API(int, bdpt_max_bounces)
+  NODE_SOCKET_API(int, bdpt_update_samples)
 
   NODE_SOCKET_API(bool, use_photon_mapping)
   NODE_SOCKET_API(int, photon_count)

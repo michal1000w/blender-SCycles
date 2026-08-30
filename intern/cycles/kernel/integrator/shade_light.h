@@ -64,12 +64,26 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
   }
 
   /* MIS weighting. */
-  const float mis_weight = light_sample_mis_weight_forward_lamp(
+  float mis_weight;
+#ifdef __KERNEL_METAL__
+  const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
+  const bool bdpt_emitter_supported = !(
+      (klight->type == LIGHT_POINT || klight->type == LIGHT_SPOT) && !klight->spot.is_sphere &&
+      klight->spot.radius > 0.0f);
+  mis_weight = (bdpt_enabled_for_surface_path(state) && bdpt_emitter_supported) ?
+                   bdpt_emission_mis_weight_lamp(kg, state, klight, ray_P, ray_D, isect.t) :
+                   light_sample_mis_weight_forward_lamp(
+                       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
+#else
+  mis_weight = light_sample_mis_weight_forward_lamp(
       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
+#endif
 
   /* Write to render buffer. */
   guiding_record_surface_emission(kg, state, eval, mis_weight);
+#ifndef __KERNEL_METAL__
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
+#endif
   film_write_surface_emission(
       kg, state, eval, mis_weight, render_buffer, object_lightgroup(kg, klight->object_id));
   return SHADER_EVAL_OK;
