@@ -125,6 +125,58 @@ def main():
         "Lambertian pure light tracing differs from PT by at least 1%",
     )
 
+    # A path stopped after its first connectible hit has exactly one reservoir candidate,
+    # regardless of the configured BDPT maximum. This catches the old fixed-bounce selection,
+    # which retained only 1/max_bounces of these paths and amplified the resulting sparse splats.
+    short_paths_1 = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "short_path_support_1",
+        common
+        + [
+            "--diffuse-node",
+            "--bdpt",
+            "--samples",
+            "1",
+            "--update-samples",
+            "1",
+            "--max-bounces",
+            "1",
+            "--light-max-bounces",
+            "0",
+            "--light-paths",
+            "262144",
+        ],
+    )
+    short_paths_32 = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "short_path_support_32",
+        common
+        + [
+            "--diffuse-node",
+            "--bdpt",
+            "--samples",
+            "1",
+            "--update-samples",
+            "1",
+            "--max-bounces",
+            "32",
+            "--light-max-bounces",
+            "0",
+            "--light-paths",
+            "262144",
+        ],
+    )
+    require(
+        relative_error(short_paths_32["mean"], short_paths_1["mean"]) < 1.0e-6
+        and relative_error(short_paths_32["p999"], short_paths_1["p999"]) < 1.0e-6
+        and relative_error(short_paths_32["peak"], short_paths_1["peak"]) < 1.0e-6,
+        "Configured BDPT maximum amplified one-vertex light paths",
+    )
+
     diffuse_passes = run_render(
         options.blender,
         options.smoke,
@@ -284,6 +336,55 @@ def main():
     require(
         caustic_bdpt["p999"] > 4.0 * caustic_pt["p999"] and caustic_bdpt["peak"] > 20.0,
         "BDPT did not resolve the focused glass caustic",
+    )
+
+    opaque_reflective = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "opaque_reflective_caustic",
+        [
+            "--bdpt",
+            "--opaque-caster",
+            "--samples",
+            "8",
+            "--resolution",
+            "64",
+            "--light-paths",
+            "262144",
+            "--update-samples",
+            "8",
+            "--max-bounces",
+            "8",
+            "--report-passes",
+        ],
+    )
+    opaque_no_reflective = run_render(
+        options.blender,
+        options.smoke,
+        output_dir,
+        "opaque_reflective_caustic_disabled",
+        [
+            "--bdpt",
+            "--opaque-caster",
+            "--no-reflective-caustics",
+            "--samples",
+            "8",
+            "--resolution",
+            "64",
+            "--light-paths",
+            "262144",
+            "--update-samples",
+            "8",
+            "--max-bounces",
+            "8",
+            "--report-passes",
+        ],
+    )
+    require(
+        opaque_no_reflective["diffuse_indirect_mean"]
+        < 0.15 * opaque_reflective["diffuse_indirect_mean"],
+        "Disabling reflective caustics did not remove opaque BDPT caustic wings",
     )
 
     view_glass_pt = run_render(
@@ -988,8 +1089,9 @@ def main():
         "Specular light subpaths did not produce a volume-indirect caustic contribution",
     )
     require(
-        volume_caustic["p999"] > 1.2 * volume_direct_only["p999"],
-        "Post-glass volume connection did not create a focused volumetric highlight",
+        volume_caustic["volume_indirect_p999"]
+        > 4.0 * volume_caustic["volume_indirect_mean"],
+        "Post-glass volume connection was not spatially focused",
     )
 
     multiscatter_volume_pt = run_render(
