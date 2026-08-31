@@ -127,6 +127,8 @@ def build_scene(options):
         scene.cycles.adaptive_threshold = 0.01
         scene.cycles.adaptive_min_samples = 16
     scene.cycles.use_photon_mapping = False
+    scene.cycles.caustics_reflective = not options.no_reflective_caustics
+    scene.cycles.caustics_refractive = not options.no_refractive_caustics
     scene.cycles.use_light_tree = not options.no_light_tree
     scene.cycles.use_bidirectional_path_tracing = options.bdpt
     scene.cycles.bdpt_light_paths = options.light_paths
@@ -233,15 +235,20 @@ def build_scene(options):
             )
         )
     elif not options.no_glass and not options.volume_only:
-        bpy.ops.mesh.primitive_uv_sphere_add(
-            segments=64, ring_count=32, radius=1.0, location=(0.0, 0.0, 1.25)
-        )
+        if options.opaque_caster:
+            bpy.ops.mesh.primitive_ico_sphere_add(
+                subdivisions=3, radius=1.0, location=(0.0, 0.0, 1.25)
+            )
+        else:
+            bpy.ops.mesh.primitive_uv_sphere_add(
+                segments=64, ring_count=32, radius=1.0, location=(0.0, 0.0, 1.25)
+            )
         glass = bpy.context.object
         glass.data.materials.append(
             principled_material(
-                "Glass Caster",
-                (1.0, 1.0, 1.0),
-                transmission=1.0,
+                "Opaque Reflector" if options.opaque_caster else "Glass Caster",
+                (0.05, 0.05, 0.05) if options.opaque_caster else (1.0, 1.0, 1.0),
+                transmission=0.0 if options.opaque_caster else 1.0,
                 roughness=0.0,
                 ior=1.52,
                 dispersion=options.dispersion,
@@ -436,13 +443,24 @@ def build_scene(options):
                     matching_channels = list(range(min(3, spec.nchannels)))
                 if len(matching_channels) >= 3:
                     values = pixels_for_pass[..., matching_channels[:3]]
-                    found[metric_name] = float(values.mean())
+                    ordered_values = sorted(values.reshape(-1).tolist())
+                    found[metric_name] = (
+                        float(values.mean()),
+                        ordered_values[
+                            min(int(0.999 * len(ordered_values)), len(ordered_values) - 1)
+                        ],
+                        ordered_values[-1],
+                    )
             subimage += 1
         image_input.close()
         missing = sorted(set(wanted.values()) - set(found))
         if missing:
             raise RuntimeError(f"Missing render passes {missing}; available={available}")
-        pass_metrics.extend(f"{name}_mean={found[name]:.9g}" for name in wanted.values())
+        for name in wanted.values():
+            mean, p999, peak = found[name]
+            pass_metrics.extend(
+                (f"{name}_mean={mean:.9g}", f"{name}_p999={p999:.9g}", f"{name}_peak={peak:.9g}")
+            )
     print(
         "BDPT_SMOKE "
         f"bdpt={int(options.bdpt)} camera={options.camera_type} light={light_type} "
@@ -465,6 +483,9 @@ def main():
     parser.add_argument("--max-bounces", type=int, default=8)
     parser.add_argument("--backdrop", action="store_true")
     parser.add_argument("--no-glass", action="store_true")
+    parser.add_argument("--opaque-caster", action="store_true")
+    parser.add_argument("--no-reflective-caustics", action="store_true")
+    parser.add_argument("--no-refractive-caustics", action="store_true")
     parser.add_argument("--view-glass", action="store_true")
     parser.add_argument("--flat-view-glass", action="store_true")
     parser.add_argument("--dispersion", type=float, default=0.0)
