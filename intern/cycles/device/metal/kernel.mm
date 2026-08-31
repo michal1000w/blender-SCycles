@@ -420,12 +420,16 @@ bool MetalKernelPipeline::should_use_binary_archive() const
       return true;
     }
 
-    if ((device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
+    if (pso_type == PSO_SPECIALIZED_INTERSECT ||
+        (device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
          device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW) ||
         (device_kernel >= DEVICE_KERNEL_SHADER_EVAL_DISPLACE &&
          device_kernel <= DEVICE_KERNEL_SHADER_EVAL_VOLUME_DENSITY))
     {
-      /* Archive all shade kernels - they take a long time to compile. */
+      /* Archive all specialized intersection and shade kernels. Intersection kernels used to be
+       * left to Metal's opaque system shader cache on the assumption that they were cheap. Pixel
+       * displacement and bidirectional/photon tracing make that assumption invalid, and losing
+       * the system cache otherwise forces full recompilation. */
       return true;
     }
 
@@ -435,7 +439,8 @@ bool MetalKernelPipeline::should_use_binary_archive() const
   return false;
 }
 
-static MTLFunctionConstantValues *GetConstantValues(const KernelData *data = nullptr)
+static MTLFunctionConstantValues *GetConstantValues(
+    const KernelData *data = nullptr, const MetalPipelineType pso_type = PSO_GENERIC)
 {
   MTLFunctionConstantValues *constant_values = [MTLFunctionConstantValues new];
 
@@ -446,6 +451,12 @@ static MTLFunctionConstantValues *GetConstantValues(const KernelData *data = nul
   KernelData zero_data = {0};
   if (!data) {
     data = &zero_data;
+  }
+  KernelData specialization_data = *data;
+  if (pso_type == PSO_SPECIALIZED_INTERSECT) {
+    specialization_data.integrator.use_bidirectional_path_tracing = 0;
+    specialization_data.integrator.use_photon_mapping = 0;
+    data = &specialization_data;
   }
   [constant_values setConstantValue:&zero_data type:MTLDataType_int atIndex:Kernel_DummyConstant];
 
@@ -563,7 +574,7 @@ id<MTLFunction> MetalKernelPipeline::make_intersection_function(const char *func
   desc.name = [@(function_name) copy];
 
   if (pso_type != PSO_GENERIC) {
-    desc.constantValues = GetConstantValues(&kernel_data_);
+    desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
   }
   else {
     desc.constantValues = GetConstantValues();
@@ -597,7 +608,7 @@ void MetalKernelPipeline::compile()
   func_desc.name = [@(function_name.c_str()) copy];
 
   if (pso_type != PSO_GENERIC) {
-    func_desc.constantValues = GetConstantValues(&kernel_data_);
+    func_desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
   }
   else {
     func_desc.constantValues = GetConstantValues();
@@ -883,7 +894,10 @@ void MetalKernelPipeline::compile()
                      [[error localizedDescription] UTF8String]);
       }
       else {
-        path_cache_kernel_mark_added_and_clear_old(metalbin_path);
+        /* Scene specialization produces a content-addressed archive variant. Keep enough variants
+         * for normal production scene switching instead of cycling through the old five-entry
+         * window and repeatedly recompiling unchanged kernels. */
+        path_cache_kernel_mark_added_and_clear_old(metalbin_path, 32);
       }
     }
   }

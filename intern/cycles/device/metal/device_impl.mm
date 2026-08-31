@@ -10,6 +10,7 @@
 #  include "device/metal/device.h"
 #  include "device/metal/device_impl.h"
 
+#  include "scene/integrator.h"
 #  include "scene/scene.h"
 
 #  include "session/display_driver.h"
@@ -528,6 +529,14 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
 
   string constant_values;
   if (pso_type != PSO_GENERIC) {
+    KernelData specialization_data = launch_params->data;
+    if (pso_type == PSO_SPECIALIZED_INTERSECT) {
+      /* These switches are consumed by initialization and shading, never by a specialized
+       * intersection entry point. Do not let them pull the large BDPT/photon call graphs into
+       * displaced intersection specialization or fragment its cache. */
+      specialization_data.integrator.use_bidirectional_path_tracing = 0;
+      specialization_data.integrator.use_photon_mapping = 0;
+    }
     bool next_member_is_specialized = true;
 
 #  define KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE next_member_is_specialized = false;
@@ -537,7 +546,7 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
 #  define KERNEL_STRUCT_MEMBER(parent, _type, name) \
     if (next_member_is_specialized) { \
       constant_values += string(#parent "." #name "=") + \
-                         to_string(_type(launch_params->data.parent.name)) + "\n"; \
+                         to_string(_type(specialization_data.parent.name)) + "\n"; \
     } \
     else { \
       next_member_is_specialized = true; \
@@ -1025,6 +1034,17 @@ void MetalDevice::optimize_for_scene(Scene *scene)
                                                   int(PSO_SPECIALIZED_SHADE));
   }
 
+  const bool use_bidirectional_or_photons =
+      scene->integrator->use_bidirectional_path_tracing_on_device(this) ||
+      scene->integrator->use_photon_mapping_on_device(this);
+  if (use_bidirectional_or_photons && !use_pixel_displacement) {
+    /* The bidirectional/photon kernels dominate render time, while specializing the monolithic
+     * surface shader adds tens of seconds of compilation for about one percent end-to-end gain.
+     * Keep the valuable intersection specialization and use the generic shade pipeline. */
+    specialization_level = (MetalPipelineType)min(int(specialization_level),
+                                                  int(PSO_SPECIALIZED_INTERSECT));
+  }
+
   if (!scene->params.background && !use_pixel_displacement) {
     /* In live viewport, don't specialize beyond intersection kernels for responsiveness. */
     specialization_level = (MetalPipelineType)min(specialization_level, PSO_SPECIALIZED_INTERSECT);
@@ -1034,8 +1054,19 @@ void MetalDevice::optimize_for_scene(Scene *scene)
    * existing "optimize_for_scene" request in flight. */
   int this_device_id = this->device_id;
   auto specialize_kernels_fn = ^() {
-    for (int level = 1; level <= int(specialization_level); level++) {
-      compile_and_load(this_device_id, MetalPipelineType(level));
+    if (specialization_level == PSO_SPECIALIZED_SHADE) {
+      /* The intersection and shade libraries are independent. Metal supports concurrent library
+       * compilation, so overlap their expensive MSL front ends instead of serializing them. */
+      dispatch_apply(2,
+                     dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+                     ^(const size_t level) {
+                       compile_and_load(this_device_id, MetalPipelineType(level + 1));
+                     });
+    }
+    else {
+      for (int level = 1; level <= int(specialization_level); level++) {
+        compile_and_load(this_device_id, MetalPipelineType(level));
+      }
     }
   };
 

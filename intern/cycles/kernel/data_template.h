@@ -202,25 +202,42 @@ KERNEL_STRUCT_MEMBER(integrator, float, filter_glossy)
 KERNEL_STRUCT_MEMBER(integrator, float, differential_widen_scale)
 /* Metal bidirectional path tracing. Light subpaths are cached in render-working memory. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_bidirectional_path_tracing)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, bdpt_light_paths)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, bdpt_reference_pixels)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, bdpt_max_bounces)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, bdpt_update_samples)
 /* Progressive surface photon mapping. The map itself is render-working memory and its pointers
  * live in IntegratorStateGPU; these values are scene-level controls shared by emission/gather. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_photon_mapping)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_count)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_max_bounces)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_gather_max)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_camera_samples)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_map_update_samples)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_time_bins)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_radius)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_radius_decay)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_volume_radius_scale)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_roughness_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_normal_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float4, photon_scene)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float4, photon_target)
 /* Seed. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
@@ -242,8 +259,11 @@ KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, blue_noise_sequence_length)
 /* Pixel-level shader displacement. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_pixel_displacement)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_steps)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, pixel_displacement_scale)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, pixel_displacement_max_distance)
 /* Volume render. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_volumes)
