@@ -363,6 +363,27 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
                                       string *source)
 {
   string global_defines;
+
+  const bool source_specialize_guiding =
+      pso_type == PSO_SPECIALIZED_SHADE && scene_use_pixel_displacement &&
+      launch_params->data.integrator.use_bidirectional_path_tracing &&
+      launch_params->data.integrator.use_guiding;
+  if (source_specialize_guiding) {
+    const KernelIntegrator &integrator = launch_params->data.integrator;
+    global_defines += string("#define __KERNEL_METAL_USE_GUIDING__ ") +
+                      (integrator.use_guiding ? "1\n" : "0\n");
+    global_defines += string("#define __KERNEL_METAL_TRAIN_GUIDING__ ") +
+                      (integrator.train_guiding ? "1\n" : "0\n");
+    global_defines += string("#define __KERNEL_METAL_USE_SURFACE_GUIDING__ ") +
+                      (integrator.use_surface_guiding ? "1\n" : "0\n");
+    global_defines += string("#define __KERNEL_METAL_USE_VOLUME_GUIDING__ ") +
+                      (integrator.use_volume_guiding ? "1\n" : "0\n");
+    global_defines += string("#define __KERNEL_METAL_USE_GUIDING_DIRECT_LIGHT__ ") +
+                      (integrator.use_guiding_direct_light ? "1\n" : "0\n");
+    global_defines += string("#define __KERNEL_METAL_USE_GUIDING_MIS_WEIGHTS__ ") +
+                      (integrator.use_guiding_mis_weights ? "1\n" : "0\n");
+  }
+
   if (use_adaptive_compilation()) {
     global_defines += "#define __KERNEL_FEATURES__ " + to_string(kernel_features) + "\n";
   }
@@ -427,6 +448,27 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
   if (pso_type != PSO_GENERIC) {
     if (source) {
       const double starttime = time_dt();
+
+      if (source_specialize_guiding) {
+        /* Guiding expands the surface and volume shader call graphs substantially. Substituting
+         * its feature switches before MSL compilation avoids a pathological late function-
+         * constant specialization when guiding, BDPT, volumes and pixel displacement coincide.
+         * Numeric guiding controls remain regular function constants. The macros above are part
+         * of global_defines_md5, so changing a switch always rebuilds the source variant. */
+        const auto replace_integrator_switch = [&](const char *name, const char *replacement) {
+          string_replace(*source, string("kernel_data.integrator.") + name, replacement);
+        };
+        replace_integrator_switch("use_guiding_direct_light",
+                                  "__KERNEL_METAL_USE_GUIDING_DIRECT_LIGHT__");
+        replace_integrator_switch("use_guiding_mis_weights",
+                                  "__KERNEL_METAL_USE_GUIDING_MIS_WEIGHTS__");
+        replace_integrator_switch("use_surface_guiding",
+                                  "__KERNEL_METAL_USE_SURFACE_GUIDING__");
+        replace_integrator_switch("use_volume_guiding",
+                                  "__KERNEL_METAL_USE_VOLUME_GUIDING__");
+        replace_integrator_switch("train_guiding", "__KERNEL_METAL_TRAIN_GUIDING__");
+        replace_integrator_switch("use_guiding", "__KERNEL_METAL_USE_GUIDING__");
+      }
 
 #  define KERNEL_STRUCT_BEGIN(name, parent) \
     string_replace_same_length(*source, "kernel_data." #parent ".", "kernel_data_" #parent "_");
