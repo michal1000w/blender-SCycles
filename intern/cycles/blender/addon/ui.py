@@ -757,6 +757,10 @@ class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
         col.prop(cscene, "bdpt_max_bounces")
         col.prop(cscene, "bdpt_update_samples")
 
+        col = layout.column(heading="Caustic Paths", align=True)
+        col.prop(cscene, "caustics_reflective", text="Reflective")
+        col.prop(cscene, "caustics_refractive", text="Refractive")
+
         if cscene.use_photon_mapping:
             box = layout.box()
             box.label(text="Photon Mapping is ignored while BDPT is enabled", icon='INFO')

@@ -1612,6 +1612,8 @@ struct ccl_align(16) KernelBDPTVertex {
   int light_group;
   float d_vcm;
   float d_vc;
+  /* Low byte: path length. Next byte: number of connectible vertices represented by this
+   * per-light-path reservoir sample. Both are bounded by bdpt_max_bounces <= 64. */
   uint path_length;
   uint flag;
   uint emitter_shader_flags;

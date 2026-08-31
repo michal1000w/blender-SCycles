@@ -506,9 +506,9 @@ ccl_device
 
 #ifdef __KERNEL_METAL__
 /* Connect the current camera vertex to one uniformly selected entry of the global light-vertex
- * cache. Uniform cache sampling is the Light Vertex Cache GPU formulation: the cache-size to
- * light-path-count ratio converts the selected vertex into an unbiased estimate of the sum over
- * light-subpath lengths. */
+ * cache. Every entry is a per-path reservoir sample over the connectible vertices that path
+ * actually reached. Uniform cache sampling plus the stored reservoir support converts the
+ * selected vertex into an unbiased estimate of the sum over light-subpath lengths. */
 ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
                                                             IntegratorState state,
                                                             ccl_private ShaderData *sd,
@@ -533,8 +533,12 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   const uint vertex_index = min(uint(select * float(vertex_count)), vertex_count - 1u);
   const ccl_global KernelBDPTVertex *light_vertex =
       &kernel_integrator_state.bdpt_vertices[vertex_index];
+  const uint light_path_length = light_vertex->path_length & 0xffu;
+  const uint light_selection_count = (light_vertex->path_length >> 8u) & 0xffu;
 
-  if (light_vertex->path_length + bounce + 1u > uint(kernel_data.integrator.max_bounce + 1)) {
+  if (light_selection_count == 0u ||
+      light_path_length + bounce + 1u > uint(kernel_data.integrator.max_bounce + 1))
+  {
     return false;
   }
 
@@ -592,7 +596,7 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
 
   BsdfEval light_eval;
   float light_roughness_squared = 0.0f;
-  const uint emitter_shader_flags = (light_vertex->path_length == 2u) ?
+  const uint emitter_shader_flags = (light_path_length == 2u) ?
                                         (light_vertex->emitter_shader_flags | SHADER_USE_MIS) :
                                         SHADER_USE_MIS;
   const float light_pdf = surface_shader_bsdf_eval(kg,
@@ -640,9 +644,11 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   const float cos_light_previous = max(fabsf(dot(light_sd.N, -light_incoming)), 1.0e-8f);
   const float camera_pdf_area = camera_pdf * cos_light / distance2;
   const float light_pdf_area = light_pdf * cos_camera / distance2;
-  /* The cache contains one uniformly selected potential bounce per emitted light path. Reached,
-   * connectible selections are compacted, so K*M/N is the exact global-selection support. */
-  const float cache_scale = float(vertex_count) * float(kernel_data.integrator.bdpt_max_bounces) /
+  /* The cache contains one reservoir-selected vertex per light path that reached a connectible
+   * event. K*n/N is the exact global-selection support, where n is this path's actual number of
+   * candidates. Unlike a configured maximum-bounce factor, it does not amplify sparse splats from
+   * short paths. */
+  const float cache_scale = float(vertex_count) * float(light_selection_count) /
                             float(kernel_integrator_state.bdpt_light_path_count);
 
   const float w_light = camera_pdf_area *

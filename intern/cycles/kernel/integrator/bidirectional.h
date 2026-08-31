@@ -6,13 +6,14 @@
 
 /* Metal light-vertex-cache bidirectional path tracing.
  *
- * Light subpaths are generated in one GPU pass and every connectible surface vertex is appended
- * to a compact global cache. Camera paths sample this cache at their surface vertices. Recursive
- * MIS terms follow Georgiev's balance-heuristic formulation, so connecting a pair only requires
- * local PDFs and the two cached partial weights. */
+ * Light subpaths are generated in one GPU pass and one connectible vertex per path is selected
+ * into a compact global cache by reservoir sampling. Camera paths sample this cache at their
+ * surface vertices. Recursive MIS terms follow Georgiev's balance-heuristic formulation, so
+ * connecting a pair only requires local PDFs and the two cached partial weights. */
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/camera/camera.h"
+#include "kernel/film/adaptive_sampling.h"
 #include "kernel/geom/shader_data.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/photon_mapping.h"
@@ -49,6 +50,23 @@ ccl_device_inline bool bdpt_enabled_for_surface_path(ConstIntegratorState state)
 ccl_device_inline float bdpt_safe_pdf(const float pdf)
 {
   return max(pdf, 1.0e-20f);
+}
+
+ccl_device_inline uint bdpt_pack_vertex_support(const uint path_length,
+                                                const uint selection_count)
+{
+  return (path_length & 0xffu) | ((selection_count & 0xffu) << 8u);
+}
+
+ccl_device_inline uint bdpt_vertex_path_length(const ccl_private KernelBDPTVertex *light_vertex)
+{
+  return light_vertex->path_length & 0xffu;
+}
+
+ccl_device_inline uint bdpt_vertex_selection_count(
+    const ccl_private KernelBDPTVertex *light_vertex)
+{
+  return (light_vertex->path_length >> 8u) & 0xffu;
 }
 
 ccl_device_inline Spectrum bdpt_light_vertex_spectral_weight(
@@ -553,6 +571,7 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
                                               const float d_vcm,
                                               const float d_vc,
                                               const uint path_length,
+                                              const uint selection_count,
                                               const uint flag,
                                               const uint emitter_shader_flags,
                                               const float wavelength_rand)
@@ -571,43 +590,62 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
   stored_vertex->light_group = light_group;
   stored_vertex->d_vcm = d_vcm;
   stored_vertex->d_vc = d_vc;
-  stored_vertex->path_length = path_length;
+  stored_vertex->path_length = bdpt_pack_vertex_support(path_length, selection_count);
   stored_vertex->flag = flag;
   stored_vertex->emitter_shader_flags = emitter_shader_flags;
 }
 
-ccl_device_inline void bdpt_store_light_vertex(KernelGlobals kg,
-                                               const ccl_private ShaderData *sd,
-                                               const ccl_private Ray *ray,
-                                               const Spectrum throughput,
-                                               const int emitter_object,
-                                               const int light_group,
-                                               const float d_vcm,
-                                               const float d_vc,
-                                               const uint path_length,
-                                               const uint flag,
-                                               const uint emitter_shader_flags,
-                                               const float wavelength_rand)
+ccl_device_inline void bdpt_reservoir_store_light_vertex(
+    KernelGlobals kg,
+    const ccl_private ShaderData *sd,
+    const ccl_private Ray *ray,
+    const Spectrum throughput,
+    const int emitter_object,
+    const int light_group,
+    const float d_vcm,
+    const float d_vc,
+    const uint path_length,
+    const uint flag,
+    const uint emitter_shader_flags,
+    const float wavelength_rand,
+    ccl_private uint *reservoir_rng,
+    ccl_private uint *reservoir_slot,
+    ccl_private uint *selection_count)
 {
-  const uint slot = atomic_fetch_and_add_uint32(kernel_integrator_state.bdpt_vertex_count, 1);
-  if (slot >= kernel_integrator_state.bdpt_vertex_capacity) {
+  *selection_count += 1u;
+  const bool replace = *selection_count == 1u ||
+                       lcg_step_float(reservoir_rng) < 1.0f / float(*selection_count);
+
+  if (*selection_count == 1u) {
+    *reservoir_slot = atomic_fetch_and_add_uint32(kernel_integrator_state.bdpt_vertex_count, 1);
+  }
+  if (*reservoir_slot >= kernel_integrator_state.bdpt_vertex_capacity) {
     return;
   }
 
-  ccl_private KernelBDPTVertex local_vertex;
-  bdpt_fill_light_vertex(&local_vertex,
-                         sd,
-                         ray,
-                         throughput,
-                         emitter_object,
-                         light_group,
-                         d_vcm,
-                         d_vc,
-                         path_length,
-                         flag,
-                         emitter_shader_flags,
-                         wavelength_rand);
-  *(&kernel_integrator_state.bdpt_vertices[slot]) = local_vertex;
+  ccl_global KernelBDPTVertex *stored_vertex =
+      &kernel_integrator_state.bdpt_vertices[*reservoir_slot];
+  if (replace) {
+    KernelBDPTVertex local_vertex;
+    bdpt_fill_light_vertex(&local_vertex,
+                           sd,
+                           ray,
+                           throughput,
+                           emitter_object,
+                           light_group,
+                           d_vcm,
+                           d_vc,
+                           path_length,
+                           *selection_count,
+                           flag,
+                           emitter_shader_flags,
+                           wavelength_rand);
+    *stored_vertex = local_vertex;
+  }
+  else {
+    stored_vertex->path_length = bdpt_pack_vertex_support(stored_vertex->path_length & 0xffu,
+                                                          *selection_count);
+  }
 }
 
 /* Reconstruct a cached light vertex. Keeping this in one helper ensures the cache connection and
@@ -925,6 +963,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     const uint candidate_count,
     const uint iteration,
     const uint batch_samples,
+    ccl_global float *render_buffer,
     const float2 rand_lens)
 {
   if (candidate_count == 0) {
@@ -1062,6 +1101,16 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     return;
   }
 
+  const uint render_pixel_index = uint(kernel_integrator_state.bdpt_buffer_offset + pixel_x +
+                                       pixel_y * kernel_integrator_state.bdpt_buffer_stride);
+  INTEGRATOR_STATE_WRITE(state, path, render_pixel_index) = render_pixel_index;
+  /* A cache is generated before the camera work for its batch. Adaptive convergence from earlier
+   * batches is already known at this point: do not splat B samples into a pixel that will schedule
+   * none, otherwise film normalization by its smaller sample count produces a bright bias. */
+  if (render_buffer != nullptr && !film_need_sample_pixel(kg, state, render_buffer)) {
+    return;
+  }
+
   /* Shader graphs and some layered closures build direction-dependent data from ShaderData::wi.
    * A light subpath prepared this shader with the direction toward the emitter. For a sensor
    * connection evaluate the reciprocal endpoint exactly as a camera path would: make the camera
@@ -1130,7 +1179,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     surface_shader_prepare_closures(kg, state, light_sd, PATH_RAY_VISIBILITY_CAMERA);
 
     float roughness_squared = 0.0f;
-    const uint emitter_shader_flags = (light_vertex->path_length == 2u) ?
+    const uint emitter_shader_flags = (bdpt_vertex_path_length(light_vertex) == 2u) ?
                                           (light_vertex->emitter_shader_flags | SHADER_USE_MIS) :
                                           SHADER_USE_MIS;
     light_pdf = surface_shader_bsdf_eval(kg,
@@ -1204,9 +1253,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
 #endif
   integrator_state_write_shadow_ray(shadow_state, &shadow_ray);
   integrator_state_write_shadow_ray_self(shadow_state, &shadow_ray);
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, render_pixel_index) =
-      uint(kernel_integrator_state.bdpt_buffer_offset + pixel_x +
-           pixel_y * kernel_integrator_state.bdpt_buffer_stride);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, render_pixel_index) = render_pixel_index;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, sample) = iteration;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, rng_pixel) = hash_uint2(
       uint(pixel_x), uint(pixel_y));
@@ -1218,7 +1265,8 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transmission_bounce) = 0;
   /* path_length includes both endpoints. A first light-side scattering vertex is the camera
    * path's bounce zero and belongs in the direct pass. */
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = light_vertex->path_length - 2u;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) =
+      bdpt_vertex_path_length(light_vertex) - 2u;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = contribution;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = light_vertex->light_group + 1;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = PATH_RAY_VISIBILITY_CAMERA;
@@ -1322,9 +1370,14 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   }
 #endif
 
-  const uint cache_bounce = min(
-      uint(lcg_step_float(&rng) * float(kernel_data.integrator.bdpt_max_bounces)),
-      uint(kernel_data.integrator.bdpt_max_bounces - 1));
+  /* Select one of the vertices the path actually reaches. Sampling a fixed bounce from the
+   * configured maximum wastes most light paths in short scenes and produces sparse, high-energy
+   * splats that viewport denoisers turn into halos. Per-path reservoir sampling retains every
+   * valid path and stores its exact selection support for normalization and MIS. */
+  uint reservoir_rng = lcg_init(hash_uint3(
+      light_path_index, iteration, uint(kernel_data.integrator.seed) ^ 0x72657376u));
+  uint reservoir_slot = UINT_MAX;
+  uint selection_count = 0u;
   for (int bounce = 0; bounce < kernel_data.integrator.bdpt_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
@@ -1356,24 +1409,25 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
         /* This is the first light-side medium collision, but it may follow any number of surface
          * events. In particular, L-S+-V-E is the volumetric-caustic transport class produced by a
-         * prism. Cache it with the same uniformly selected path-length strategy as surface
-         * vertices. We return immediately below because repeated free-flight strategy densities
-         * are not represented by the compact recursion; camera paths retain full multiple
-         * scattering after their first collision. */
-        if (uint(bounce) == cache_bounce) {
-          bdpt_store_light_vertex(kg,
-                                  &volume_sd,
-                                  &ray,
-                                  throughput,
-                                  emitter_object,
-                                  light_group,
-                                  d_vcm,
-                                  d_vc,
-                                  uint(bounce + 2),
-                                  INTEGRATOR_STATE(state, path, flag),
-                                  emitter_shader_flags,
-                                  light_wavelength_rand);
-        }
+         * prism. Include it in the same per-path reservoir as surface vertices. We return
+         * immediately below because repeated free-flight strategy densities are not represented
+         * by the compact recursion; camera paths retain full multiple scattering after their
+         * first collision. */
+        bdpt_reservoir_store_light_vertex(kg,
+                                          &volume_sd,
+                                          &ray,
+                                          throughput,
+                                          emitter_object,
+                                          light_group,
+                                          d_vcm,
+                                          d_vc,
+                                          uint(bounce + 2),
+                                          INTEGRATOR_STATE(state, path, flag),
+                                          emitter_shader_flags,
+                                          light_wavelength_rand,
+                                          &reservoir_rng,
+                                          &reservoir_slot,
+                                          &selection_count);
 
         return;
       }
@@ -1445,20 +1499,21 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     if ((sd.runtime_flag & SR_BSDF_HAS_EVAL) &&
         !(sd.object_flag & SD_OBJECT_SHADOW_CATCHER))
     {
-      if (uint(bounce) == cache_bounce) {
-        bdpt_store_light_vertex(kg,
-                                &sd,
-                                &ray,
-                                throughput,
-                                emitter_object,
-                                light_group,
-                                d_vcm,
-                                d_vc,
-                                uint(bounce + 2),
-                                INTEGRATOR_STATE(state, path, flag),
-                                emitter_shader_flags,
-                                light_wavelength_rand);
-      }
+      bdpt_reservoir_store_light_vertex(kg,
+                                        &sd,
+                                        &ray,
+                                        throughput,
+                                        emitter_object,
+                                        light_group,
+                                        d_vcm,
+                                        d_vc,
+                                        uint(bounce + 2),
+                                        INTEGRATOR_STATE(state, path, flag),
+                                        emitter_shader_flags,
+                                        light_wavelength_rand,
+                                        &reservoir_rng,
+                                        &reservoir_slot,
+                                        &selection_count);
 
     }
 
@@ -1513,6 +1568,17 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     const int label = surface_shader_bsdf_sample_closure(
         kg, &sd, sc, rand_bsdf, &eval, &wo, &pdf, &sampled_roughness, &eta, avg_roughness_squared);
     if (!(pdf > 0.0f) || bsdf_eval_is_zero(&eval)) {
+      break;
+    }
+
+    /* In light-path order the diffuse receiver of a caustic lies after this sharp event, so the
+     * closure filtering used by camera paths cannot know yet that this reflection or refraction
+     * will become a caustic. Honor the scene controls explicitly, as photon tracing does. The
+     * vertex at the current surface was cached above, preserving direct glossy visibility; only
+     * continuation into the disabled caustic transport class is stopped. */
+    if (((label & LABEL_REFLECT) && !kernel_data.integrator.caustics_reflective) ||
+        ((label & LABEL_TRANSMIT) && !kernel_data.integrator.caustics_refractive))
+    {
       break;
     }
 
@@ -1586,12 +1652,13 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 /* Sensor connections are deliberately isolated from light generation. The manifold solver has a
  * large live working set; keeping it in a separate Metal kernel avoids inflating compile time and
  * register pressure for every emitted light path. The compact cache already contains one
- * uniformly selected potential bounce per path, so it is also an unbiased sensor reservoir. */
+ * reservoir-selected connectible vertex per path, so it is also an unbiased sensor reservoir. */
 ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                                IntegratorState state,
                                                const uint vertex_index,
                                                const uint iteration,
-                                               const uint batch_samples)
+                                               const uint batch_samples,
+                                               ccl_global float *render_buffer)
 {
   if (!kernel_integrator_state.bdpt_vertex_count || !kernel_integrator_state.bdpt_vertices) {
     return;
@@ -1607,7 +1674,12 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
       hash_uint3(vertex_index, iteration, uint(kernel_data.integrator.seed) ^ 0x73656e73u));
   photon_state_init(state, rng, iteration);
   INTEGRATOR_STATE_WRITE(state, path, flag) = light_vertex.flag;
-  INTEGRATOR_STATE_WRITE(state, path, bounce) = light_vertex.path_length - 2u;
+  const uint path_length = bdpt_vertex_path_length(&light_vertex);
+  const uint selection_count = bdpt_vertex_selection_count(&light_vertex);
+  if (selection_count == 0u || path_length < 2u) {
+    return;
+  }
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = path_length - 2u;
 
 #ifdef __VOLUME__
   /* Dedicated sensor work does not inherit the generating light path's medium stack. Rebuild the
@@ -1634,9 +1706,10 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                       state,
                                       &light_vertex,
                                       &light_sd,
-                                      uint(kernel_data.integrator.bdpt_max_bounces),
+                                      selection_count,
                                       iteration,
                                       batch_samples,
+                                      render_buffer,
                                       rand_lens);
 }
 

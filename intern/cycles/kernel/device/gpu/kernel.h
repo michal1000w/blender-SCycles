@@ -107,12 +107,18 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_bdpt_sensor_connect,
                              const int max_vertices,
                              const int iteration,
-                             const int batch_samples)
+                             const int batch_samples,
+                             ccl_global float *render_buffer)
 {
   const uint vertex_index = ccl_gpu_global_id_x();
   if (vertex_index < uint(max_vertices)) {
     ccl_gpu_kernel_call(integrator_bdpt_sensor_connect(
-        nullptr, vertex_index, vertex_index, uint(iteration), uint(batch_samples)));
+        nullptr,
+        vertex_index,
+        vertex_index,
+        uint(iteration),
+        uint(batch_samples),
+        render_buffer));
   }
 }
 ccl_gpu_kernel_postfix
