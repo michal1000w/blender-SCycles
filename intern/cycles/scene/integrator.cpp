@@ -237,6 +237,7 @@ NODE_DEFINE(Integrator)
 
   SOCKET_BOOLEAN(use_bidirectional_path_tracing, "Bidirectional Path Tracing", false);
   SOCKET_INT(bdpt_light_paths, "BDPT Light Paths", 65536);
+  SOCKET_INT(bdpt_reference_pixels, "BDPT Reference Pixels", 1);
   SOCKET_INT(bdpt_max_bounces, "BDPT Max Bounces", 8);
   SOCKET_INT(bdpt_update_samples, "BDPT Update Samples", 8);
 
@@ -416,6 +417,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->use_bidirectional_path_tracing = use_bidirectional_path_tracing_on_device(device) &&
                                                 !scene->has_shadow_catcher();
   kintegrator->bdpt_light_paths = clamp(bdpt_light_paths, 1024, 4 * 1024 * 1024);
+  kintegrator->bdpt_reference_pixels = max(bdpt_reference_pixels, 1);
   kintegrator->bdpt_max_bounces = clamp(bdpt_max_bounces, 1, 64);
   kintegrator->bdpt_update_samples = clamp(bdpt_update_samples, 1, 1024);
 

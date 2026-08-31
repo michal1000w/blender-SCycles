@@ -86,6 +86,7 @@ class Integrator : public Node {
 
   NODE_SOCKET_API(bool, use_bidirectional_path_tracing)
   NODE_SOCKET_API(int, bdpt_light_paths)
+  NODE_SOCKET_API(int, bdpt_reference_pixels)
   NODE_SOCKET_API(int, bdpt_max_bounces)
   NODE_SOCKET_API(int, bdpt_update_samples)
 

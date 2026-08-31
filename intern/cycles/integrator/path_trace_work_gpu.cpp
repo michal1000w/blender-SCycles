@@ -349,8 +349,17 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
     return;
   }
 
-  const uint light_paths = uint(
-      min(device_scene_->data.integrator.bdpt_light_paths, max_num_paths_));
+  /* Keep the light-subpath density constant as image resolution changes. The setting remains the
+   * total budget at the scene's full render resolution, while previews and cropped buffers receive
+   * the proportional share. */
+  const uint64_t scaled_light_paths =
+      uint64_t(device_scene_->data.integrator.bdpt_light_paths) *
+      uint64_t(max(effective_buffer_params_.width, 1)) *
+      uint64_t(max(effective_buffer_params_.height, 1));
+  const uint64_t reference_pixels = uint64_t(
+      max(device_scene_->data.integrator.bdpt_reference_pixels, 1));
+  const uint64_t scaled_count = (scaled_light_paths + reference_pixels - 1u) / reference_pixels;
+  const uint light_paths = uint(min(scaled_count, uint64_t(max_num_paths_)));
   /* Each emitted light path reservoir-selects one potential surface bounce. The connection
    * estimator carries the selection support explicitly, keeping memory linear in path count. */
   const uint capacity = light_paths;
@@ -656,9 +665,17 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
 
   queue_->zero_to_device(bdpt_vertex_count_);
   const int iteration = max(start_sample, 0);
-  const int num_light_paths = int(integrator_state_gpu_.bdpt_light_path_count);
-  /* MIS operates on the complete estimator for this cache batch: N light subpaths compete with B
-   * camera samples per pixel. The emitted-path normalization still uses N itself. */
+  /* Render schedulers divide the same sample range into different work-call sizes. Emit the
+   * proportional share of the per-update budget so light paths per camera sample stay constant. */
+  const uint update_samples = uint(max(device_scene_->data.integrator.bdpt_update_samples, 1));
+  const uint batch_light_paths = max(
+      1u,
+      uint((uint64_t(integrator_state_gpu_.bdpt_vertex_capacity) * uint64_t(batch_samples) +
+            update_samples - 1u) /
+           update_samples));
+  const int num_light_paths = int(
+      min(integrator_state_gpu_.bdpt_vertex_capacity, batch_light_paths));
+  integrator_state_gpu_.bdpt_light_path_count = uint(num_light_paths);
   integrator_state_gpu_.bdpt_light_path_sample_ratio = float(num_light_paths) /
                                                        float(max(batch_samples, 1));
   integrator_state_gpu_.bdpt_buffer_full_x = effective_buffer_params_.full_x;

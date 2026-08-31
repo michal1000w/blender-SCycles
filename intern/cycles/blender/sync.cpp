@@ -403,6 +403,10 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_use_bidirectional_path_tracing(
       get_boolean(cscene, "use_bidirectional_path_tracing"));
   integrator->set_bdpt_light_paths(get_int(cscene, "bdpt_light_paths"));
+  const int64_t bdpt_reference_pixels = int64_t(max(render_resolution_x(b_scene->r), 1)) *
+                                        int64_t(max(render_resolution_y(b_scene->r), 1));
+  integrator->set_bdpt_reference_pixels(
+      int(bdpt_reference_pixels > INT_MAX ? INT_MAX : bdpt_reference_pixels));
   integrator->set_bdpt_max_bounces(get_int(cscene, "bdpt_max_bounces"));
   integrator->set_bdpt_update_samples(get_int(cscene, "bdpt_update_samples"));
   integrator->set_use_photon_mapping(get_boolean(cscene, "use_photon_mapping"));
