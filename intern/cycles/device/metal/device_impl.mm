@@ -621,6 +621,7 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
 
     id<MTLDevice> mtlDevice;
     string source;
+    string precompiled_library_path;
 
     /* Safely gather any state required for the MSL->AIR compilation. */
     {
@@ -644,6 +645,34 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
 
       mtlDevice = instance->mtlDevice;
       source = instance->source[pso_type];
+
+      /* The common generic variants are compiled into the Blender installation. Loading one
+       * avoids sending the same multi-megabyte MSL translation unit through the runtime compiler
+       * on every cold start. Only use it when every source-affecting option matches; otherwise the
+       * existing runtime path below remains the quality-preserving fallback. */
+      if (pso_type == PSO_GENERIC && !instance->use_adaptive_compilation() &&
+          instance->use_local_atomic_sort() && !instance->use_metalrt_extended_limits)
+      {
+#  ifdef WITH_NANOVDB
+        const bool nanovdb_matches = DebugFlags().metal.use_nanovdb;
+#  else
+        const bool nanovdb_matches = true;
+#  endif
+        if (nanovdb_matches) {
+          NSOperatingSystemVersion macos_ver = [[NSProcessInfo processInfo] operatingSystemVersion];
+          string variant = "software";
+          if (instance->use_metalrt_for_current_scene()) {
+            variant = instance->motion_blur ? "metalrt_motion" : "metalrt";
+          }
+          const string filename = string_printf("cycles_kernel_metal_generic_%s_macos_%ld.metallib",
+                                                variant.c_str(),
+                                                (long)macos_ver.majorVersion);
+          const string candidate = path_get(path_join("lib", filename));
+          if (path_exists(candidate)) {
+            precompiled_library_path = candidate;
+          }
+        }
+      }
     }
 
     /* Perform the actual compilation using our cached context. The MetalDevice can safely destruct
@@ -684,13 +713,31 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
     double starttime = time_dt();
 
     NSError *error = nullptr;
-    id<MTLLibrary> mtlLibrary = [mtlDevice newLibraryWithSource:@(source.c_str())
-                                                        options:options
-                                                          error:&error];
+    id<MTLLibrary> mtlLibrary = nil;
+    if (!precompiled_library_path.empty()) {
+      mtlLibrary = [mtlDevice
+          newLibraryWithURL:[NSURL fileURLWithPath:@(precompiled_library_path.c_str())]
+                      error:&error];
+      if (mtlLibrary) {
+        metal_printf("Precompiled library loaded in %.1f seconds (%s)",
+                     time_dt() - starttime,
+                     kernel_type_as_string(pso_type));
+      }
+      else {
+        const char *err = error ? [[error localizedDescription] UTF8String] : "nil";
+        LOG_WARNING << "Failed to load precompiled Metal library, compiling MSL instead: " << err;
+      }
+    }
 
-    metal_printf("Front-end compilation finished in %.1f seconds (%s)",
-                 time_dt() - starttime,
-                 kernel_type_as_string(pso_type));
+    if (!mtlLibrary) {
+      error = nullptr;
+      starttime = time_dt();
+      mtlLibrary = [mtlDevice newLibraryWithSource:@(source.c_str()) options:options error:&error];
+
+      metal_printf("Front-end compilation finished in %.1f seconds (%s)",
+                   time_dt() - starttime,
+                   kernel_type_as_string(pso_type));
+    }
 
     [options release];
 
@@ -1096,6 +1143,27 @@ void MetalDevice::optimize_for_scene(Scene *scene)
    * existing "optimize_for_scene" request in flight. */
   int this_device_id = this->device_id;
   auto specialize_kernels_fn = ^() {
+    /* Prioritize the generic pipelines needed to begin rendering. Starting another monolithic MSL
+     * front-end compile here can occupy every Metal compiler service while the generic PSOs are
+     * still being materialized, leaving both viewport and offline renders waiting at zero samples.
+     */
+    while (true) {
+      bool generic_kernels_ready = false;
+      {
+        thread_scoped_lock lock(existing_devices_mutex);
+        MetalDevice *instance = get_device_by_ID(this_device_id, lock);
+        if (!instance) {
+          return;
+        }
+        generic_kernels_ready = MetalDeviceKernels::get_loaded_kernel_count(instance, PSO_GENERIC) ==
+                                DEVICE_KERNEL_NUM;
+      }
+      if (generic_kernels_ready) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     if (specialization_level == PSO_SPECIALIZED_SHADE) {
       /* The intersection and shade libraries are independent. Metal supports concurrent library
        * compilation, so overlap their expensive MSL front ends instead of serializing them. */

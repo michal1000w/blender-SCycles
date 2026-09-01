@@ -255,6 +255,38 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
     return false;
   }
 
+  /* Avoid materializing pipelines that the current scene cannot enqueue. If a scene edit enables
+   * one of these feature bits, load_kernels() is called again and requests the newly required
+   * pipeline. Besides reducing cold-start work, this is particularly important for the mutually
+   * exclusive photon and BDPT kernels, whose large shading call graphs are expensive on Metal. */
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_BAKE &&
+      !(device->kernel_features & KERNEL_FEATURE_BAKING))
+  {
+    return false;
+  }
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE &&
+      !(device->kernel_features & KERNEL_FEATURE_SUBSURFACE))
+  {
+    return false;
+  }
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT &&
+      (device->kernel_features & KERNEL_FEATURE_BDPT))
+  {
+    return false;
+  }
+  if ((device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT) &&
+      (!(device->kernel_features & KERNEL_FEATURE_BDPT) ||
+       (device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER)))
+  {
+    return false;
+  }
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS &&
+      !(device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER))
+  {
+    return false;
+  }
+
   if (device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE) {
     if ((device->kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) == 0) {
       /* Skip shade_surface_raytrace kernel if the scene doesn't require it. */
@@ -630,6 +662,7 @@ void MetalKernelPipeline::compile()
   if (use_metalrt && device_kernel_has_intersection(device_kernel)) {
 
     NSMutableSet *unique_functions = [[NSMutableSet alloc] init];
+    bool required_intersection_function_missing = false;
 
     auto add_intersection_functions = [&](int table_index,
                                           const char *tri_fn,
@@ -646,8 +679,20 @@ void MetalKernelPipeline::compile()
       for (int i = 0; i < function_count; i++) {
         if (function_names[i]) {
           id<MTLFunction> intersection_function = make_intersection_function(function_names[i]);
-          [functions addObject:intersection_function];
-          [unique_functions addObject:intersection_function];
+          if (intersection_function) {
+            [functions addObject:intersection_function];
+            [unique_functions addObject:intersection_function];
+          }
+          else {
+            /* Adaptive compilation can remove an intersection function for a geometry feature
+             * absent from the scene. Preserve its table offset without inserting nil into the
+             * NSMutableArray (which raises an Objective-C exception). */
+            [functions addObject:[NSNull null]];
+            const bool optional_scene_function =
+                (i == 1 && !(kernel_features & KERNEL_FEATURE_HAIR)) ||
+                (i == 2 && !(kernel_features & KERNEL_FEATURE_POINTCLOUD));
+            required_intersection_function_missing |= !optional_scene_function;
+          }
         }
         else {
           /* Keep the slot empty so geometry intersectionFunctionTableOffset values continue to
@@ -664,33 +709,53 @@ void MetalKernelPipeline::compile()
                                "__intersection__curve",
                                "__intersection__point",
                                "__intersection__pixel_displacement");
-    add_intersection_functions(METALRT_TABLE_SHADOW,
-                               "__intersection__tri_shadow",
-                               "__intersection__curve_shadow",
-                               "__intersection__point_shadow",
-                               "__intersection__pixel_displacement_shadow");
-    add_intersection_functions(METALRT_TABLE_SHADOW_ALL,
-                               "__intersection__tri_shadow_all",
-                               "__intersection__curve_shadow_all",
-                               "__intersection__point_shadow_all",
-                               "__intersection__pixel_displacement_shadow_all");
-    add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
-    add_intersection_functions(METALRT_TABLE_LOCAL,
-                               "__intersection__local_tri",
-                               nullptr,
-                               nullptr,
-                               "__intersection__local_pixel_displacement");
-    add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");
-    add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT,
-                               "__intersection__local_tri_single_hit",
-                               nullptr,
-                               nullptr,
-                               "__intersection__local_pixel_displacement_single_hit");
-    add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT_MBLUR,
-                               "__intersection__local_tri_single_hit_mblur");
+
+    const bool is_light_cache_kernel =
+        device_kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT;
+    if (is_light_cache_kernel) {
+      /* These self-contained light-cache kernels use ordinary scene intersections plus volume
+       * stack initialization. Linking the shadow, local and single-hit tables as well makes Metal
+       * optimize several large, unreachable intersection call graphs into each pipeline. */
+      add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
+    }
+    else {
+      add_intersection_functions(METALRT_TABLE_SHADOW,
+                                 "__intersection__tri_shadow",
+                                 "__intersection__curve_shadow",
+                                 "__intersection__point_shadow",
+                                 "__intersection__pixel_displacement_shadow");
+      add_intersection_functions(METALRT_TABLE_SHADOW_ALL,
+                                 "__intersection__tri_shadow_all",
+                                 "__intersection__curve_shadow_all",
+                                 "__intersection__point_shadow_all",
+                                 "__intersection__pixel_displacement_shadow_all");
+      add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
+      add_intersection_functions(METALRT_TABLE_LOCAL,
+                                 "__intersection__local_tri",
+                                 nullptr,
+                                 nullptr,
+                                 "__intersection__local_pixel_displacement");
+      add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");
+      add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT,
+                                 "__intersection__local_tri_single_hit",
+                                 nullptr,
+                                 nullptr,
+                                 "__intersection__local_pixel_displacement_single_hit");
+      add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT_MBLUR,
+                                 "__intersection__local_tri_single_hit_mblur");
+    }
+
+    if (required_intersection_function_missing) {
+      metal_printf("Required MetalRT intersection function is missing: %s", error_str.c_str());
+      return;
+    }
 
     for (const int table : {METALRT_TABLE_LOCAL, METALRT_TABLE_LOCAL_SINGLE_HIT}) {
-      if (table_functions[table].count <= 3 || table_functions[table][3] == [NSNull null]) {
+      if (table_functions[table] &&
+          (table_functions[table].count <= 3 || table_functions[table][3] == [NSNull null]))
+      {
         metal_printf("MetalRT pixel-displacement local intersection table is incomplete");
         return;
       }
