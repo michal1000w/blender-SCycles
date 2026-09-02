@@ -193,8 +193,11 @@ ccl_device_inline bool restir_di_target(KernelGlobals kg,
 
   BsdfEval bsdf_eval ccl_optional_struct_init;
   float roughness_squared = 0.0f;
-  surface_shader_bsdf_eval(kg, state, sd, ls->D, &bsdf_eval, ls->shader, roughness_squared);
-  const Spectrum unoccluded = fabs(bsdf_eval_sum(&bsdf_eval) * light_eval * ls->eval_fac);
+  const float bsdf_pdf = surface_shader_bsdf_eval(
+      kg, state, sd, ls->D, &bsdf_eval, ls->shader, roughness_squared);
+  const float mis_weight = light_sample_mis_weight_nee(kg, ls->pdf, bsdf_pdf);
+  const Spectrum unoccluded = fabs(bsdf_eval_sum(&bsdf_eval) * light_eval * ls->eval_fac *
+                                    mis_weight);
   *target = reduce_max(unoccluded);
   return *target > 0.0f && isfinite_safe(*target);
 }

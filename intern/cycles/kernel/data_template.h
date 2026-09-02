@@ -169,7 +169,6 @@ KERNEL_STRUCT_MEMBER(integrator, int, use_direct_light)
 KERNEL_STRUCT_MEMBER(integrator, int, use_light_mis)
 KERNEL_STRUCT_MEMBER(integrator, int, use_light_tree)
 KERNEL_STRUCT_MEMBER(integrator, int, num_lights)
-KERNEL_STRUCT_MEMBER(integrator, int, num_light_tree_emitters)
 KERNEL_STRUCT_MEMBER(integrator, int, num_distant_lights)
 KERNEL_STRUCT_MEMBER(integrator, int, num_background_lights)
 /* Portal sampling. */

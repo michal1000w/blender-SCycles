@@ -1065,7 +1065,6 @@ void LightManager::device_update_tree(Device * /*unused*/,
                                       Progress &progress)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  kintegrator->num_light_tree_emitters = 0;
 
   if (!kintegrator->use_light_tree) {
     return;
@@ -1094,7 +1093,6 @@ void LightManager::device_update_tree(Device * /*unused*/,
 
   /* Allocate emitters */
   const size_t num_emitters = light_tree.num_emitters();
-  kintegrator->num_light_tree_emitters = int(num_emitters);
   KernelLightTreeEmitter *kemitters = dscene->light_tree_emitters.alloc(num_emitters);
 
   /* Update integrator state. */

@@ -505,12 +505,6 @@ ccl_device
                                    ccl_private ShaderData *sd,
                                    const ccl_private RNGState *rng_state)
 {
-#ifdef __KERNEL_METAL__
-  /* This bit describes the estimator used at the current vertex after this function returns. The
-   * incoming value was consumed by surface emission earlier in the shading kernel. */
-  INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_RESTIR_DIRECT;
-#endif
-
   /* Test if there is a light or BSDF that needs direct light. */
   if (!(kernel_data.integrator.use_direct_light && (sd->runtime_flag & SR_BSDF_HAS_EVAL))) {
     return SHADER_EVAL_EMPTY;
@@ -535,39 +529,29 @@ ccl_device
   {
 #ifdef __KERNEL_METAL__
     const uint32_t current_path_flag = INTEGRATOR_STATE(state, path, flag);
+    const bool restir_surface_supported =
+        !bdpt_enabled_for_surface_path(state) &&
+        !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS) &&
+        surface_shader_average_roughness(sd) >=
+            (kernel_data.integrator.use_restir_pt ?
+                 kernel_data.integrator.restir_pt_min_roughness :
+                 kernel_data.integrator.restir_min_roughness);
     /* ReSTIR PT owns indirect paths, while fresh ReSTIR DI candidate resampling is a lower-cost,
      * lower-variance estimator for primary many-light illumination. Do not force DI at later PT
      * vertices: doing so changes every indirect proposal and regresses heterogeneous emissive
      * production scenes. The primary DI path is disjoint from PT (which starts at path length 3),
      * so this forms the paper's unified direct/global path space without double counting. */
-    /* Fresh DI RIS pays off when light selection is the dominant variance source. With only a
-     * handful of analytic lights, ordinary Cycles NEE is both cheaper and markedly less prone to
-     * rare high-weight RIS samples (the production city regression has four lights). Keep the
-     * explicit ReSTIR DI toggle authoritative, but make PT's automatic direct layer adaptive. */
-    const bool restir_pt_primary_di =
-        kernel_data.integrator.use_restir_pt && INTEGRATOR_STATE(state, path, bounce) == 0u &&
-        kernel_data.integrator.num_lights >= kernel_data.integrator.restir_light_candidates &&
-        /* A very large emissive-primitive population is already handled hierarchically by the
-         * light tree and can produce heavy-tailed cross-emitter RIS weights. Prefer normal NEE in
-         * that regime. The 4x bound is scale-relative: 96 analytic benchmark lights pass with 96
-         * emitters, while Untitled's 88 device lights / 16,302 emitters correctly fall back. */
-        (!kernel_data.integrator.use_light_tree ||
-         kernel_data.integrator.num_light_tree_emitters <= 4 * kernel_data.integrator.num_lights);
+    const bool restir_pt_primary_di = kernel_data.integrator.use_restir_pt &&
+                                      INTEGRATOR_STATE(state, path, bounce) == 0u;
+
     use_restir = (kernel_data.integrator.use_restir || restir_pt_primary_di) &&
                  (!kernel_data.integrator.use_restir_pt || restir_pt_primary_di) &&
-                 !bdpt_enabled_for_surface_path(state) &&
-                 !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS) &&
-                 surface_shader_average_roughness(sd) >=
-                     (kernel_data.integrator.use_restir_pt ?
-                          kernel_data.integrator.restir_pt_min_roughness :
-                          kernel_data.integrator.restir_min_roughness);
+                 restir_surface_supported;
     if (use_restir) {
-      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_RESTIR_DIRECT;
       if (!restir_di_resample(kg, state, sd, rng_state, &ls, &restir_weight)) {
         /* This path could not build a trustworthy reservoir (for example it sampled a
          * non-constant emitter). Fall through to ordinary Cycles NEE locally; do not disable
          * ReSTIR for other surfaces or pixels. */
-        INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_RESTIR_DIRECT;
         use_restir = false;
       }
     }
@@ -669,8 +653,7 @@ ccl_device
   {
     float mis_weight;
 #ifdef __KERNEL_METAL__
-    mis_weight = use_restir ? 1.0f :
-                 bdpt_enabled_for_surface_path(state) ?
+    mis_weight = bdpt_enabled_for_surface_path(state) ?
                               bdpt_nee_mis_weight(kg, state, sd, &ls, bsdf_pdf) :
                               light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
 #else

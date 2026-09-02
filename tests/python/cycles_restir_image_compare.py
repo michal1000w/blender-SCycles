@@ -37,6 +37,13 @@ def main():
             raise RuntimeError(f"Resolution mismatch: {path}")
         square_error = sum((value - target) ** 2 for value, target in zip(values, reference))
         absolute_error = sum(abs(value - target) for value, target in zip(values, reference))
+        max_index = max(range(len(values)), key=values.__getitem__)
+        max_error_index = max(
+            range(len(values)), key=lambda index: abs(values[index] - reference[index])
+        )
+        sorted_values = sorted(values)
+        width = image.size[0]
+        pixel_index, channel = divmod(max_index, 3)
         name = os.path.splitext(os.path.basename(path))[0]
         results[name] = {
             "rmse": math.sqrt(square_error / len(reference)),
@@ -44,6 +51,17 @@ def main():
             "mean": sum(values) / len(values),
             "reference_mean": sum(reference) / len(reference),
             "max": max(values),
+            "p999": sorted_values[min(int(0.999 * len(sorted_values)), len(sorted_values) - 1)],
+            "max_location": [pixel_index % width, pixel_index // width, channel],
+            "reference_at_max": reference[max_index],
+            "max_abs_error": abs(values[max_error_index] - reference[max_error_index]),
+            "max_error_value": values[max_error_index],
+            "reference_at_max_error": reference[max_error_index],
+            "max_error_location": [
+                (max_error_index // 3) % width,
+                (max_error_index // 3) // width,
+                max_error_index % 3,
+            ],
         }
         image.save_render(os.path.join(options.output_dir, name + ".png"), scene=bpy.context.scene)
         bpy.data.images.remove(image)

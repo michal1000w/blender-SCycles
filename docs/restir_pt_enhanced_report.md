@@ -32,14 +32,12 @@ Required components identified from the paper are:
 
 ## Implemented architecture
 
-- ReSTIR PT owns indirect paths. At primary surfaces it automatically layers fresh ReSTIR DI only
-  when the scene has at least as many analytic lights as configured candidates (eight by default)
-  and the light-tree emitter population is no more than four times the analytic-light count.
-  This targets scenes where light selection can amortize RIS without mixing a huge heterogeneous
-  emissive domain. Other scenes retain ordinary Cycles NEE locally. The explicit ReSTIR DI toggle
-  remains authoritative. Directly visible
-  emission/background keep exact Cycles film writes, and only indirect paths of length three or
-  greater enter the path-tree reservoir.
+- ReSTIR PT owns indirect paths and automatically layers fresh ReSTIR DI at every eligible primary
+  surface, including very large heterogeneous light trees. The RIS target and selected NEE
+  contribution include Cycles' ordinary light/BSDF balance heuristic, while forward BSDF light
+  hits retain the complementary MIS weight. The explicit ReSTIR DI toggle remains authoritative.
+  Directly visible emission/background keep exact Cycles film writes, and only indirect paths of
+  length three or greater enter the path-tree reservoir.
 - Unsupported work falls back per path. Shadow-catcher paths and BDPT-supported strategies retain
   their existing estimators; their presence does not disable ReSTIR PT for another pixel.
 - Sharp surfaces retain normal Cycles BSDF/light MIS while eligible rough surfaces can use the
@@ -137,6 +135,7 @@ claims.
 | Analytic point lights after endpoint restriction, 64 x 64 | finite; no Metal command-buffer fault; unsupported endpoint mapping falls back per candidate |
 | 128-byte reservoir + early replay compaction | mesh-GI spatial image bit-identical to the 144-byte implementation |
 | Continuous moving 3-frame scene after same-frame replay fix | image and flicker ratios `1.000000x`; time ratio `1.415` with generic Metal; the offline animation driver did not preserve GPU history between frame sessions |
+| Final 48-light moving 3-frame scene, 32 x 32, 4 spp | RMSE ratio `0.9208`; residual-flicker ratio `0.9521`; time ratio `1.1038` with generic Metal |
 | Interactive rendered viewport, same-session scene update | Metal completed both 16-sample states; `10.24 s` initial and `10.00 s` motion-settle windows |
 
 The very first Metal run after a kernel-layout change includes several minutes of Apple Metal
@@ -155,11 +154,11 @@ history.
 ## Untitled.blend production-scene regression
 
 The 1.9 MB scene links a large city asset, uses four analytic point-light groups, and had both
-ReSTIR toggles enabled with temporal confidence 20 and one spatial neighbor. At 480 x 270 and 8
-samples, the original implementation was 14% slower than standard Cycles, was 5.3% too dark, had
-`1.256x` the reference RMSE, and raised the maximum channel from `45.08` to `275.10`. Isolating the
-passes showed that the failure was already present in the fresh PT pass because PT forced DI, then
-temporal-to-spatial weight compounding could raise the maximum to `1597.65`.
+ReSTIR toggles enabled with temporal confidence 20 and one spatial neighbor. Early revisions were
+slower and biased dark, and correlated same-film temporal-to-spatial replay could produce severe
+outliers. The apparent `275.10` firefly in the fresh PT pass was diagnosed later as a real highlight:
+the 64-spp reference value at that pixel is `330.451`. The actual error was the baseline estimate
+of `1.518`; the ReSTIR estimate was closer to the reference.
 
 After separating DI/PT, rejecting aged temporal reservoirs from the next spatial domain, and
 restricting temporal reuse to external render history, the saved configuration produced:
@@ -184,27 +183,29 @@ high-sample references. It made three production changes:
 2. Textured and procedural emitter candidates evaluate their actual endpoint emission in the DI
    target. Visibility remains deferred until after selection; a texture-cache miss falls back
    locally.
-3. PT's automatic primary DI layer is enabled only when many analytic lights are not overwhelmed
-   by a much larger emissive-primitive population. Untitled has 88 device lights but 16,302
-   light-tree emitters; fresh eight-way RIS lowered aggregate RMSE while introducing an
-   unacceptable rare error, so ordinary NEE is retained there without disabling PT elsewhere.
+3. ReSTIR NEE now participates in Cycles' existing two-technique MIS instead of replacing it.
+   This both preserves BSDF-hit illumination and damps low-light-PDF NEE events with the balance
+   heuristic. ReSTIR remains active on Untitled's 88 device lights and 16,302 tree emitters.
 
-Matched Metal results before the final four-light adaptive gate were:
+Matched Metal results:
 
 | Scene / configuration | Standard Cycles | Enhanced | Interpretation |
 | --- | --- | --- | --- |
 | 96 point lights, 128 x 128, 16 spp | RMSE `0.292216`, `0.5368 s` | RMSE `0.262877`, `0.6016 s` | `10.0%` lower RMSE; about `10%` faster to equal error under inverse-square-root convergence |
-| Untitled, 480 x 270, 8 spp, forced 8-candidate DI | RMSE `1.104828`, max error `45.0813` | RMSE `0.763282`, max error `275.1071` | rejected despite `30.9%` lower RMSE because the tail is unsuitable for animation |
-| Untitled, forced 4-candidate DI | RMSE `1.104828`, max error `45.0813` | RMSE `1.106258`, max error `123.0844` | rejected: neither aggregate quality nor tail reliability improved |
-| Untitled, accepted adaptive policy | RMSE `1.104828`, MAE `0.124697`, max error `45.0813`, `18.4386 s` | RMSE `1.104803`, MAE `0.124693`, max error `45.0813`, `18.2607 s` | baseline-equivalent convergence and tail, `1.0%` faster cached render |
-| 48 point lights, Metal, 64 x 64, 16 spp | RMSE `0.116690`, `0.5143 s` | RMSE `0.096073`, `0.5667 s` | `17.7%` lower RMSE; about `1.34x` faster to equal error |
-| 48 point lights, MetalRT, 32 x 32, 8 spp | RMSE `0.229556`, `0.5964 s` | RMSE `0.149358`, `0.6246 s` | `34.9%` lower RMSE; about `2.25x` faster to equal error |
+| Untitled, seed 17, 480 x 270, 8 spp | RMSE `1.104828`, MAE `0.124697`, max absolute error `328.933`, `18.4386 s` | RMSE `0.762650`, MAE `0.122636`, max absolute error `241.355`, `19.1285 s` | `31.0%` lower RMSE, `26.6%` lower worst error; about `2.02x` faster to equal RMSE |
+| Untitled, seed 23, 8 spp | RMSE `1.109543`, max absolute error `330.401`, `18.0472 s` | RMSE `1.054713`, max absolute error `270.043`, `19.1267 s` | `4.9%` lower RMSE and `18.3%` lower worst error; time-to-RMSE approximately break-even |
+| Untitled, seed 47, 8 spp | RMSE `4.425112`, max absolute error `1868.405`, `18.0051 s` | RMSE `1.325496`, max absolute error `274.416`, `19.2310 s` | `70.0%` lower RMSE and `85.3%` lower worst error |
+| 48 point lights, Metal, 64 x 64, 16 spp | RMSE `0.116690`, `0.5229 s` | RMSE `0.098219`, `0.5517 s` | `15.8%` lower RMSE; about `1.34x` faster to equal error |
+| 48 point lights, MetalRT, 32 x 32, 8 spp | RMSE `0.229556`, `0.5878 s` | RMSE `0.148613`, `0.6887 s` | `35.3%` lower RMSE; about `2.04x` faster to equal error |
+| Moving 48-light scene, Metal, 3 frames, 32 x 32, 4 spp | RMSE `0.403822`, residual flicker `0.603219`, `1.5225 s` | RMSE `0.371824`, residual flicker `0.574344`, `1.6805 s` | `7.9%` lower RMSE and `4.8%` lower residual flicker for `10.4%` overhead |
 
-The accepted policy therefore has two outcomes rather than one universal claim: suitable
-many-analytic-light scenes receive lower noise and a measured time-to-equal-error win; very large
-heterogeneous light-tree domains keep baseline direct-light convergence while eligible ReSTIR PT
-indirect reuse remains available. Same-film
-temporal reuse was also tested and rejected: at 16 spp it raised RMSE from `0.11266` to `0.1818` and
+The earlier “275 firefly” diagnosis was wrong: the comparison tool reported maximum pixel value,
+not maximum error. That pixel's 64-spp reference is `330.451`; baseline produced only `1.518`, while
+ReSTIR produced `275.107` and was substantially closer. The comparison tool now reports maximum
+absolute error, its location, the rendered value, and the corresponding reference value. Across
+three 8-spp seeds, average RMSE fell from about `2.213` to `1.048` (`52.7%`) for about `6%` cached
+overhead. Same-film temporal reuse was separately tested and rejected: at 16 spp it raised RMSE
+from `0.11266` to `0.1818` and
 cost `2.24x`, confirming that correlated progressive samples must not be replayed as independent
 film samples.
 
@@ -243,13 +244,12 @@ measured `1.83254` (ratio `1.0080`), passing the disjoint-estimator energy bound
 attempts were aborted by macOS with `MTLCommandBufferErrorDomain ... Impacting Interactivity`
 during pipeline activation; a later isolated run completed successfully.
 
-After the final kernel-data change, the MetalRT-motion specialization took `484.50 s`; its actual
+After a kernel-layout change, the MetalRT-motion specialization took `484.50 s`; its actual
 four-sample render is otherwise sub-second once cached. This supports
 separating Apple pipeline specialization from steady-state render cost.
 
-The post-production-scene-fix regression completed all 17 cases in one run, including matched photon energy,
-MetalRT motion, point/mesh/world emitters, glass, hair, BSSRDF, volume, spatial opt-in finiteness,
-BDPT interoperability, and ReSTIR PT shadow-catcher fallback. Photon plus PT was exactly equal to
-its control (`1.81804305` mean in both); BDPT and shadow-catcher fallback images matched their
-controls. The same 17-case suite passed again after adding the light-tree-emitter adaptive gate and
-the final `KernelIntegrator` layout change.
+The final post-production-scene-fix regression completed all 17 cases in one run, including photon
+energy, MetalRT motion, point/mesh/world emitters, glass, hair, BSSRDF, volume, spatial opt-in
+finiteness, BDPT interoperability, and ReSTIR PT shadow-catcher fallback. Photon plus PT measured
+`1.81295994` mean versus `1.81804305` for its control (ratio `0.9972`); BDPT and shadow-catcher
+fallback images matched their controls. The same 17-case suite passed after the final MIS changes.
