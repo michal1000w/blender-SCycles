@@ -45,7 +45,7 @@ class PathTraceWorkGPU : public PathTraceWork {
 
   bool copy_render_buffers_from_device() override;
   bool copy_render_buffers_to_device() override;
-  bool zero_render_buffers() override;
+  bool zero_render_buffers(bool preserve_reuse_history = false) override;
 
   int adaptive_sampling_converge_filter_count_active(const float threshold, bool reset) override;
   void cryptomatte_postproces() override;
@@ -58,6 +58,17 @@ class PathTraceWorkGPU : public PathTraceWork {
   void alloc_integrator_path_split();
   void alloc_photon_mapping();
   void enqueue_photon_mapping(int start_sample);
+  void alloc_restir();
+  void alloc_restir_pt();
+  void prepare_restir_sample();
+  void finish_restir_sample(bool completed);
+  void prepare_restir_pt_sample();
+  void finish_restir_pt_sample(bool completed);
+  void enqueue_restir_pt_finalize();
+  void enqueue_restir_pt_begin_reuse();
+  void enqueue_restir_pt_end_reuse();
+  void enqueue_restir_pt_normalize();
+  void enqueue_restir_pt_duplication();
   void alloc_bidirectional_path_tracing();
   void enqueue_bidirectional_light_paths(int start_sample, int batch_samples);
 
@@ -160,6 +171,24 @@ class PathTraceWorkGPU : public PathTraceWork {
   device_only_memory<KernelPhoton> photons_;
   device_only_memory<uint> photon_hash_;
   device_vector<uint> photon_stored_;
+
+  /* ReSTIR DI uses immutable previous-sample state and a freshly cleared output layer. */
+  device_only_memory<KernelReSTIRDIReservoir> restir_reservoirs_a_;
+  device_only_memory<KernelReSTIRDIReservoir> restir_reservoirs_b_;
+  bool restir_previous_is_a_ = true;
+
+  /* ReSTIR PT Enhanced uses a dedicated initial layer and two reuse layers. */
+  device_only_memory<KernelReSTIRPTReservoir> restir_pt_initial_;
+  device_only_memory<KernelReSTIRPTReservoir> restir_pt_reservoirs_a_;
+  device_only_memory<KernelReSTIRPTReservoir> restir_pt_reservoirs_b_;
+  device_only_memory<KernelReSTIRPTSurface> restir_pt_surfaces_a_;
+  device_only_memory<KernelReSTIRPTSurface> restir_pt_surfaces_b_;
+  device_only_memory<float> restir_pt_duplication_;
+  device_only_memory<float> restir_pt_scratch_buffer_;
+  bool restir_pt_previous_is_a_ = true;
+  bool restir_pt_current_is_a_ = false;
+  bool restir_pt_surface_previous_is_a_ = true;
+  bool restir_pt_surface_current_is_a_ = false;
 
   /* Optional Metal bidirectional light-vertex cache. */
   device_only_memory<KernelBDPTVertex> bdpt_vertices_;

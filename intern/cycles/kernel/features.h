@@ -85,6 +85,9 @@ CCL_NAMESPACE_BEGIN
 /* Metal bidirectional path tracing state. */
 #define KERNEL_FEATURE_BDPT (1ULL << 32ULL)
 
+/* Metal ReSTIR PT Enhanced path-reservoir and replay state. */
+#define KERNEL_FEATURE_RESTIR_PT (1ULL << 33ULL)
+
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
 #define KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT \

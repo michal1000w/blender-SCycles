@@ -334,6 +334,10 @@ class PathTrace {
     /* Current tile has been written (to either disk or callback.
      * Indicates that no more work will be done on this tile. */
     bool tile_written = false;
+
+    /* A full session reset at unchanged buffer layout (camera/object animation or viewport
+     * navigation) may retain compatible ReSTIR history. Tile/layout transitions must clear it. */
+    bool preserve_reuse_history = false;
   } render_state_;
 
   /* Progress object which is used to communicate sample progress. */

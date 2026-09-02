@@ -150,7 +150,10 @@ ccl_device_inline ShaderEvalResult integrate_background(
     /* Background MIS weights. */
     float mis_weight;
 #ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_surface_path(state)) {
+    if ((path_flag & PATH_RAY_RESTIR_DIRECT) && !(path_flag & PATH_RAY_MIS_SKIP)) {
+      mis_weight = kernel_data.background.use_mis ? 0.0f : 1.0f;
+    }
+    else if (bdpt_enabled_for_surface_path(state)) {
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float3 ray_D = INTEGRATOR_STATE(state, ray, D);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights *
@@ -251,7 +254,12 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
     /* MIS weighting. */
     float mis_weight;
 #ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_surface_path(state)) {
+    if ((path_flag & PATH_RAY_RESTIR_DIRECT) && !(path_flag & PATH_RAY_MIS_SKIP)) {
+      const float forward_weight = light_sample_mis_weight_forward_distant(
+          kg, state, path_visibility, path_flag, klight->object_id, light_eval.pdf);
+      mis_weight = (forward_weight == 1.0f) ? 1.0f : 0.0f;
+    }
+    else if (bdpt_enabled_for_surface_path(state)) {
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights * light_eval.pdf;
       mis_weight = bdpt_emission_mis_weight_infinite(
@@ -268,8 +276,13 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
 
     /* Write to render buffer. */
     guiding_record_background(kg, state, eval, mis_weight);
-    film_write_surface_emission(
-        kg, state, eval, mis_weight, render_buffer, object_lightgroup(kg, klight->object_id));
+    film_write_surface_emission(kg,
+                                state,
+                                eval,
+                                mis_weight,
+                                render_buffer,
+                                object_lightgroup(kg, klight->object_id),
+                                RESTIR_PT_TECHNIQUE_BACKGROUND);
   }
 
   return SHADER_EVAL_OK;
@@ -280,6 +293,21 @@ ccl_device void integrator_shade_background(KernelGlobals kg,
                                             ccl_global float *ccl_restrict render_buffer)
 {
   PROFILING_INIT(kg, PROFILING_SHADE_LIGHT_SETUP);
+
+#ifdef __KERNEL_METAL__
+  if (kernel_integrator_state.restir_pt_phase != 0u) {
+    const uint pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+    /* Surface replay applies this gate at the primary hit. Camera rays which miss all geometry
+     * never visit that code, so reject them here when the target pixel has no compatible source
+     * path. Apart from avoiding needless shader work, this prevents auxiliary background samples
+     * from leaking into the main estimator on implementations which alias film arguments. */
+    if (!restir_pt_replay_source(pixel_index)) {
+      integrator_path_terminate(
+          kg, state, render_buffer, DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND);
+      return;
+    }
+  }
+#endif
 
   /* TODO: unify these in a single loop to only have a single shader evaluation call. */
   ShaderEvalResult result = integrate_sun_lights(kg, state, render_buffer);

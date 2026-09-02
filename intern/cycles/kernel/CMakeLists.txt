@@ -196,6 +196,9 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/path_state.h
   integrator/photon_mapping.h
   integrator/bidirectional.h
+  integrator/restir.h
+  integrator/restir_pt.h
+  integrator/restir_pt_finalize.h
   integrator/shade_background.h
   integrator/shade_light.h
   integrator/shade_shadow.h

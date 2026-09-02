@@ -33,6 +33,19 @@ KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, queued_kernel, KERNEL_FEATURE_PATH_T
 KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, visibility, KERNEL_FEATURE_PATH_TRACING)
 /* enum PathRayFlag */
 KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, flag, KERNEL_FEATURE_PATH_TRACING)
+KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, restir_pt_path_hash, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path, packed_float3, restir_pt_rc_P, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path, uint32_t, restir_pt_rc_normal, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, restir_pt_rc_throughput, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path, float, restir_pt_rc_wi_pdf, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path,
+                     float,
+                     restir_pt_inverse_partial_jacobian,
+                     KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, restir_pt_rc_length, KERNEL_FEATURE_RESTIR_PT)
+/* Non-zero for a visibility ray produced by the hybrid path-reconnection shift. */
+KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, restir_pt_reconnection, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(shadow_path, float, restir_pt_jacobian, KERNEL_FEATURE_RESTIR_PT)
 /* Throughput. */
 KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, throughput, KERNEL_FEATURE_PATH_TRACING)
 /* Throughput for shadow pass. */

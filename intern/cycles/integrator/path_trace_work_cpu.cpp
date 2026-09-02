@@ -244,7 +244,7 @@ bool PathTraceWorkCPU::copy_render_buffers_to_device()
   return true;
 }
 
-bool PathTraceWorkCPU::zero_render_buffers()
+bool PathTraceWorkCPU::zero_render_buffers(const bool /*preserve_reuse_history*/)
 {
   buffers_->zero();
   return true;

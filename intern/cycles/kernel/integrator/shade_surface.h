@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/integrator/path_state.h"
+#include "kernel/integrator/restir.h"
 #include "kernel/integrator/surface_shader.h"
 
 #include "kernel/film/data_passes.h"
@@ -153,10 +154,14 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
 
   float mis_weight;
 #ifdef __KERNEL_METAL__
-  mis_weight = bdpt_enabled_for_surface_path(state) ?
+  const float forward_weight = light_sample_mis_weight_forward_surface(
+      kg, state, path_visibility, path_flag, sd);
+  mis_weight = ((path_flag & PATH_RAY_RESTIR_DIRECT) && !(path_flag & PATH_RAY_MIS_SKIP)) ?
+                   /* Keep forward-only emitters that cannot be sampled by NEE. */
+                   (restir_di_surface_nee_supported(sd, path_flag) ? 0.0f : 1.0f) :
+                   bdpt_enabled_for_surface_path(state) ?
                    bdpt_emission_mis_weight_surface(kg, state, sd) :
-                   light_sample_mis_weight_forward_surface(
-                       kg, state, path_visibility, path_flag, sd);
+                   forward_weight;
 #else
   mis_weight = light_sample_mis_weight_forward_surface(kg, state, path_visibility, path_flag, sd);
 #endif
@@ -280,6 +285,13 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
         state, path, portal_bounce);
   }
 
+#ifdef __KERNEL_METAL__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_RESTIR_PT) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_reconnection) = 0u;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_jacobian) = 1.0f;
+  }
+#endif
+
 #ifdef __MNEE__
   if (mnee_vertex_count > 0) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transmission_bounce) =
@@ -317,6 +329,167 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
   return shadow_state;
 }
 
+#ifdef __KERNEL_METAL__
+/* Hybrid shift from the replayed current prefix to the source reservoir's stored suffix. The
+ * connection is accepted only in the reciprocal rough/large-footprint domain and is evaluated by
+ * an ordinary Cycles shadow path, so transparency and volumes on the connecting edge remain exact. */
+ccl_device_forceinline bool integrate_surface_restir_pt_reconnection(
+    KernelGlobals kg, IntegratorState state, ccl_private ShaderData *sd)
+{
+  if (!kernel_data.integrator.use_restir_pt ||
+      kernel_integrator_state.restir_pt_phase == 0u ||
+      !(sd->runtime_flag & SR_BSDF_HAS_EVAL))
+  {
+    return false;
+  }
+  const uint pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+  const ccl_global KernelReSTIRPTReservoir *source = restir_pt_replay_source(pixel_index);
+  if (!source) {
+    return false;
+  }
+  const uint path_length = source->path_data & 0xffu;
+  const uint rc_length = (source->path_data >> 8u) & 0xffu;
+  const uint technique = (source->path_data >> 16u) & 0xffu;
+  const uint bounce = uint(INTEGRATOR_STATE(state, path, bounce));
+  if (rc_length < 2u || rc_length > path_length || bounce + 2u != rc_length ||
+      !(source->rc_wi_pdf > 0.0f) || !(source->inverse_partial_jacobian > 0.0f) ||
+      surface_shader_average_roughness(sd) < kernel_data.integrator.restir_pt_min_roughness)
+  {
+    return false;
+  }
+
+  packed_normal packed_rc_N;
+  packed_rc_N.value = source->rc_normal;
+  const float3 rc_N = packed_rc_N.decode();
+  const float3 rc_P = make_float3(source->rc_P);
+  const float3 delta = rc_P - sd->P;
+  const float distance2 = len_squared(delta);
+  if (!(distance2 > 1.0e-12f)) {
+    return false;
+  }
+  const float distance = sqrtf(distance2);
+  const float3 D = delta / distance;
+  const float cos_rc = fabsf(dot(rc_N, -D));
+  const float cos_current = fabsf(dot(sd->Ng, D));
+  if (!(cos_rc > 1.0e-7f) || !(cos_current > 1.0e-7f)) {
+    return false;
+  }
+
+  BsdfEval bsdf_eval ccl_optional_struct_init;
+  float roughness_squared = 0.0f;
+  const float target_pdf = surface_shader_bsdf_eval(
+      kg, state, sd, D, &bsdf_eval, SHADER_USE_MIS, roughness_squared);
+  if (!(target_pdf > 0.0f) || bsdf_eval_is_zero(&bsdf_eval)) {
+    return false;
+  }
+  const bool forced_nee = technique == RESTIR_PT_TECHNIQUE_NEE &&
+                          rc_length == path_length && source->path_hash != 0u;
+  float target_geometry = cos_rc / distance2;
+  float target_density = target_pdf * target_geometry;
+  float source_density = source->inverse_partial_jacobian * source->rc_wi_pdf;
+  float jacobian = 0.0f;
+  if (forced_nee) {
+    const int emitter_object = int((source->path_hash >> 16u) & 0xffffu) - 1;
+    const int emitter_prim = int(source->path_hash & 0xffffu) - 1;
+    if (emitter_object < 0 || emitter_prim < 0) {
+      return false;
+    }
+    ShaderData light_sd ccl_optional_struct_init;
+    light_sd.P = rc_P;
+    light_sd.Ng = rc_N;
+    light_sd.wi = -D;
+    light_sd.object = emitter_object;
+    light_sd.prim = emitter_prim;
+    light_sd.time = sd->time;
+    float target_light_pdf = triangle_light_pdf(kg, &light_sd, distance);
+#  ifdef __LIGHT_TREE__
+    if (kernel_data.integrator.use_light_tree && target_light_pdf > 0.0f) {
+      const uint lookup_offset = kernel_data_fetch(object_lookup_offset, emitter_object);
+      const uint prim_offset = kernel_data_fetch(object_prim_offset, emitter_object);
+      const uint triangle = kernel_data_fetch(
+          triangle_to_tree, emitter_prim - int(prim_offset) + int(lookup_offset));
+      target_light_pdf *= light_tree_pdf(kg,
+                                         sd->P,
+                                         sd->N,
+                                         0.0f,
+                                         INTEGRATOR_STATE(state, path, visibility),
+                                         INTEGRATOR_STATE(state, path, flag),
+                                         emitter_object,
+                                         triangle,
+                                         light_link_receiver_nee(kg, sd));
+    }
+#  endif
+    if (!(target_light_pdf > 0.0f) || !isfinite_safe(target_light_pdf)) {
+      return false;
+    }
+    source_density = source->inverse_partial_jacobian;
+    target_density = target_light_pdf;
+    jacobian = source_density / target_density;
+  }
+  const float dual_footprint = 1.0f / max(max(target_density, source_density), 1.0e-20f);
+  const float required_footprint = kernel_data.integrator.restir_pt_footprint_threshold *
+                                   max(INTEGRATOR_STATE(
+                                           state, path, restir_pt_primary_footprint),
+                                       1.0e-12f);
+  if (dual_footprint < required_footprint) {
+    return false;
+  }
+  if (!forced_nee) {
+    jacobian = (source->inverse_partial_jacobian * target_geometry) /
+               max(target_pdf * source->rc_wi_pdf, 1.0e-20f);
+  }
+  if (!(jacobian > 0.0f) || !isfinite_safe(jacobian)) {
+    return false;
+  }
+
+  const Spectrum target_rc_throughput = INTEGRATOR_STATE(state, path, throughput) *
+                                        (forced_nee ? bsdf_eval_sum(&bsdf_eval) :
+                                                      bsdf_eval_sum(&bsdf_eval) / target_pdf);
+  const Spectrum throughput_ratio = safe_divide_color(
+      target_rc_throughput, Spectrum(source->rc_throughput));
+  const Spectrum shifted_contribution = Spectrum(source->contribution) * throughput_ratio;
+  if (is_zero(shifted_contribution) ||
+      !isfinite_safe(reduce_max(fabs(shifted_contribution))))
+  {
+    return false;
+  }
+
+  Ray ray ccl_optional_struct_init;
+  bool skip_self = true;
+  ray.P = shadow_ray_offset(kg, sd, D, &skip_self);
+  const float3 rc_shadow_P = ray_offset(rc_P, dot(rc_N, -D) >= 0.0f ? rc_N : -rc_N);
+  const float3 shadow_delta = rc_shadow_P - ray.P;
+  const float shadow_distance = len(shadow_delta);
+  if (!(shadow_distance > 1.0e-8f)) {
+    return false;
+  }
+  ray.D = shadow_delta / shadow_distance;
+  ray.tmin = 0.0f;
+  ray.tmax = shadow_distance;
+  ray.time = sd->time;
+  ray.self.object = skip_self ? sd->object : OBJECT_NONE;
+  ray.self.prim = skip_self ? sd->prim : PRIM_NONE;
+  ray.self.light_object = OBJECT_NONE;
+  ray.self.light_prim = PRIM_NONE;
+#  ifdef __RAY_DIFFERENTIALS__
+  ray.dP = differential_zero_compact();
+  ray.dD = differential_zero_compact();
+#  endif
+
+  const int source_lightgroup = int(source->lightgroup & 0xffu) - 1;
+  IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
+      kg, state, &ray, one_spectrum(), source_lightgroup, 0, true);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = shifted_contribution;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = uint16_t(path_length - 2u);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = PathRayVisibility(
+      (source->lightgroup >> 8u) & 0xffu);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = source->path_flag;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_reconnection) = 1u;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_jacobian) = jacobian;
+  return true;
+}
+#endif
+
 /* Path tracing: sample point on light and evaluate light shader, then
  * queue shadow ray to be traced. */
 template<uint64_t node_feature_mask>
@@ -332,6 +505,12 @@ ccl_device
                                    ccl_private ShaderData *sd,
                                    const ccl_private RNGState *rng_state)
 {
+#ifdef __KERNEL_METAL__
+  /* This bit describes the estimator used at the current vertex after this function returns. The
+   * incoming value was consumed by surface emission earlier in the shading kernel. */
+  INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_RESTIR_DIRECT;
+#endif
+
   /* Test if there is a light or BSDF that needs direct light. */
   if (!(kernel_data.integrator.use_direct_light && (sd->runtime_flag & SR_BSDF_HAS_EVAL))) {
     return SHADER_EVAL_EMPTY;
@@ -339,6 +518,10 @@ ccl_device
 
   LightSample ls ccl_optional_struct_init;
   int mnee_vertex_count = 0;  // NOLINT
+#ifdef __KERNEL_METAL__
+  float restir_weight = 0.0f;
+  bool use_restir = false;
+#endif
 
 #ifdef __MNEE__
   if ((kernel_data.kernel_features & KERNEL_FEATURE_MNEE) &&
@@ -350,23 +533,47 @@ ccl_device
   else
 #endif
   {
-    /* Sample position on a light. */
-    const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-    const uint bounce = INTEGRATOR_STATE(state, path, bounce);
-    const float3 rand_light = path_state_rng_3D(kg, rng_state, PRNG_LIGHT);
-
-    if (!light_sample_from_position(kg,
-                                    rand_light,
-                                    sd->time,
-                                    sd->P,
-                                    sd->N,
-                                    light_link_receiver_nee(kg, sd),
-                                    sd->runtime_flag,
-                                    bounce,
-                                    path_flag,
-                                    &ls))
+#ifdef __KERNEL_METAL__
+    const uint32_t current_path_flag = INTEGRATOR_STATE(state, path, flag);
+    /* Select the estimator per path vertex. BDPT-supported vertices retain their recursive MIS,
+     * shadow-catcher paths retain their specialized compositing estimator, and all other eligible
+     * surfaces may independently use reservoir direct lighting. */
+    use_restir = (kernel_data.integrator.use_restir || kernel_data.integrator.use_restir_pt) &&
+                 !bdpt_enabled_for_surface_path(state) &&
+                 !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS) &&
+                 surface_shader_average_roughness(sd) >=
+                     (kernel_data.integrator.use_restir_pt ?
+                          kernel_data.integrator.restir_pt_min_roughness :
+                          kernel_data.integrator.restir_min_roughness);
+    if (use_restir) {
+      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_RESTIR_DIRECT;
+      if (!restir_di_resample(kg, state, sd, rng_state, &ls, &restir_weight)) {
+        /* No NEE estimate was produced, so forward light hits must remain available. */
+        INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_RESTIR_DIRECT;
+        return SHADER_EVAL_EMPTY;
+      }
+    }
+    else
+#endif
     {
-      return SHADER_EVAL_EMPTY;
+      /* Sample position on a light. */
+      const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+      const uint bounce = INTEGRATOR_STATE(state, path, bounce);
+      const float3 rand_light = path_state_rng_3D(kg, rng_state, PRNG_LIGHT);
+
+      if (!light_sample_from_position(kg,
+                                      rand_light,
+                                      sd->time,
+                                      sd->P,
+                                      sd->N,
+                                      light_link_receiver_nee(kg, sd),
+                                      sd->runtime_flag,
+                                      bounce,
+                                      path_flag,
+                                      &ls))
+      {
+        return SHADER_EVAL_EMPTY;
+      }
     }
   }
 
@@ -406,6 +613,26 @@ ccl_device
   const float bsdf_pdf = surface_shader_bsdf_eval(
       kg, state, sd, ls.D, &bsdf_eval, ls.shader, avg_roughness_squared);
 
+#ifdef __KERNEL_METAL__
+  /* Cache the prefix-side factor before NEE's light-selection and emitter weights are applied.
+   * If random replay finds no earlier hybrid vertex, a finite sampled-light endpoint can then be
+   * forced as the reconnection vertex without resampling the light. */
+  Spectrum restir_pt_nee_rc_throughput = zero_spectrum();
+  float restir_pt_nee_source_pdf = 0.0f;
+  if (kernel_data.integrator.use_restir_pt && mnee_vertex_count == 0 && bsdf_pdf > 0.0f &&
+      /* The PSS Jacobian below is an area-measure mapping. Analytic delta and distant lights need
+       * their own discrete/directional mapping and must not be treated as finite area endpoints. */
+      ls.type == LIGHT_TRIANGLE && uint(INTEGRATOR_STATE(state, path, bounce)) > 0u &&
+      isfinite_safe(ls.t) &&
+      ls.t > 1.0e-6f && surface_shader_average_roughness(sd) >=
+                             kernel_data.integrator.restir_pt_min_roughness)
+  {
+    restir_pt_nee_rc_throughput = INTEGRATOR_STATE(state, path, throughput) *
+                                  bsdf_eval_sum(&bsdf_eval);
+    restir_pt_nee_source_pdf = ls.pdf;
+  }
+#endif
+
   Ray ray ccl_optional_struct_init;
 
 #ifdef __MNEE__
@@ -424,13 +651,20 @@ ccl_device
   {
     float mis_weight;
 #ifdef __KERNEL_METAL__
-    mis_weight = bdpt_enabled_for_surface_path(state) ?
-                     bdpt_nee_mis_weight(kg, state, sd, &ls, bsdf_pdf) :
-                     light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
+    mis_weight = use_restir ? 1.0f :
+                 bdpt_enabled_for_surface_path(state) ?
+                              bdpt_nee_mis_weight(kg, state, sd, &ls, bsdf_pdf) :
+                              light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
 #else
     mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
 #endif
+#ifdef __KERNEL_METAL__
+    const float sample_weight = use_restir ? restir_weight : 1.0f / ls.pdf;
+    bsdf_eval_mul(&bsdf_eval, light_shader_eval * ls.eval_fac * sample_weight * mis_weight);
+#else
+    /* Preserve the established operation order and bit-exact output on unrelated devices. */
     bsdf_eval_mul(&bsdf_eval, light_shader_eval * ls.eval_fac / ls.pdf * mis_weight);
+#endif
 
     /* Path termination for constant light shader. */
     if (is_constant_light_shader && !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_TREE)) {
@@ -500,6 +734,45 @@ ccl_device
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = INTEGRATOR_STATE(
       state, path, visibility);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
+  if (kernel_data.kernel_features & KERNEL_FEATURE_RESTIR_PT) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_path_hash) = INTEGRATOR_STATE(
+        state, path, restir_pt_path_hash);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_P) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_P);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_normal) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_normal);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_throughput) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_throughput);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_wi_pdf) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_wi_pdf);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_inverse_partial_jacobian) =
+        INTEGRATOR_STATE(state, path, restir_pt_inverse_partial_jacobian);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_length) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_length);
+#ifdef __KERNEL_METAL__
+    if (kernel_data.integrator.use_restir_pt &&
+        kernel_integrator_state.restir_pt_phase == 0u &&
+        INTEGRATOR_STATE(state, path, restir_pt_rc_length) == uint16_t(0xffffu) &&
+        restir_pt_nee_source_pdf > 0.0f && ls.object >= 0 && ls.object < 0xffff &&
+        ls.prim >= 0 && ls.prim < 0xffff &&
+        !is_zero(restir_pt_nee_rc_throughput))
+    {
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_P) = ls.P;
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_normal) =
+          packed_normal(ls.Ng).value;
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_throughput) =
+          restir_pt_nee_rc_throughput;
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_wi_pdf) =
+          1.0f;
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_inverse_partial_jacobian) =
+          restir_pt_nee_source_pdf;
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_length) = uint16_t(
+          min(uint(INTEGRATOR_STATE(state, path, bounce)) + 2u, 0xfffeu));
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_path_hash) =
+          (uint(ls.object + 1) << 16u) | uint(ls.prim + 1);
+    }
+#endif
+  }
 
   return SHADER_EVAL_OK;
 }
@@ -843,6 +1116,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   /* Update throughput. */
   const Spectrum bsdf_weight = bsdf_eval_sum(&bsdf_eval) / bsdf_pdf;
+#ifdef __KERNEL_METAL__
+  restir_pt_record_reconnection(state, sd, bsdf_pdf, bsdf_sampled_roughness, label);
+#endif
   INTEGRATOR_STATE_WRITE(state, path, throughput) *= bsdf_weight;
 
 #ifdef __KERNEL_METAL__
@@ -1101,6 +1377,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
         const Spectrum photon_L = photon_mapping_gather(kg, state, &sd, render_buffer);
         photon_mapping_write(kg, state, photon_L, render_buffer);
       }
+      restir_pt_record_primary(kg, state, &sd);
 #endif
 
       /* Write emission. */
@@ -1127,6 +1404,15 @@ ccl_device int integrate_surface(KernelGlobals kg,
       film_write_denoising_features_surface(kg, state, &sd, render_buffer);
 #endif
     }
+
+#ifdef __KERNEL_METAL__
+    if (!restir_pt_begin_replay(state)) {
+      return LABEL_NONE;
+    }
+    if (integrate_surface_restir_pt_reconnection(kg, state, &sd)) {
+      return LABEL_NONE;
+    }
+#endif
 
     /* Load random number state. */
     RNGState rng_state;

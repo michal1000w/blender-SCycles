@@ -112,7 +112,7 @@ class PathTraceWork {
 
   /* Zero render buffers to/from device using an appropriate device queue when needed so that
    * things are executed in order with the `render_samples()`. */
-  virtual bool zero_render_buffers() = 0;
+  virtual bool zero_render_buffers(bool preserve_reuse_history = false) = 0;
 
   /* Access pixels rendered by this work and copy them to the corresponding location in the
    * destination.

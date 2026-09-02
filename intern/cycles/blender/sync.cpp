@@ -400,6 +400,22 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
+  integrator->set_use_restir(get_boolean(cscene, "use_restir"));
+  integrator->set_restir_light_candidates(get_int(cscene, "restir_light_candidates"));
+  integrator->set_restir_spatial_neighbors(get_int(cscene, "restir_spatial_neighbors"));
+  integrator->set_restir_spatial_radius(get_int(cscene, "restir_spatial_radius"));
+  integrator->set_restir_history_length(get_int(cscene, "restir_history_length"));
+  integrator->set_restir_normal_threshold(get_float(cscene, "restir_normal_threshold"));
+  integrator->set_restir_position_threshold(get_float(cscene, "restir_position_threshold"));
+  integrator->set_restir_min_roughness(get_float(cscene, "restir_min_roughness"));
+  integrator->set_use_restir_pt(get_boolean(cscene, "use_restir_pt"));
+  integrator->set_restir_pt_temporal_history(get_int(cscene, "restir_pt_temporal_history"));
+  integrator->set_restir_pt_spatial_neighbors(get_int(cscene, "restir_pt_spatial_neighbors"));
+  integrator->set_restir_pt_spatial_radius(get_int(cscene, "restir_pt_spatial_radius"));
+  integrator->set_restir_pt_footprint_threshold(
+      get_float(cscene, "restir_pt_footprint_threshold"));
+  integrator->set_restir_pt_min_roughness(get_float(cscene, "restir_pt_min_roughness"));
+  integrator->set_restir_pt_decorrelate(get_boolean(cscene, "restir_pt_decorrelate"));
   integrator->set_use_bidirectional_path_tracing(
       get_boolean(cscene, "use_bidirectional_path_tracing"));
   integrator->set_bdpt_light_paths(get_int(cscene, "bdpt_light_paths"));

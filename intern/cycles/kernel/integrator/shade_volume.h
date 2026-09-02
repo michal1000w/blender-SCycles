@@ -2640,6 +2640,22 @@ ccl_device_forceinline void integrate_volume_direct_light(
       state, path, sample);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = path_visibility;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
+  if (kernel_data.kernel_features & KERNEL_FEATURE_RESTIR_PT) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_path_hash) = INTEGRATOR_STATE(
+        state, path, restir_pt_path_hash);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_P) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_P);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_normal) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_normal);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_throughput) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_throughput);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_wi_pdf) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_wi_pdf);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_inverse_partial_jacobian) =
+        INTEGRATOR_STATE(state, path, restir_pt_inverse_partial_jacobian);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, restir_pt_rc_length) = INTEGRATOR_STATE(
+        state, path, restir_pt_rc_length);
+  }
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) = bounce;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = transparent_bounce;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, diffuse_bounce) = INTEGRATOR_STATE(

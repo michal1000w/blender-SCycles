@@ -53,6 +53,16 @@ KERNEL_STRUCT_MEMBER(path, float, mis_ray_pdf, KERNEL_FEATURE_PATH_TRACING)
 /* Recursive balance-heuristic terms for Metal bidirectional path tracing. */
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vcm, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vc, KERNEL_FEATURE_BDPT)
+/* Rolling material/topology identity used to validate ReSTIR PT replay invertibility. */
+KERNEL_STRUCT_MEMBER(path, uint32_t, restir_pt_path_hash, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, packed_float3, restir_pt_rc_P, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, uint32_t, restir_pt_rc_normal, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, restir_pt_rc_throughput, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, float, restir_pt_rc_wi_pdf, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, float, restir_pt_inverse_partial_jacobian, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, float, restir_pt_primary_footprint, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, float, restir_pt_previous_roughness, KERNEL_FEATURE_RESTIR_PT)
+KERNEL_STRUCT_MEMBER(path, uint16_t, restir_pt_rc_length, KERNEL_FEATURE_RESTIR_PT)
 /* Object at last scatter point for light linking. */
 KERNEL_STRUCT_MEMBER(path, int, mis_ray_object, KERNEL_FEATURE_LIGHT_LINKING)
 /* Normal at last scatter point for light tree. */

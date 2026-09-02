@@ -70,10 +70,13 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
   const bool bdpt_emitter_supported = !(
       (klight->type == LIGHT_POINT || klight->type == LIGHT_SPOT) && !klight->spot.is_sphere &&
       klight->spot.radius > 0.0f);
-  mis_weight = (bdpt_enabled_for_surface_path(state) && bdpt_emitter_supported) ?
+  const float forward_weight = light_sample_mis_weight_forward_lamp(
+      kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
+  mis_weight = ((path_flag & PATH_RAY_RESTIR_DIRECT) && !(path_flag & PATH_RAY_MIS_SKIP)) ?
+                   ((forward_weight == 1.0f) ? 1.0f : 0.0f) :
+               (bdpt_enabled_for_surface_path(state) && bdpt_emitter_supported) ?
                    bdpt_emission_mis_weight_lamp(kg, state, klight, ray_P, ray_D, isect.t) :
-                   light_sample_mis_weight_forward_lamp(
-                       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
+                   forward_weight;
 #else
   mis_weight = light_sample_mis_weight_forward_lamp(
       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);

@@ -200,6 +200,36 @@ KERNEL_STRUCT_MEMBER(integrator, int, caustics_reflective)
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_refractive)
 KERNEL_STRUCT_MEMBER(integrator, float, filter_glossy)
 KERNEL_STRUCT_MEMBER(integrator, float, differential_widen_scale)
+/* Metal reservoir direct lighting. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_restir)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_light_candidates)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_spatial_neighbors)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_spatial_radius)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_history_length)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, restir_normal_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, restir_position_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, restir_min_roughness)
+/* Metal ReSTIR PT Enhanced. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_restir_pt)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_pt_temporal_history)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_pt_spatial_neighbors)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_pt_spatial_radius)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, restir_pt_footprint_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, restir_pt_min_roughness)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, restir_pt_decorrelate)
 /* Metal bidirectional path tracing. Light subpaths are cached in render-working memory. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_bidirectional_path_tracing)
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE

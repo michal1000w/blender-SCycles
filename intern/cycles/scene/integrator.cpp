@@ -60,6 +60,11 @@ bool Integrator::use_bidirectional_path_tracing_on_device(const Device *device) 
   return get_use_bidirectional_path_tracing() && device_supports_metal_features(device);
 }
 
+bool Integrator::use_restir_on_device(const Device *device) const
+{
+  return get_use_restir() && device_supports_metal_features(device);
+}
+
 static bool photon_input_is_varying(ShaderNode *node, const char *name)
 {
   const ShaderInput *input = node->input(name);
@@ -235,6 +240,23 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
 
+  SOCKET_BOOLEAN(use_restir, "Reservoir Direct Lighting", false);
+  SOCKET_INT(restir_light_candidates, "ReSTIR Light Candidates", 8);
+  SOCKET_INT(restir_spatial_neighbors, "ReSTIR Spatial Neighbors", 0);
+  SOCKET_INT(restir_spatial_radius, "ReSTIR Spatial Radius", 24);
+  SOCKET_INT(restir_history_length, "ReSTIR History Length", 0);
+  SOCKET_FLOAT(restir_normal_threshold, "ReSTIR Normal Threshold", 0.8f);
+  SOCKET_FLOAT(restir_position_threshold, "ReSTIR Position Threshold", 0.05f);
+  SOCKET_FLOAT(restir_min_roughness, "ReSTIR Minimum Roughness", 0.25f);
+
+  SOCKET_BOOLEAN(use_restir_pt, "ReSTIR PT Enhanced", false);
+  SOCKET_INT(restir_pt_temporal_history, "ReSTIR PT Temporal History", 20);
+  SOCKET_INT(restir_pt_spatial_neighbors, "ReSTIR PT Spatial Neighbors", 1);
+  SOCKET_INT(restir_pt_spatial_radius, "ReSTIR PT Spatial Radius", 30);
+  SOCKET_FLOAT(restir_pt_footprint_threshold, "ReSTIR PT Footprint Threshold", 0.02f);
+  SOCKET_FLOAT(restir_pt_min_roughness, "ReSTIR PT Minimum Roughness", 0.2f);
+  SOCKET_BOOLEAN(restir_pt_decorrelate, "ReSTIR PT Duplication Decorrelation", true);
+
   SOCKET_BOOLEAN(use_bidirectional_path_tracing, "Bidirectional Path Tracing", false);
   SOCKET_INT(bdpt_light_paths, "BDPT Light Paths", 65536);
   SOCKET_INT(bdpt_reference_pixels, "BDPT Reference Pixels", 1);
@@ -407,6 +429,24 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->caustics_refractive = caustics_refractive;
   kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX : 1.0f / filter_glossy;
   kintegrator->differential_widen_scale = min(1.0f, filter_glossy);
+
+  kintegrator->use_restir = use_restir_on_device(device);
+  kintegrator->restir_light_candidates = clamp(restir_light_candidates, 1, 16);
+  kintegrator->restir_spatial_neighbors = clamp(restir_spatial_neighbors, 0, 4);
+  kintegrator->restir_spatial_radius = clamp(restir_spatial_radius, 1, 64);
+  kintegrator->restir_history_length = clamp(restir_history_length, 0, 64);
+  kintegrator->restir_normal_threshold = clamp(restir_normal_threshold, -1.0f, 1.0f);
+  kintegrator->restir_position_threshold = max(restir_position_threshold, 1.0e-5f);
+  kintegrator->restir_min_roughness = clamp(restir_min_roughness, 0.0f, 1.0f);
+
+  kintegrator->use_restir_pt = get_use_restir_pt() && device_supports_metal_features(device);
+  kintegrator->restir_pt_temporal_history = clamp(restir_pt_temporal_history, 0, 64);
+  kintegrator->restir_pt_spatial_neighbors = clamp(restir_pt_spatial_neighbors, 0, 8);
+  kintegrator->restir_pt_spatial_radius = clamp(restir_pt_spatial_radius, 1, 64);
+  kintegrator->restir_pt_footprint_threshold = clamp(
+      restir_pt_footprint_threshold, 1.0e-5f, 1.0f);
+  kintegrator->restir_pt_min_roughness = clamp(restir_pt_min_roughness, 0.0f, 1.0f);
+  kintegrator->restir_pt_decorrelate = restir_pt_decorrelate;
 
   /* Photon mapping is currently scheduled by the GPU path tracer and enabled only on Metal.
    * Keeping the complete configuration in KernelData makes all regular shading kernels see an
@@ -677,6 +717,10 @@ uint64_t Integrator::get_kernel_features() const
      * vertex and the camera. This is intrinsic bidirectional transport and does not require the
      * user-facing shadow-caustics caster/receiver annotations. */
     kernel_features |= KERNEL_FEATURE_BDPT | KERNEL_FEATURE_MNEE;
+  }
+
+  if (get_use_restir_pt()) {
+    kernel_features |= KERNEL_FEATURE_RESTIR_PT;
   }
 
   return kernel_features;

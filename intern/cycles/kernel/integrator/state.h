@@ -217,6 +217,24 @@ struct IntegratorStateGPU {
   ccl_global KernelBDPTVertex *bdpt_vertices;
   ccl_global uint *bdpt_vertex_count;
 
+  /* Ping-pong screen-space direct-light reservoirs. `restir_previous` is immutable while a
+   * camera sample is in flight; each primary surface writes exactly one entry to `restir_current`.
+   */
+  ccl_global KernelReSTIRDIReservoir *restir_previous;
+  ccl_global KernelReSTIRDIReservoir *restir_current;
+
+  /* ReSTIR PT Enhanced keeps immutable source and writable destination layers. Initial camera
+   * and shadow paths stream into `restir_pt_initial`; temporal/spatial passes consume one layer
+   * and write the other without in-place feedback. */
+  ccl_global KernelReSTIRPTReservoir *restir_pt_initial;
+  ccl_global KernelReSTIRPTReservoir *restir_pt_source;
+  ccl_global KernelReSTIRPTReservoir *restir_pt_previous;
+  ccl_global KernelReSTIRPTReservoir *restir_pt_current;
+  ccl_global KernelReSTIRPTSurface *restir_pt_previous_surfaces;
+  ccl_global KernelReSTIRPTSurface *restir_pt_source_surfaces;
+  ccl_global KernelReSTIRPTSurface *restir_pt_current_surfaces;
+  ccl_global float *restir_pt_duplication;
+
   /* Divisor used to partition active indices by locality when sorting by material. */
   uint sort_partition_divisor;
 
@@ -235,6 +253,18 @@ struct IntegratorStateGPU {
   int bdpt_buffer_height;
   int bdpt_buffer_offset;
   int bdpt_buffer_stride;
+
+  uint restir_reservoir_capacity;
+  int restir_buffer_full_x;
+  int restir_buffer_full_y;
+  int restir_buffer_width;
+  int restir_buffer_height;
+  int restir_buffer_offset;
+  int restir_buffer_stride;
+
+  uint restir_pt_reservoir_capacity;
+  uint restir_pt_phase;
+  uint restir_pt_spatial_iteration;
 };
 
 /* Abstraction

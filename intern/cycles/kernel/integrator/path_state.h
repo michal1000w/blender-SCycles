@@ -67,6 +67,17 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   }
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
   INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
+  if (kernel_data.kernel_features & KERNEL_FEATURE_RESTIR_PT) {
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_path_hash) = 0x811c9dc5u;
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_rc_P) = zero_float3();
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_rc_normal) = 0u;
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_rc_throughput) = zero_spectrum();
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_rc_wi_pdf) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_inverse_partial_jacobian) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_primary_footprint) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_previous_roughness) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, path, restir_pt_rc_length) = uint16_t(0xffffu);
+  }
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
   INTEGRATOR_STATE_WRITE(state, path, optical_depth) = 0.0f;
 #if defined(__PATH_GUIDING__)
@@ -159,8 +170,18 @@ ccl_device_inline void path_state_next(KernelGlobals kg,
   if (label & LABEL_VOLUME_SCATTER) {
     /* volume scatter */
     visibility |= PATH_RAY_VISIBILITY_VOLUME_SCATTER;
+#  ifdef __KERNEL_METAL__
+    /* A volume vertex breaks the direct-light sampling competition from the preceding surface.
+     * Do not let its ReSTIR marker suppress emission reached from the newly sampled phase event.
+     */
+    flag &= ~PATH_RAY_RESTIR_DIRECT;
+#  endif
     flag &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;
     flag |= PATH_RAY_MIS_HAD_TRANSMISSION;
+    if (kernel_data.kernel_features & KERNEL_FEATURE_RESTIR_PT) {
+      INTEGRATOR_STATE_WRITE(state, path, restir_pt_path_hash) = hash_uint3(
+          INTEGRATOR_STATE(state, path, restir_pt_path_hash), 0x766f6c75u, uint(bounce));
+    }
     flag &= ~PATH_RAY_TRANSPARENT_BACKGROUND;
     if (!(flag & PATH_RAY_ANY_PASS)) {
       flag |= PATH_RAY_VOLUME_PASS;
@@ -285,6 +306,14 @@ ccl_device_inline float path_state_continuation_probability(KernelGlobals kg,
                                                             ConstIntegratorState state,
                                                             const uint32_t path_flag)
 {
+#ifdef __KERNEL_METAL__
+  /* Russian roulette is an external initial-sampling decision for ReSTIR PT. Replay must preserve
+   * every selected source path instead of randomly killing it a second time. The initial pass
+   * retains Cycles' ordinary survival-probability throughput correction below. */
+  if (kernel_data.integrator.use_restir_pt && kernel_integrator_state.restir_pt_phase != 0u) {
+    return 1.0f;
+  }
+#endif
   if (path_flag & PATH_RAY_TRANSPARENT) {
     const int transparent_bounce = INTEGRATOR_STATE(state, path, transparent_bounce);
     /* Do at least specified number of bounces without RR. */

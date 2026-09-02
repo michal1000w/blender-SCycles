@@ -766,6 +766,79 @@ class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
             box.label(text="Photon Mapping is ignored while BDPT is enabled", icon='INFO')
 
 
+class CYCLES_RENDER_PT_light_paths_restir(CyclesButtonsPanel, Panel):
+    bl_label = "Reservoir Direct Lighting"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_restir", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cscene = context.scene.cycles
+        metal_enabled = use_metal(context)
+        layout.active = cscene.use_restir and metal_enabled
+
+        if not metal_enabled:
+            box = layout.box()
+            box.label(text="Requires an active Metal GPU device", icon='INFO')
+
+        col = layout.column(align=True)
+        col.prop(cscene, "restir_light_candidates")
+        col.prop(cscene, "restir_history_length")
+        col.prop(cscene, "restir_spatial_neighbors")
+        col.prop(cscene, "restir_spatial_radius")
+
+        col = layout.column(heading="Compatibility", align=True)
+        col.prop(cscene, "restir_normal_threshold")
+        col.prop(cscene, "restir_position_threshold")
+        col.prop(cscene, "restir_min_roughness")
+
+        if cscene.use_bidirectional_path_tracing:
+            box = layout.box()
+            box.label(text="BDPT vertices use recursive MIS; fallback paths may use this", icon='INFO')
+
+
+class CYCLES_RENDER_PT_light_paths_restir_pt(CyclesButtonsPanel, Panel):
+    bl_label = "ReSTIR PT Enhanced"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_restir_pt", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cscene = context.scene.cycles
+        metal_enabled = use_metal(context)
+        layout.active = cscene.use_restir_pt and metal_enabled
+
+        if not metal_enabled:
+            box = layout.box()
+            box.label(text="Requires an active Metal GPU device", icon='INFO')
+
+        col = layout.column(align=True)
+        col.prop(cscene, "restir_pt_temporal_history")
+        col.prop(cscene, "restir_pt_spatial_neighbors")
+        col.prop(cscene, "restir_pt_spatial_radius")
+
+        col = layout.column(heading="Hybrid Shift", align=True)
+        col.prop(cscene, "restir_pt_footprint_threshold")
+        col.prop(cscene, "restir_pt_min_roughness")
+        col.prop(cscene, "restir_pt_decorrelate")
+
+        if cscene.use_restir:
+            box = layout.box()
+            box.label(text="Enhanced mode unifies direct and global reservoirs", icon='INFO')
+
+
 class CYCLES_RENDER_PT_light_paths_fast_gi(CyclesButtonsPanel, Panel):
     bl_label = "Fast GI Approximation"
     bl_options = {'DEFAULT_CLOSED'}
@@ -2682,6 +2755,8 @@ classes = (
     CYCLES_RENDER_PT_light_paths_max_bounces,
     CYCLES_RENDER_PT_light_paths_clamping,
     CYCLES_RENDER_PT_light_paths_caustics,
+    CYCLES_RENDER_PT_light_paths_restir,
+    CYCLES_RENDER_PT_light_paths_restir_pt,
     CYCLES_RENDER_PT_light_paths_bidirectional,
     CYCLES_RENDER_PT_light_paths_photon_mapping,
     CYCLES_RENDER_PT_light_paths_fast_gi,

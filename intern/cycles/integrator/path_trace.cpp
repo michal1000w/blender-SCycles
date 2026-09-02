@@ -122,6 +122,9 @@ void PathTrace::reset(const BufferParams &full_params,
                       const BufferParams &big_tile_params,
                       const bool reset_rendering)
 {
+  render_state_.preserve_reuse_history = reset_rendering &&
+                                         !big_tile_params_.modified(big_tile_params) &&
+                                         !render_state_.need_reset_params;
   if (big_tile_params_.modified(big_tile_params)) {
     big_tile_params_ = big_tile_params;
     render_state_.need_reset_params = true;
@@ -437,13 +440,19 @@ void PathTrace::update_work_buffer_params_if_needed(const RenderWork &render_wor
 
 void PathTrace::init_render_buffers(const RenderWork &render_work)
 {
+  const bool preserve_reuse_history = render_state_.preserve_reuse_history &&
+                                      !render_state_.need_reset_params &&
+                                      render_state_.resolution_divider ==
+                                          render_work.resolution_divider;
   update_work_buffer_params_if_needed(render_work);
 
   /* Handle initialization scheduled by the render scheduler. */
   if (render_work.init_render_buffers) {
     parallel_for_each(path_trace_works_, [&](unique_ptr<PathTraceWork> &path_trace_work) {
-      path_trace_work->zero_render_buffers();
+      path_trace_work->zero_render_buffers(preserve_reuse_history);
     });
+
+    render_state_.preserve_reuse_history = false;
 
     tile_buffer_read();
   }

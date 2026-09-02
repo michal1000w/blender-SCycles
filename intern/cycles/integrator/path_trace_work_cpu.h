@@ -49,7 +49,7 @@ class PathTraceWorkCPU : public PathTraceWork {
 
   bool copy_render_buffers_from_device() override;
   bool copy_render_buffers_to_device() override;
-  bool zero_render_buffers() override;
+  bool zero_render_buffers(bool preserve_reuse_history = false) override;
 
   int adaptive_sampling_converge_filter_count_active(const float threshold, bool reset) override;
   void cryptomatte_postproces() override;

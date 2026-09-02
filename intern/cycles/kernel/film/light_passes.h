@@ -7,6 +7,7 @@
 #include "kernel/film/write.h"
 
 #include "kernel/integrator/shadow_catcher.h"
+#include "kernel/integrator/restir_pt.h"
 
 #include "kernel/sample/pattern.h"
 #include "util/atomic.h"
@@ -500,6 +501,14 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, shadow_path, flag);
   const int sample = INTEGRATOR_STATE(state, shadow_path, sample);
 
+#ifdef __KERNEL_METAL__
+  if (!(path_flag & PATH_RAY_SHADOW_FOR_AO) &&
+      restir_pt_stream_initial(kg, state, contribution))
+  {
+    return;
+  }
+#endif
+
   /* Ambient occlusion. */
   if (path_flag & PATH_RAY_SHADOW_FOR_AO) {
     if ((kernel_data.kernel_features & KERNEL_FEATURE_AO_PASS) &&
@@ -637,6 +646,19 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L;
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
+#ifdef __KERNEL_METAL__
+  /* Directly visible environments stay on Cycles' exact camera estimator (path length one), while
+   * environment hits after an indirect suffix are complete ReSTIR PT candidates. This also makes
+   * replayed background paths obey the same consume-or-fallback contract as emissive surfaces;
+   * otherwise an auxiliary replay can write an additional camera-background sample to the film. */
+  if (!is_transparent_background_ray &&
+      restir_pt_stream_initial(
+          kg, state, contribution, RESTIR_PT_TECHNIQUE_BACKGROUND, kernel_data.background.lightgroup))
+  {
+    return;
+  }
+#endif
+
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
@@ -667,6 +689,14 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
   Spectrum contribution = L;
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
+#ifdef __KERNEL_METAL__
+  if (restir_pt_stream_initial(
+          kg, state, contribution, RESTIR_PT_TECHNIQUE_VOLUME_EMISSION, lightgroup))
+  {
+    return;
+  }
+#endif
+
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
@@ -682,10 +712,22 @@ ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
                                                    const Spectrum L,
                                                    const float mis_weight,
                                                    ccl_global float *ccl_restrict render_buffer,
-                                                   const int lightgroup = LIGHTGROUP_NONE)
+                                                   const int lightgroup = LIGHTGROUP_NONE,
+                                                   const uint restir_pt_technique =
+                                                       RESTIR_PT_TECHNIQUE_EMISSION)
 {
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L * mis_weight;
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
+
+#ifdef __KERNEL_METAL__
+  if (restir_pt_stream_initial(
+          kg, state, contribution, restir_pt_technique, lightgroup))
+  {
+    return;
+  }
+#else
+  (void)restir_pt_technique;
+#endif
 
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);

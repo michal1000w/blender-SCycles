@@ -281,6 +281,15 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
   {
     return false;
   }
+  if ((device_kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_BEGIN_REUSE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_END_REUSE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_NORMALIZE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_FINALIZE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_DUPLICATION) &&
+      !(device->kernel_features & KERNEL_FEATURE_RESTIR_PT))
+  {
+    return false;
+  }
   if (device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS &&
       !(device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER))
   {

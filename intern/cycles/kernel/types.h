@@ -302,6 +302,11 @@ enum PathRayFlag : uint32_t {
    * Continue the complete camera estimator, but do not assign weight to unavailable light-side
    * strategies after such an event. Currently used for BSSRDF transport. */
   PATH_RAY_BDPT_UNSUPPORTED = (1U << 30U),
+
+  /* The previous non-delta surface vertex used the reservoir direct-light estimator. Direct
+   * emitter hits after that vertex are intentionally omitted: their complete contribution is
+   * estimated by ReSTIR NEE, avoiding an intractable MIS PDF for the resampled proposal. */
+  PATH_RAY_RESTIR_DIRECT = (1U << 31U),
 };
 
 // 8bit enum, just in case we need to move more variables in it
@@ -1622,6 +1627,76 @@ static_assert_align(KernelBDPTVertex, 16);
 static_assert(sizeof(KernelBDPTVertex) == 80,
               "KernelBDPTVertex must remain a compact 80-byte record");
 
+/* A compact screen-space direct-light reservoir. The selected light sample is represented by its
+ * emitter and two canonical sampling dimensions, so it can be reconstructed and re-evaluated at
+ * another compatible shading point. `weight` is W/(M * target(selected)), the multiplier applied
+ * to the unoccluded vector contribution. Buffers are ping-ponged once per camera sample. */
+struct ccl_align(16) KernelReSTIRDIReservoir {
+  packed_float3 P;
+  float weight;
+  uint normal;
+  uint M;
+  int emitter_id;
+  int object;
+  float rand_u;
+  float rand_v;
+  uint age;
+  uint valid;
+};
+static_assert_align(KernelReSTIRDIReservoir, 16);
+static_assert(sizeof(KernelReSTIRDIReservoir) == 48,
+              "KernelReSTIRDIReservoir must remain a compact 48-byte record");
+
+/* A unified direct/global illumination path reservoir for ReSTIR PT Enhanced. The selected
+ * sample is a complete path-space technique, identified by its source primary-sample sequence
+ * and path/reconnection lengths. `contribution` is the exact, visible vector contribution in the
+ * source domain; replay replaces it with the shifted contribution before reuse. Cycles' light-pass
+ * decomposition adds 32 bytes to the paper's 64-byte core record. The lock is only used while
+ * initial camera and shadow paths stream candidates belonging to the same pixel. */
+struct ccl_align(16) KernelReSTIRPTReservoir {
+  packed_float3 rc_P;
+  float weight_sum;
+  PackedSpectrum contribution;
+  float target;
+  uint rc_normal;
+  uint rng_pixel;
+  uint sample;
+  /* Bytes: path length, reconnection length, technique, age. */
+  uint path_data;
+  float inverse_partial_jacobian;
+  float rc_wi_pdf;
+  uint M;
+  uint lock;
+  PackedSpectrum pass_diffuse_weight;
+  uint lightgroup;
+  PackedSpectrum pass_glossy_weight;
+  uint path_flag;
+  uint path_hash;
+  /* Vector-valued GRIS numerator used for low-noise shading independently of scalar selection. */
+  PackedSpectrum vector_sum;
+  uint replay_accounted;
+  PackedSpectrum rc_throughput;
+};
+static_assert_align(KernelReSTIRPTReservoir, 16);
+static_assert(sizeof(KernelReSTIRPTReservoir) == 128,
+              "KernelReSTIRPTReservoir must remain a 128-byte Cycles path/pass record");
+
+/* Primary-surface data is separate from the path reservoir, matching the G-buffer separation in
+ * the algorithm. Keeping it out of the reservoir preserves the 64-byte random-access record. */
+struct ccl_align(16) KernelReSTIRPTSurface {
+  packed_float3 P;
+  uint normal;
+  int object;
+  int prim;
+  uint shader;
+  uint valid;
+  float2 motion_pre;
+  float2 motion_post;
+};
+static_assert_align(KernelReSTIRPTSurface, 16);
+static_assert(sizeof(KernelReSTIRPTSurface) == 48,
+              "KernelReSTIRPTSurface must remain a compact 48-byte record");
+
 /* Bounding box. */
 struct KernelBoundingBox {
   packed_float3 min;
@@ -1865,6 +1940,11 @@ enum DeviceKernel : int {
   DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT,
   DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE,
   DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT,
+  DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_BEGIN_REUSE,
+  DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_END_REUSE,
+  DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_NORMALIZE,
+  DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_FINALIZE,
+  DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_DUPLICATION,
   DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS,
 
   DEVICE_KERNEL_SHADER_EVAL_DISPLACE,

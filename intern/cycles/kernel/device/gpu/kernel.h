@@ -43,6 +43,9 @@
 #include "kernel/integrator/shade_shadow.h"
 #include "kernel/integrator/shade_surface.h"
 #include "kernel/integrator/shade_volume.h"
+#ifdef __KERNEL_METAL__
+#  include "kernel/integrator/restir_pt_finalize.h"
+#endif
 
 #include "kernel/bake/bake.h"
 
@@ -76,6 +79,60 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   }
 }
 ccl_gpu_kernel_postfix
+
+#ifdef __KERNEL_METAL__
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_restir_pt_begin_reuse, const int num_pixels)
+{
+  const uint pixel_index = ccl_gpu_global_id_x();
+  if (pixel_index < uint(num_pixels)) {
+    ccl_gpu_kernel_call(restir_pt_begin_reuse(pixel_index));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_restir_pt_normalize, const int num_pixels)
+{
+  const uint pixel_index = ccl_gpu_global_id_x();
+  if (pixel_index < uint(num_pixels)) {
+    ccl_gpu_kernel_call(restir_pt_normalize(pixel_index));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_restir_pt_end_reuse, const int num_pixels)
+{
+  const uint pixel_index = ccl_gpu_global_id_x();
+  if (pixel_index < uint(num_pixels)) {
+    ccl_gpu_kernel_call(restir_pt_end_reuse(pixel_index));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_restir_pt_finalize,
+                             const int num_pixels,
+                             ccl_global float *render_buffer)
+{
+  const uint pixel_index = ccl_gpu_global_id_x();
+  if (pixel_index < uint(num_pixels)) {
+    ccl_gpu_kernel_call(restir_pt_finalize_initial(nullptr, pixel_index, render_buffer));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_restir_pt_duplication, const int num_pixels)
+{
+  const uint pixel_index = ccl_gpu_global_id_x();
+  if (pixel_index < uint(num_pixels)) {
+    ccl_gpu_kernel_call(restir_pt_compute_duplication(pixel_index));
+  }
+}
+ccl_gpu_kernel_postfix
+#endif
 
 #ifdef __KERNEL_METAL__
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)

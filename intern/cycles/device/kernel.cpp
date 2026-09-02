@@ -24,6 +24,11 @@ bool device_kernel_has_shading(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
           kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
           kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_BEGIN_REUSE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_END_REUSE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_NORMALIZE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_FINALIZE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_DUPLICATION ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_DISPLACE ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND ||
           kernel == DEVICE_KERNEL_SHADER_EVAL_CURVE_SHADOW_TRANSPARENCY ||
@@ -124,6 +129,16 @@ const char *device_kernel_as_string(DeviceKernel kernel)
       return "integrator_bdpt_light_generate";
     case DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT:
       return "integrator_bdpt_sensor_connect";
+    case DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_BEGIN_REUSE:
+      return "integrator_restir_pt_begin_reuse";
+    case DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_END_REUSE:
+      return "integrator_restir_pt_end_reuse";
+    case DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_NORMALIZE:
+      return "integrator_restir_pt_normalize";
+    case DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_DUPLICATION:
+      return "integrator_restir_pt_duplication";
+    case DEVICE_KERNEL_INTEGRATOR_RESTIR_PT_FINALIZE:
+      return "integrator_restir_pt_finalize";
     case DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS:
       return "integrator_shadow_catcher_count_possible_splits";
 

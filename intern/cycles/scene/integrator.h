@@ -42,6 +42,7 @@ class Integrator : public Node {
 
   bool use_photon_mapping_on_device(const Device *device) const;
   bool use_bidirectional_path_tracing_on_device(const Device *device) const;
+  bool use_restir_on_device(const Device *device) const;
 
   NODE_SOCKET_API(int, min_bounce)
   NODE_SOCKET_API(int, max_bounce)
@@ -83,6 +84,23 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(float, filter_glossy)
+
+  NODE_SOCKET_API(bool, use_restir)
+  NODE_SOCKET_API(int, restir_light_candidates)
+  NODE_SOCKET_API(int, restir_spatial_neighbors)
+  NODE_SOCKET_API(int, restir_spatial_radius)
+  NODE_SOCKET_API(int, restir_history_length)
+  NODE_SOCKET_API(float, restir_normal_threshold)
+  NODE_SOCKET_API(float, restir_position_threshold)
+  NODE_SOCKET_API(float, restir_min_roughness)
+
+  NODE_SOCKET_API(bool, use_restir_pt)
+  NODE_SOCKET_API(int, restir_pt_temporal_history)
+  NODE_SOCKET_API(int, restir_pt_spatial_neighbors)
+  NODE_SOCKET_API(int, restir_pt_spatial_radius)
+  NODE_SOCKET_API(float, restir_pt_footprint_threshold)
+  NODE_SOCKET_API(float, restir_pt_min_roughness)
+  NODE_SOCKET_API(bool, restir_pt_decorrelate)
 
   NODE_SOCKET_API(bool, use_bidirectional_path_tracing)
   NODE_SOCKET_API(int, bdpt_light_paths)

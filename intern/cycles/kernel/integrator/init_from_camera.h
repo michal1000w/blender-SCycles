@@ -80,17 +80,55 @@ ccl_device bool integrator_init_from_camera(KernelGlobals kg,
     /* Initialize path state to give basic buffer access and allow early outputs. */
     path_state_init(state, tile, x, y);
 
-    /* Check whether the pixel has converged and should not be sampled anymore. */
-    if (!film_need_sample_pixel(kg, state, render_buffer)) {
-      return false;
+#ifdef __KERNEL_METAL__
+    if (kernel_integrator_state.restir_pt_phase != 0u) {
+      /* Reuse replays are auxiliary paths for the already-counted camera sample. */
+      sample = scheduled_sample;
+      const uint pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+      /* Compact replay at its cheapest point: pixels without a compatible temporal/spatial source
+       * never allocate an active ray or enter the divergent wavefront queues. The camera-init
+       * launch remains dense, but all expensive downstream work is sparse. */
+      if (!restir_pt_replay_source(pixel_index)) {
+        return false;
+      }
     }
+    else
+#endif
+    {
+      /* Check whether the pixel has converged and should not be sampled anymore. */
+      if (!film_need_sample_pixel(kg, state, render_buffer)) {
+        return false;
+      }
 
-    /* Count the sample and get an effective sample for this pixel. */
-    sample = film_write_sample(kg, state, render_buffer, scheduled_sample, tile->sample_offset);
+      /* Count the sample and get an effective sample for this pixel. */
+      sample = film_write_sample(kg, state, render_buffer, scheduled_sample, tile->sample_offset);
+    }
   }
 
-  /* Initialize random number seed for path. */
-  const uint rng_pixel = path_rng_pixel_init(kg, sample, x, y);
+  /* Temporal ReSTIR PT uses an identity mapping in primary sample space: replay camera filter,
+   * lens, and time dimensions as well as the post-primary path dimensions. Keeping the current
+   * camera sample while replaying only the suffix causes target ratios to compound across history
+   * and produces exponentially growing UCWs. Spatial shifts deliberately retain the target
+   * pixel's camera ray and use reconnection/full-replay validation instead. */
+  uint rng_pixel = path_rng_pixel_init(kg, sample, x, y);
+#ifdef __KERNEL_METAL__
+  if (kernel_integrator_state.restir_pt_phase == 1u &&
+      kernel_integrator_state.restir_pt_source)
+  {
+    const uint pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
+    const uint source_index = restir_pt_source_index(pixel_index);
+    if (source_index != UINT_MAX &&
+        source_index < kernel_integrator_state.restir_pt_reservoir_capacity)
+    {
+      const ccl_global KernelReSTIRPTReservoir *source =
+          &kernel_integrator_state.restir_pt_source[source_index];
+      if (source->target > 0.0f && source->M > 0u) {
+        sample = int(source->sample);
+        rng_pixel = source->rng_pixel;
+      }
+    }
+  }
+#endif
 
   /* Generate camera ray. */
   Ray ray;

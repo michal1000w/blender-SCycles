@@ -668,6 +668,122 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    use_restir: BoolProperty(
+        name="Reservoir Direct Lighting",
+        description="Use multi-candidate reservoir importance sampling to reduce direct-light noise (Metal GPU only)",
+        default=False,
+    )
+
+    restir_light_candidates: IntProperty(
+        name="Light Candidates",
+        description="Fresh light samples considered at every supported surface vertex",
+        min=1,
+        max=16,
+        soft_max=12,
+        default=8,
+    )
+
+    restir_spatial_neighbors: IntProperty(
+        name="Spatial Neighbors",
+        description="Compatible previous-sample reservoirs reused around each primary hit",
+        min=0,
+        max=4,
+        default=0,
+    )
+
+    restir_spatial_radius: IntProperty(
+        name="Spatial Radius",
+        description="Maximum screen-space radius in pixels for compatibility-guided neighbor selection",
+        min=1,
+        max=64,
+        default=24,
+    )
+
+    restir_history_length: IntProperty(
+        name="History Length",
+        description="Optional previous-sample support for very-low-sample interactive rendering; zero gives independent progressive samples",
+        min=0,
+        max=64,
+        default=0,
+    )
+
+    restir_normal_threshold: FloatProperty(
+        name="Normal Threshold",
+        description="Minimum geometric-normal agreement for temporal and spatial reuse",
+        min=-1.0,
+        max=1.0,
+        default=0.8,
+    )
+
+    restir_position_threshold: FloatProperty(
+        name="Position Threshold",
+        description="Maximum relative world-space separation for compatible primary hits",
+        min=0.00001,
+        max=1.0,
+        soft_max=0.25,
+        default=0.05,
+    )
+
+    restir_min_roughness: FloatProperty(
+        name="Minimum Roughness",
+        description="Use classic BSDF/light MIS below this roughness, where direct BSDF candidates are essential",
+        min=0.0,
+        max=1.0,
+        default=0.25,
+    )
+
+    use_restir_pt: BoolProperty(
+        name="ReSTIR PT Enhanced",
+        description="Resample complete direct and indirect light paths with temporal and reciprocal spatial reuse (Metal GPU only)",
+        default=False,
+    )
+
+    restir_pt_temporal_history: IntProperty(
+        name="Temporal Confidence",
+        description="Maximum temporal reservoir confidence; zero disables temporal reuse for unbiased offline convergence",
+        min=0,
+        max=64,
+        default=20,
+    )
+
+    restir_pt_spatial_neighbors: IntProperty(
+        name="Spatial Neighbors",
+        description="Number of reciprocal spatial path pairs per pixel; unsupported shifts fall back locally to the canonical path",
+        min=0,
+        max=8,
+        default=1,
+    )
+
+    restir_pt_spatial_radius: IntProperty(
+        name="Spatial Radius",
+        description="Screen-space radius of reciprocal neighbor pairing",
+        min=1,
+        max=64,
+        default=30,
+    )
+
+    restir_pt_footprint_threshold: FloatProperty(
+        name="Footprint Threshold",
+        description="Scale-invariant dual ray-footprint reconnection threshold",
+        min=0.00001,
+        max=1.0,
+        default=0.02,
+    )
+
+    restir_pt_min_roughness: FloatProperty(
+        name="Replay Roughness",
+        description="Minimum previous-vertex roughness for path reconnection; sharper lobes are replayed instead",
+        min=0.0,
+        max=1.0,
+        default=0.2,
+    )
+
+    restir_pt_decorrelate: BoolProperty(
+        name="Duplication Decorrelation",
+        description="Reduce temporal confidence where duplicated path seeds cause correlated animation noise; disable for strictly unbiased convergence",
+        default=True,
+    )
+
     bdpt_light_paths: IntProperty(
         name="Light Paths",
         description="Number of light subpaths generated for each bidirectional update; more paths reduce caustic noise at the cost of time and memory",

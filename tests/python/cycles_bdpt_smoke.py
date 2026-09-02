@@ -18,9 +18,10 @@ def look_at(obj, target):
     obj.rotation_euler = (Vector(target) - obj.location).to_track_quat("-Z", "Y").to_euler()
 
 
-def configure_metal():
+def configure_metal(metalrt=False):
     preferences = bpy.context.preferences.addons["cycles"].preferences
     preferences.compute_device_type = "METAL"
+    preferences.metalrt = "ON" if metalrt else "OFF"
     preferences.get_devices()
     found = False
     for device in preferences.devices:
@@ -115,7 +116,7 @@ def ray_portal_material(name, position, direction):
 def build_scene(options):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     if options.device == "GPU":
-        configure_metal()
+        configure_metal(options.metalrt)
 
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
@@ -126,7 +127,16 @@ def build_scene(options):
     if options.adaptive:
         scene.cycles.adaptive_threshold = 0.01
         scene.cycles.adaptive_min_samples = 16
-    scene.cycles.use_photon_mapping = False
+    scene.cycles.use_photon_mapping = options.photon
+    scene.cycles.photon_count = options.photon_count
+    scene.cycles.photon_camera_samples = options.photon_camera_samples
+    scene.cycles.use_restir = options.restir
+    scene.cycles.use_restir_pt = options.restir_pt
+    scene.cycles.restir_pt_temporal_history = options.restir_pt_history
+    scene.cycles.restir_pt_spatial_neighbors = options.restir_pt_neighbors
+    scene.cycles.restir_light_candidates = options.restir_candidates
+    scene.cycles.restir_history_length = options.restir_history
+    scene.cycles.restir_spatial_neighbors = options.restir_neighbors
     scene.cycles.caustics_reflective = not options.no_reflective_caustics
     scene.cycles.caustics_refractive = not options.no_refractive_caustics
     scene.cycles.use_light_tree = not options.no_light_tree
@@ -463,7 +473,9 @@ def build_scene(options):
             )
     print(
         "BDPT_SMOKE "
-        f"bdpt={int(options.bdpt)} camera={options.camera_type} light={light_type} "
+        f"bdpt={int(options.bdpt)} restir={int(options.restir)} "
+        f"restir_pt={int(options.restir_pt)} photon={int(options.photon)} "
+        f"metalrt={int(options.metalrt)} camera={options.camera_type} light={light_type} "
         f"seconds={elapsed:.9g} "
         f"samples={options.samples} "
         f"light_paths={options.light_paths} mean={sum(rgb) / len(rgb):.9g} "
@@ -476,6 +488,17 @@ def main():
     arguments = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--bdpt", action="store_true")
+    parser.add_argument("--restir", action="store_true")
+    parser.add_argument("--restir-pt", action="store_true")
+    parser.add_argument("--restir-pt-history", type=int, default=1)
+    parser.add_argument("--restir-pt-neighbors", type=int, default=0)
+    parser.add_argument("--restir-candidates", type=int, default=8)
+    parser.add_argument("--restir-history", type=int, default=0)
+    parser.add_argument("--restir-neighbors", type=int, default=0)
+    parser.add_argument("--photon", action="store_true")
+    parser.add_argument("--photon-count", type=int, default=65536)
+    parser.add_argument("--photon-camera-samples", type=int, default=2)
+    parser.add_argument("--metalrt", action="store_true")
     parser.add_argument("--device", choices=("GPU", "CPU"), default="GPU")
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--light-paths", type=int, default=16384)
