@@ -32,11 +32,14 @@ Required components identified from the paper are:
 
 ## Implemented architecture
 
-- ReSTIR DI and ReSTIR PT are disjoint. PT uses Cycles' ordinary NEE/light-tree estimator as its
-  direct-light proposal; it no longer silently enables the separate DI RIS proxy. If both UI
-  toggles are enabled, PT takes precedence. Directly visible emission/background keep exact
-  Cycles film writes, and only indirect paths of length three or greater enter the path-tree
-  reservoir.
+- ReSTIR PT owns indirect paths. At primary surfaces it automatically layers fresh ReSTIR DI only
+  when the scene has at least as many analytic lights as configured candidates (eight by default)
+  and the light-tree emitter population is no more than four times the analytic-light count.
+  This targets scenes where light selection can amortize RIS without mixing a huge heterogeneous
+  emissive domain. Other scenes retain ordinary Cycles NEE locally. The explicit ReSTIR DI toggle
+  remains authoritative. Directly visible
+  emission/background keep exact Cycles film writes, and only indirect paths of length three or
+  greater enter the path-tree reservoir.
 - Unsupported work falls back per path. Shadow-catcher paths and BDPT-supported strategies retain
   their existing estimators; their presence does not disable ReSTIR PT for another pixel.
 - Sharp surfaces retain normal Cycles BSDF/light MIS while eligible rough surfaces can use the
@@ -67,10 +70,10 @@ Required components identified from the paper are:
   source/target density ratio. Analytic delta and distant lights retain per-candidate exact
   fallback because they require a different discrete/directional mapping from the area-measure
   Jacobian.
-- Random surface reconnection is restricted to diffuse reflection vertices, for which the omitted
-  outgoing directional density ratio is exactly one. Glossy, transmission, singular, hair,
-  subsurface, and volume paths remain fully rendered but reject an unsupported spatial shift
-  locally; they never disable ReSTIR PT for the image.
+- Random surface reconnection accepts all finite diffuse/glossy reflection and transmission
+  closures. It uses Cycles' black-box marginal directional PDFs and applies the paper's roughness
+  threshold only at the previous vertex; the current vertex is controlled by the inverse-footprint
+  term. Singular and transparent events, or invalid shifted PDFs, reject only that spatial shift.
 - Spatial neighbor maps are deterministic involutions, so A selecting B implies B selects A.
   Spatial shifts are staged in the initial-reservoir allocation; after all rays drain, each pair's
   A-to-B and B-to-A evaluations are read together for balance-heuristic pairwise MIS.
@@ -171,6 +174,40 @@ The source `.blend` was never saved or modified. Nine missing texture files and 
 data-blocks were reported identically for baseline and enhanced runs, so they do not explain the
 before/after estimator difference.
 
+## Final time-to-noise optimization
+
+The final optimization pass compared equal-sample, no-denoiser images against independent
+high-sample references. It made three production changes:
+
+1. When PT temporal/spatial reuse is inactive, initial reservoirs now stream the whole sample
+   batch instead of forcing one-sample reset/finalize cycles.
+2. Textured and procedural emitter candidates evaluate their actual endpoint emission in the DI
+   target. Visibility remains deferred until after selection; a texture-cache miss falls back
+   locally.
+3. PT's automatic primary DI layer is enabled only when many analytic lights are not overwhelmed
+   by a much larger emissive-primitive population. Untitled has 88 device lights but 16,302
+   light-tree emitters; fresh eight-way RIS lowered aggregate RMSE while introducing an
+   unacceptable rare error, so ordinary NEE is retained there without disabling PT elsewhere.
+
+Matched Metal results before the final four-light adaptive gate were:
+
+| Scene / configuration | Standard Cycles | Enhanced | Interpretation |
+| --- | --- | --- | --- |
+| 96 point lights, 128 x 128, 16 spp | RMSE `0.292216`, `0.5368 s` | RMSE `0.262877`, `0.6016 s` | `10.0%` lower RMSE; about `10%` faster to equal error under inverse-square-root convergence |
+| Untitled, 480 x 270, 8 spp, forced 8-candidate DI | RMSE `1.104828`, max error `45.0813` | RMSE `0.763282`, max error `275.1071` | rejected despite `30.9%` lower RMSE because the tail is unsuitable for animation |
+| Untitled, forced 4-candidate DI | RMSE `1.104828`, max error `45.0813` | RMSE `1.106258`, max error `123.0844` | rejected: neither aggregate quality nor tail reliability improved |
+| Untitled, accepted adaptive policy | RMSE `1.104828`, MAE `0.124697`, max error `45.0813`, `18.4386 s` | RMSE `1.104803`, MAE `0.124693`, max error `45.0813`, `18.2607 s` | baseline-equivalent convergence and tail, `1.0%` faster cached render |
+| 48 point lights, Metal, 64 x 64, 16 spp | RMSE `0.116690`, `0.5143 s` | RMSE `0.096073`, `0.5667 s` | `17.7%` lower RMSE; about `1.34x` faster to equal error |
+| 48 point lights, MetalRT, 32 x 32, 8 spp | RMSE `0.229556`, `0.5964 s` | RMSE `0.149358`, `0.6246 s` | `34.9%` lower RMSE; about `2.25x` faster to equal error |
+
+The accepted policy therefore has two outcomes rather than one universal claim: suitable
+many-analytic-light scenes receive lower noise and a measured time-to-equal-error win; very large
+heterogeneous light-tree domains keep baseline direct-light convergence while eligible ReSTIR PT
+indirect reuse remains available. Same-film
+temporal reuse was also tested and rejected: at 16 spp it raised RMSE from `0.11266` to `0.1818` and
+cost `2.24x`, confirming that correlated progressive samples must not be replayed as independent
+film samples.
+
 ## Known limits and follow-up work
 
 The complete Cycles integration is implemented and guarded by exact local fallback, but it does
@@ -179,8 +216,9 @@ following extensions would broaden reuse coverage or reduce cost without being c
 
 - validate pairwise spatial variance on a larger production-scene corpus; the focused feature
   matrix is finite and exact fallback is local, but the measured mesh-GI gain is only about 1.1%;
-- extend non-diffuse random reconnection with its exact shifted outgoing-density ratio; those
-  surfaces currently use correct per-candidate fallback;
+- validate the black-box glossy/transmission reconnection PDFs over a larger material corpus; the
+  feature is implemented and locally guarded, but the current focused test was quality-neutral and
+  roughly doubled runtime when a spatial neighbor was forced;
 - continue reservoir compression beyond the current 128-byte record. Three reservoir layers and
   two 48-byte surface layers total 480 bytes/pixel (about 3.71 GiB at 4K) before scratch film and
   ordinary Cycles state, so high-resolution memory use is the largest remaining engineering cost;
@@ -205,7 +243,7 @@ measured `1.83254` (ratio `1.0080`), passing the disjoint-estimator energy bound
 attempts were aborted by macOS with `MTLCommandBufferErrorDomain ... Impacting Interactivity`
 during pipeline activation; a later isolated run completed successfully.
 
-After the production-scene fixes, the MetalRT-motion specialization took `331.05 s`; its actual
+After the final kernel-data change, the MetalRT-motion specialization took `484.50 s`; its actual
 four-sample render is otherwise sub-second once cached. This supports
 separating Apple pipeline specialization from steady-state render cost.
 
@@ -213,4 +251,5 @@ The post-production-scene-fix regression completed all 17 cases in one run, incl
 MetalRT motion, point/mesh/world emitters, glass, hair, BSSRDF, volume, spatial opt-in finiteness,
 BDPT interoperability, and ReSTIR PT shadow-catcher fallback. Photon plus PT was exactly equal to
 its control (`1.81804305` mean in both); BDPT and shadow-catcher fallback images matched their
-controls.
+controls. The same 17-case suite passed again after adding the light-tree-emitter adaptive gate and
+the final `KernelIntegrator` layout change.

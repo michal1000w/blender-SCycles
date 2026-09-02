@@ -772,11 +772,22 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
   const bool use_light_cache = device_scene_->data.integrator.use_photon_mapping ||
                                use_restir_pt ||
                                use_restir_history || use_bidirectional_path_tracing(device_scene_);
-  const int update_samples = (use_restir_history || use_restir_pt) ?
+  /* PT's initial path-tree reservoir can stream an arbitrary sample batch: its vector numerator
+   * is the exact sum of all accepted contributions. One-spp batches are only required when a
+   * temporal/spatial pass will replay that reservoir. Avoiding needless reset/finalize cycles is
+   * important for offline renders where reuse is disabled and primary ReSTIR DI provides the
+   * many-light variance reduction. */
+  const bool use_restir_pt_reuse = use_restir_pt &&
+                                   (temporal_history_from_previous_render ||
+                                    device_scene_->data.integrator.restir_pt_spatial_neighbors >
+                                        0);
+  const int update_samples = (use_restir_history || use_restir_pt_reuse) ?
                                  1 :
                              device_scene_->data.integrator.use_photon_mapping ?
                                  device_scene_->data.integrator.photon_map_update_samples :
-                                 device_scene_->data.integrator.bdpt_update_samples;
+                             use_bidirectional_path_tracing(device_scene_) ?
+                                 device_scene_->data.integrator.bdpt_update_samples :
+                                 samples_num;
   const int map_update_samples = use_light_cache ? update_samples * camera_samples : samples_num;
 
   /* A finite photon map is one Monte Carlo realization. Reusing it for an arbitrarily large

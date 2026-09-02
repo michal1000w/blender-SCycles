@@ -124,10 +124,60 @@ ccl_device_inline bool restir_di_reconstruct_light(KernelGlobals kg,
                              ls);
 }
 
+/* Evaluate the emitted radiance at the sampled endpoint for a non-constant light shader. ReSTIR
+ * needs this in its target: replacing a textured emitter with a unit proxy gives formally valid
+ * RIS weights, but catastrophically poor finite-sample tails when texels differ by orders of
+ * magnitude. This mirrors SHADE_LIGHT_NEE's endpoint setup, while visibility is still deferred
+ * until after reservoir selection. */
+ccl_device_inline bool restir_di_emission_eval(KernelGlobals kg,
+                                               IntegratorState state,
+                                               ccl_private ShaderData *sd,
+                                               const ccl_private LightSample *ls,
+                                               ccl_private Spectrum *eval)
+{
+  if (ls->type != LIGHT_TRIANGLE && ls->type != LIGHT_BACKGROUND) {
+    return light_sample_shader_eval_forward(
+               kg, state, ls->prim, sd->P, ls->D, ls->t, sd->time, *eval) == SHADER_EVAL_OK;
+  }
+
+  ShaderDataTinyStorage emission_sd_storage;
+  ccl_private ShaderData *emission_sd = AS_SHADER_DATA(&emission_sd_storage);
+  if (ls->type == LIGHT_BACKGROUND) {
+    shader_setup_from_background(kg, emission_sd, sd->P, ls->D, 0.0f, sd->time);
+  }
+  else {
+    const float2 uv = triangle_light_uv(
+        kg, ls->object, ls->prim, sd->time, sd->P, ls->D);
+    shader_setup_from_sample(kg,
+                             emission_sd,
+                             ls->P,
+                             ls->Ng,
+                             -ls->D,
+                             ls->shader,
+                             ls->object,
+                             ls->prim,
+                             uv.x,
+                             uv.y,
+                             ls->t,
+                             sd->time,
+                             false,
+                             false);
+  }
+
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT>(
+      kg, state, emission_sd, nullptr, PATH_RAY_VISIBILITY_NONE, PATH_RAY_EMISSION);
+  if (emission_sd->runtime_flag & SR_CACHE_MISS) {
+    return false;
+  }
+  *eval = (ls->type == LIGHT_BACKGROUND) ? surface_shader_background(emission_sd) :
+                                           surface_shader_emission(emission_sd);
+  return true;
+}
+
 /* Scalar target for reservoir selection. Visibility is deliberately excluded and evaluated once
- * for the selected sample. Arbitrary emission shaders use a strictly positive BSDF/geometry proxy;
- * their exact color and strength are still evaluated in SHADE_LIGHT_NEE, preserving correctness.
- */
+ * for the selected sample. Every emitter uses its actual sampled radiance, including texture and
+ * procedural emission shaders; a cache miss rejects only this candidate and ordinary NEE remains
+ * the per-surface fallback if no trustworthy candidate survives. */
 ccl_device_inline bool restir_di_target(KernelGlobals kg,
                                         IntegratorState state,
                                         ccl_private ShaderData *sd,
@@ -137,8 +187,8 @@ ccl_device_inline bool restir_di_target(KernelGlobals kg,
   Spectrum light_eval;
   const bool is_constant = light_sample_shader_eval_nee_constant(
       kg, ls->shader, ls->prim, ls->type != LIGHT_TRIANGLE, light_eval);
-  if (!is_constant) {
-    light_eval = one_spectrum();
+  if (!is_constant && !restir_di_emission_eval(kg, state, sd, ls, &light_eval)) {
+    return false;
   }
 
   BsdfEval bsdf_eval ccl_optional_struct_init;

@@ -535,13 +535,26 @@ ccl_device
   {
 #ifdef __KERNEL_METAL__
     const uint32_t current_path_flag = INTEGRATOR_STATE(state, path, flag);
-    /* ReSTIR DI and ReSTIR PT are alternative estimators, not nested ones. ReSTIR PT streams
-     * Cycles' exact NEE contributions into its complete-path reservoir; forcing the DI RIS proxy
-     * at every PT vertex changes the proposal before path resampling and can greatly increase
-     * variance for textured/emissive many-light scenes. When both UI toggles are present, PT owns
-     * the path and ordinary Cycles NEE remains its direct-light proposal. */
-    use_restir = kernel_data.integrator.use_restir &&
-                 !kernel_data.integrator.use_restir_pt &&
+    /* ReSTIR PT owns indirect paths, while fresh ReSTIR DI candidate resampling is a lower-cost,
+     * lower-variance estimator for primary many-light illumination. Do not force DI at later PT
+     * vertices: doing so changes every indirect proposal and regresses heterogeneous emissive
+     * production scenes. The primary DI path is disjoint from PT (which starts at path length 3),
+     * so this forms the paper's unified direct/global path space without double counting. */
+    /* Fresh DI RIS pays off when light selection is the dominant variance source. With only a
+     * handful of analytic lights, ordinary Cycles NEE is both cheaper and markedly less prone to
+     * rare high-weight RIS samples (the production city regression has four lights). Keep the
+     * explicit ReSTIR DI toggle authoritative, but make PT's automatic direct layer adaptive. */
+    const bool restir_pt_primary_di =
+        kernel_data.integrator.use_restir_pt && INTEGRATOR_STATE(state, path, bounce) == 0u &&
+        kernel_data.integrator.num_lights >= kernel_data.integrator.restir_light_candidates &&
+        /* A very large emissive-primitive population is already handled hierarchically by the
+         * light tree and can produce heavy-tailed cross-emitter RIS weights. Prefer normal NEE in
+         * that regime. The 4x bound is scale-relative: 96 analytic benchmark lights pass with 96
+         * emitters, while Untitled's 88 device lights / 16,302 emitters correctly fall back. */
+        (!kernel_data.integrator.use_light_tree ||
+         kernel_data.integrator.num_light_tree_emitters <= 4 * kernel_data.integrator.num_lights);
+    use_restir = (kernel_data.integrator.use_restir || restir_pt_primary_di) &&
+                 (!kernel_data.integrator.use_restir_pt || restir_pt_primary_di) &&
                  !bdpt_enabled_for_surface_path(state) &&
                  !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS) &&
                  surface_shader_average_roughness(sd) >=
@@ -551,12 +564,14 @@ ccl_device
     if (use_restir) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_RESTIR_DIRECT;
       if (!restir_di_resample(kg, state, sd, rng_state, &ls, &restir_weight)) {
-        /* No NEE estimate was produced, so forward light hits must remain available. */
+        /* This path could not build a trustworthy reservoir (for example it sampled a
+         * non-constant emitter). Fall through to ordinary Cycles NEE locally; do not disable
+         * ReSTIR for other surfaces or pixels. */
         INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_RESTIR_DIRECT;
-        return SHADER_EVAL_EMPTY;
+        use_restir = false;
       }
     }
-    else
+    if (!use_restir)
 #endif
     {
       /* Sample position on a light. */

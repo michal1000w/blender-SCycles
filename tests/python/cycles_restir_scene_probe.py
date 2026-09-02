@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--restir-pt", action="store_true")
     parser.add_argument("--temporal", type=int, default=20)
     parser.add_argument("--spatial", type=int, default=1)
+    parser.add_argument("--candidates", type=int, default=8)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--metalrt", action="store_true")
     options = parser.parse_args(sys.argv[sys.argv.index("--") + 1 :])
@@ -53,6 +54,7 @@ def main():
     scene.cycles.use_restir_pt = options.restir_pt
     scene.cycles.restir_pt_temporal_history = options.temporal
     scene.cycles.restir_pt_spatial_neighbors = options.spatial
+    scene.cycles.restir_light_candidates = options.candidates
     scene.render.resolution_percentage = options.percentage
     scene.render.image_settings.file_format = "OPEN_EXR"
     scene.render.image_settings.color_mode = "RGBA"

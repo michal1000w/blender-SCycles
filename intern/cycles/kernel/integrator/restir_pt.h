@@ -107,8 +107,9 @@ ccl_device_inline void restir_pt_record_reconnection(
 {
   if (!kernel_data.integrator.use_restir_pt ||
       kernel_integrator_state.restir_pt_phase != 0u ||
-      (label & (LABEL_TRANSPARENT | LABEL_SINGULAR)) || !(label & LABEL_DIFFUSE) ||
-      !(label & LABEL_REFLECT))
+      (label & (LABEL_TRANSPARENT | LABEL_SINGULAR)) ||
+      !(label & (LABEL_DIFFUSE | LABEL_GLOSSY)) ||
+      !(label & (LABEL_REFLECT | LABEL_TRANSMIT)))
   {
     return;
   }
@@ -134,12 +135,13 @@ ccl_device_inline void restir_pt_record_reconnection(
                                      max(INTEGRATOR_STATE(
                                              state, path, restir_pt_primary_footprint),
                                          1.0e-12f);
-    /* For a diffuse reflection reconnection vertex the outgoing sampling density is independent
-     * of the changed incident direction, so the p_k(omega_k) ratio in the PSS Jacobian is exactly
-     * one. Glossy/transmissive vertices need explicit black-box PDF reconstruction and therefore
-     * continue by random replay/fallback instead of using an incomplete Jacobian. */
+    /* The Enhanced black-box criterion uses the marginal directional PDFs already returned by
+     * Cycles' closure sampler. This is valid for non-singular diffuse, glossy, reflective and
+     * transmissive lobes; only delta and transparent events lack a finite reconnectible domain.
+     * As in the paper, roughness is required only at x_(k-1). The second (possibly glossy)
+     * vertex is controlled by the inverse-footprint term through bsdf_pdf, rather than by an
+     * additional roughness cutoff that would unnecessarily disable useful reconnections. */
     if (previous_roughness >= kernel_data.integrator.restir_pt_min_roughness &&
-        roughness >= kernel_data.integrator.restir_pt_min_roughness &&
         dual_footprint >= required_footprint)
     {
       INTEGRATOR_STATE_WRITE(state, path, restir_pt_rc_P) = sd->P;
