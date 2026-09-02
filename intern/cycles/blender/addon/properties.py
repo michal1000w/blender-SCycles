@@ -751,7 +751,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         description="Number of reciprocal spatial path pairs per pixel; unsupported shifts fall back locally to the canonical path",
         min=0,
         max=8,
-        default=1,
+        default=0,
     )
 
     restir_pt_spatial_radius: IntProperty(

@@ -367,6 +367,8 @@ void PathTraceWorkGPU::alloc_restir_pt()
     integrator_state_gpu_.restir_pt_current_surfaces = nullptr;
     integrator_state_gpu_.restir_pt_duplication = nullptr;
     integrator_state_gpu_.restir_pt_reservoir_capacity = 0;
+    restir_pt_history_valid_ = false;
+    restir_pt_external_history_available_ = false;
     return;
   }
 
@@ -401,6 +403,8 @@ void PathTraceWorkGPU::alloc_restir_pt()
     restir_pt_current_is_a_ = false;
     restir_pt_surface_previous_is_a_ = true;
     restir_pt_surface_current_is_a_ = false;
+    restir_pt_history_valid_ = false;
+    restir_pt_external_history_available_ = false;
   }
 
   integrator_state_gpu_.restir_pt_reservoir_capacity = uint(capacity);
@@ -616,6 +620,7 @@ void PathTraceWorkGPU::finish_restir_pt_sample(const bool completed)
   {
     restir_pt_previous_is_a_ = restir_pt_current_is_a_;
     restir_pt_surface_previous_is_a_ = restir_pt_surface_current_is_a_;
+    restir_pt_history_valid_ = true;
   }
 }
 
@@ -748,6 +753,11 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
   /* Adaptive sampling schedules convergence checks in the requested sample index domain. Keep
    * that contract intact until the render scheduler can account for photon camera oversampling. */
   const bool use_restir_pt = device_scene_->data.integrator.use_restir_pt;
+  /* Consume preserved history at most once. Samples generated later in this call, or in a later
+   * scheduler chunk of the same progressive render, are already represented in the film and must
+   * not be replayed as if they were independent temporal observations. */
+  const bool temporal_history_from_previous_render = restir_pt_external_history_available_;
+  restir_pt_external_history_available_ = false;
   const bool use_restir_history = device_scene_->data.integrator.use_restir &&
                                   (device_scene_->data.integrator.restir_history_length > 0 ||
                                    device_scene_->data.integrator.restir_spatial_neighbors > 0);
@@ -833,7 +843,8 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
 
     bool batch_complete = drain_paths();
 
-    const bool temporal_reuse = use_restir_pt &&
+    const bool temporal_reuse = use_restir_pt && temporal_history_from_previous_render &&
+                                samples_done == 0 &&
                                 device_scene_->data.integrator.restir_pt_temporal_history > 0;
     if (batch_complete && temporal_reuse) {
       integrator_state_gpu_.restir_pt_phase = 1u;
@@ -1934,6 +1945,7 @@ bool PathTraceWorkGPU::zero_render_buffers(const bool preserve_reuse_history)
     }
   }
   if (restir_pt_initial_.data_size != 0) {
+    restir_pt_external_history_available_ = preserve_reuse_history && restir_pt_history_valid_;
     queue_->zero_to_device(restir_pt_initial_);
     queue_->zero_to_device(restir_pt_duplication_);
     queue_->zero_to_device(restir_pt_scratch_buffer_);
@@ -1946,6 +1958,8 @@ bool PathTraceWorkGPU::zero_render_buffers(const bool preserve_reuse_history)
       restir_pt_current_is_a_ = false;
       restir_pt_surface_previous_is_a_ = true;
       restir_pt_surface_current_is_a_ = false;
+      restir_pt_history_valid_ = false;
+      restir_pt_external_history_available_ = false;
     }
   }
 

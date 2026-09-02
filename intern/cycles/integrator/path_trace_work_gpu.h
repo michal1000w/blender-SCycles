@@ -189,6 +189,10 @@ class PathTraceWorkGPU : public PathTraceWork {
   bool restir_pt_current_is_a_ = false;
   bool restir_pt_surface_previous_is_a_ = true;
   bool restir_pt_surface_current_is_a_ = false;
+  /* Temporal PT history is useful across actual scene/frame resets. Reusing a sample produced
+   * earlier in the same progressive film accumulation merely duplicates correlated evidence. */
+  bool restir_pt_history_valid_ = false;
+  bool restir_pt_external_history_available_ = false;
 
   /* Optional Metal bidirectional light-vertex cache. */
   device_only_memory<KernelBDPTVertex> bdpt_vertices_;

@@ -535,10 +535,13 @@ ccl_device
   {
 #ifdef __KERNEL_METAL__
     const uint32_t current_path_flag = INTEGRATOR_STATE(state, path, flag);
-    /* Select the estimator per path vertex. BDPT-supported vertices retain their recursive MIS,
-     * shadow-catcher paths retain their specialized compositing estimator, and all other eligible
-     * surfaces may independently use reservoir direct lighting. */
-    use_restir = (kernel_data.integrator.use_restir || kernel_data.integrator.use_restir_pt) &&
+    /* ReSTIR DI and ReSTIR PT are alternative estimators, not nested ones. ReSTIR PT streams
+     * Cycles' exact NEE contributions into its complete-path reservoir; forcing the DI RIS proxy
+     * at every PT vertex changes the proposal before path resampling and can greatly increase
+     * variance for textured/emissive many-light scenes. When both UI toggles are present, PT owns
+     * the path and ordinary Cycles NEE remains its direct-light proposal. */
+    use_restir = kernel_data.integrator.use_restir &&
+                 !kernel_data.integrator.use_restir_pt &&
                  !bdpt_enabled_for_surface_path(state) &&
                  !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS) &&
                  surface_shader_average_roughness(sd) >=

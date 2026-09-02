@@ -32,11 +32,11 @@ Required components identified from the paper are:
 
 ## Implemented architecture
 
-- ReSTIR DI and ReSTIR PT are disjoint. Primary NEE uses the existing multi-candidate ReSTIR DI
-  proposal, directly visible emission/background keep exact Cycles film writes, and only indirect
-  paths of length three or greater enter the path-tree reservoir. This matches the paper's
-  assumption that a separate DI method exists and prevents short paths without a reconnection
-  vertex from accumulating invalid temporal confidence.
+- ReSTIR DI and ReSTIR PT are disjoint. PT uses Cycles' ordinary NEE/light-tree estimator as its
+  direct-light proposal; it no longer silently enables the separate DI RIS proxy. If both UI
+  toggles are enabled, PT takes precedence. Directly visible emission/background keep exact
+  Cycles film writes, and only indirect paths of length three or greater enter the path-tree
+  reservoir.
 - Unsupported work falls back per path. Shadow-catcher paths and BDPT-supported strategies retain
   their existing estimators; their presence does not disable ReSTIR PT for another pixel.
 - Sharp surfaces retain normal Cycles BSDF/light MIS while eligible rough surfaces can use the
@@ -51,8 +51,10 @@ Required components identified from the paper are:
 - Background rays now use the same source-availability gate as primary surface rays. Indirect
   environment hits enter the path reservoir, while directly visible environment remains exact;
   this prevents an auxiliary camera miss from leaking an extra world sample into the main film.
-- Temporal replay restores camera filter, lens, time, and post-primary dimensions. Spatial replay
-  retains the target pixel's camera ray.
+- Temporal replay restores camera filter, lens, time, and post-primary dimensions. It consumes
+  only history explicitly preserved across a compatible render reset, once at the start of the
+  new render. Samples already accumulated in the same still image are not replayed and counted a
+  second time. Spatial replay retains the target pixel's camera ray.
 - Reservoirs carry a rolling object/primitive/shader path fingerprint. A replayed candidate is
   rejected locally if its path length, sampling technique, or topology differs.
 - RGB vector numerators are accumulated independently from scalar reservoir selection.
@@ -72,6 +74,9 @@ Required components identified from the paper are:
 - Spatial neighbor maps are deterministic involutions, so A selecting B implies B selects A.
   Spatial shifts are staged in the initial-reservoir allocation; after all rays drain, each pair's
   A-to-B and B-to-A evaluations are read together for balance-heuristic pairwise MIS.
+- A temporal selection is not fed through a second spatial Jacobian. Age-zero canonical pixels
+  can still pair spatially, while pixels that selected temporal history keep that estimate locally;
+  this prevents compound inverse-density outliers without disabling reuse for the image.
 - A 17 x 17 duplication pass compares selected random seeds and feeds the paper's nonlinear
   temporal confidence reduction (`lerp(20, 1, D^0.1)`). Temporal age is also treated as a
   correlation signal so an isolated firefly cannot retain maximum confidence indefinitely.
@@ -100,8 +105,8 @@ normal per-candidate domain check: only reservoirs with a valid stored reconnect
 can enter a spatial pass. Singular/transparent lobes, incompatible surfaces, non-reciprocal border
 links, invalid PDFs/Jacobians, and occluded connections retain the canonical reservoir locally.
 
-One reciprocal spatial neighbor is the opt-in feature's default; users can set it to zero for a
-temporal-only mode or raise it for experimentation. Two distinct
+Spatial reuse defaults to zero because the production city scene showed no time-to-quality gain;
+users can opt into reciprocal pairs for mesh-light GI workloads. Two distinct
 energy defects were fixed: background replays bypassed the primary source gate, and queued
 FINALIZE/DUPLICATION kernels could observe the next sample's rewritten phase/pointers. A completion
 boundary now protects the shared integrator constant. A no-history copy/materialization pass is
@@ -128,7 +133,7 @@ claims.
 | Exact triangle-NEE pair, mesh GI, 32 spp | mean `0.5431778` vs control `0.5431666`; RMSE `0.0171262` vs `0.0173115` (`0.9893x`) |
 | Analytic point lights after endpoint restriction, 64 x 64 | finite; no Metal command-buffer fault; unsupported endpoint mapping falls back per candidate |
 | 128-byte reservoir + early replay compaction | mesh-GI spatial image bit-identical to the 144-byte implementation |
-| Continuous moving 3-frame scene, 8 spp, temporal 20 | RMSE ratio `0.4395`; residual-flicker ratio `0.4093`; max `0.4533` vs baseline `1.2197`; time ratio `1.637` |
+| Continuous moving 3-frame scene after same-frame replay fix | image and flicker ratios `1.000000x`; time ratio `1.415` with generic Metal; the offline animation driver did not preserve GPU history between frame sessions |
 | Interactive rendered viewport, same-session scene update | Metal completed both 16-sample states; `10.24 s` initial and `10.00 s` motion-settle windows |
 
 The very first Metal run after a kernel-layout change includes several minutes of Apple Metal
@@ -136,11 +141,35 @@ specialization. Reported render-time ratios use subsequent cached runs; speciali
 treated as per-render cost.
 
 The animation result above is one `bpy.ops.render.render(animation=True)` call per baseline or
-enhanced sequence. Reservoir history therefore survives ordinary frame transitions in the same
-render session. A separate GUI test switched a real Cycles viewport to rendered shading, waited
-for convergence, changed the scene to animation frame two without restarting Blender, and reached
-`Rendering Done` again. Blender's startup splash remained a macOS compositor overlay in captured
-screenshots, but it did not interrupt the viewport render or its persistent session.
+enhanced sequence. The earlier large apparent gain came from replaying samples already present in
+the same progressive film; a production city scene proved that this increases correlation and can
+produce severe outliers, so it was removed. The offline animation driver currently creates a new
+GPU history lifetime per frame and therefore receives exact spatial/fresh behavior, not temporal
+reuse. A separate GUI test switched a real Cycles viewport to rendered shading, changed the scene
+without restarting Blender, and completed the second render; compatible viewport resets can retain
+history.
+
+## Untitled.blend production-scene regression
+
+The 1.9 MB scene links a large city asset, uses four analytic point-light groups, and had both
+ReSTIR toggles enabled with temporal confidence 20 and one spatial neighbor. At 480 x 270 and 8
+samples, the original implementation was 14% slower than standard Cycles, was 5.3% too dark, had
+`1.256x` the reference RMSE, and raised the maximum channel from `45.08` to `275.10`. Isolating the
+passes showed that the failure was already present in the fresh PT pass because PT forced DI, then
+temporal-to-spatial weight compounding could raise the maximum to `1597.65`.
+
+After separating DI/PT, rejecting aged temporal reservoirs from the next spatial domain, and
+restricting temporal reuse to external render history, the saved configuration produced:
+
+| Resolution / samples | Standard Cycles | Fixed ReSTIR PT | Result |
+| --- | --- | --- | --- |
+| 480 x 270 / 8 | `18.640 s`, RMSE `0.797195`, mean `0.292918`, max `45.0813` | `19.145 s`, RMSE `0.797292`, mean `0.292976`, max `45.0813` | `1.027x` time; matched quality and peak |
+| 960 x 540 / 8 | `18.714 s`, mean `0.293977` | `19.893 s`, mean `0.294006` | `1.063x` time; mean differs by `0.0102%`, inter-image RMSE `0.00878` |
+| 480 x 270 / 32 | `18.890 s`, RMSE `1.142139`, mean `0.299244`, max `421.0963` | `22.087 s`, RMSE `1.142147`, mean `0.299276`, max `421.0963` | `1.169x` time; statistically identical convergence and peak |
+
+The source `.blend` was never saved or modified. Nine missing texture files and 411 missing linked
+data-blocks were reported identically for baseline and enhanced runs, so they do not explain the
+before/after estimator difference.
 
 ## Known limits and follow-up work
 
@@ -161,6 +190,8 @@ following extensions would broaden reuse coverage or reduce cost without being c
 - extend forced NEE reconnection from triangle emitters to explicit, mathematically correct
   mappings for analytic finite and distant lights;
 - make vector-weighted combined and every specialized Cycles light pass agree exactly;
+- persist GPU temporal reservoirs across the offline animation driver's per-frame PathTrace
+  lifetime; same-frame reuse is intentionally disabled because it duplicates film samples;
 - add a larger independent production-scene corpus and long animation sequences; the current
   deterministic matrix is a regression suite, not proof over every possible Blender file.
 
@@ -174,11 +205,12 @@ measured `1.83254` (ratio `1.0080`), passing the disjoint-estimator energy bound
 attempts were aborted by macOS with `MTLCommandBufferErrorDomain ... Impacting Interactivity`
 during pipeline activation; a later isolated run completed successfully.
 
-After the final 128-byte ABI and triangle-PDF changes, the MetalRT-motion specialization took
-`334.50 s`; its actual four-sample render is otherwise sub-second once cached. This supports
+After the production-scene fixes, the MetalRT-motion specialization took `331.05 s`; its actual
+four-sample render is otherwise sub-second once cached. This supports
 separating Apple pipeline specialization from steady-state render cost.
 
-The final post-change focused regression completed all 17 cases in one run, including matched photon energy,
+The post-production-scene-fix regression completed all 17 cases in one run, including matched photon energy,
 MetalRT motion, point/mesh/world emitters, glass, hair, BSSRDF, volume, spatial opt-in finiteness,
-BDPT interoperability, and ReSTIR PT shadow-catcher fallback. The final photon ratio was
-`1.81301191 / 1.81804305 = 0.99723`; BDPT and shadow-catcher fallback images matched their controls.
+BDPT interoperability, and ReSTIR PT shadow-catcher fallback. Photon plus PT was exactly equal to
+its control (`1.81804305` mean in both); BDPT and shadow-catcher fallback images matched their
+controls.

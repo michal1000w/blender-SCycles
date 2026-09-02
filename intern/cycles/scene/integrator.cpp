@@ -251,7 +251,7 @@ NODE_DEFINE(Integrator)
 
   SOCKET_BOOLEAN(use_restir_pt, "ReSTIR PT Enhanced", false);
   SOCKET_INT(restir_pt_temporal_history, "ReSTIR PT Temporal History", 20);
-  SOCKET_INT(restir_pt_spatial_neighbors, "ReSTIR PT Spatial Neighbors", 1);
+  SOCKET_INT(restir_pt_spatial_neighbors, "ReSTIR PT Spatial Neighbors", 0);
   SOCKET_INT(restir_pt_spatial_radius, "ReSTIR PT Spatial Radius", 30);
   SOCKET_FLOAT(restir_pt_footprint_threshold, "ReSTIR PT Footprint Threshold", 0.02f);
   SOCKET_FLOAT(restir_pt_min_roughness, "ReSTIR PT Minimum Roughness", 0.2f);

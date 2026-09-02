@@ -420,6 +420,17 @@ ccl_device_inline const ccl_global KernelReSTIRPTReservoir *restir_pt_replay_sou
   {
     return nullptr;
   }
+  /* Do not multiply a temporally accumulated UCW by a second shifted-domain Jacobian. The
+   * reciprocal pairwise equations below operate on canonical one-step reservoirs; feeding an
+   * already shifted temporal selection into them compounds its inverse target density and creates
+   * rare, enormous weights in heterogeneous production scenes. Pixels whose temporal candidate
+   * won keep that valid temporal estimate, while age-zero canonical pixels may still participate
+   * in the spatial pass. This is a local domain fallback, not a frame-wide disable. */
+  if (kernel_integrator_state.restir_pt_phase > 1u &&
+      ((source->path_data >> 24u) & 0xffu) != 0u)
+  {
+    return nullptr;
+  }
   return (source->target > 0.0f && source->M > 0u) ? source : nullptr;
 }
 
