@@ -252,63 +252,10 @@ ccl_device_inline void restir_pt_finalize_initial(KernelGlobals kg,
   const uint32_t path_flag = reservoir->path_flag;
   film_write_combined_pass(
       kg, visibility, path_flag, int(reservoir->sample), contribution, buffer);
-
-#  ifdef __PASSES__
-  if (!(kernel_data.film.light_pass_flag & PASS_ANY)) {
-    return;
-  }
-  const uint technique = (reservoir->path_data >> 16u) & 0xffu;
-  const int lightgroup = int(reservoir->lightgroup & 0xffu) - 1;
-  if (lightgroup != LIGHTGROUP_NONE && kernel_data.film.pass_lightgroup != PASS_UNUSED) {
-    film_write_pass_spectrum(
-        buffer + kernel_data.film.pass_lightgroup + 3 * lightgroup, contribution);
-  }
-
-  if (technique == RESTIR_PT_TECHNIQUE_EMISSION ||
-      technique == RESTIR_PT_TECHNIQUE_VOLUME_EMISSION)
-  {
-    if (kernel_data.film.pass_emission != PASS_UNUSED) {
-      film_write_pass_spectrum(buffer + kernel_data.film.pass_emission, contribution);
-    }
-    return;
-  }
-  if (technique == RESTIR_PT_TECHNIQUE_BACKGROUND) {
-    if (kernel_data.film.pass_background != PASS_UNUSED) {
-      film_write_pass_spectrum(buffer + kernel_data.film.pass_background, contribution);
-    }
-    return;
-  }
-
-  const bool direct = ((reservoir->path_data & 0xffu) <= 2u);
-  if (path_flag & PATH_RAY_SURFACE_PASS) {
-    const Spectrum diffuse_weight = reservoir->pass_diffuse_weight;
-    const Spectrum glossy_weight = reservoir->pass_glossy_weight;
-    const int glossy_pass = direct ? kernel_data.film.pass_glossy_direct :
-                                     kernel_data.film.pass_glossy_indirect;
-    if (glossy_pass != PASS_UNUSED) {
-      film_write_pass_spectrum(buffer + glossy_pass, glossy_weight * contribution);
-    }
-    const int transmission_pass = direct ? kernel_data.film.pass_transmission_direct :
-                                           kernel_data.film.pass_transmission_indirect;
-    if (transmission_pass != PASS_UNUSED) {
-      film_write_pass_spectrum(
-          buffer + transmission_pass,
-          (one_spectrum() - diffuse_weight - glossy_weight) * contribution);
-    }
-    const int diffuse_pass = direct ? kernel_data.film.pass_diffuse_direct :
-                                      kernel_data.film.pass_diffuse_indirect;
-    if (diffuse_pass != PASS_UNUSED) {
-      film_write_pass_spectrum(buffer + diffuse_pass, diffuse_weight * contribution);
-    }
-  }
-  else if (path_flag & PATH_RAY_VOLUME_PASS) {
-    const int pass = direct ? kernel_data.film.pass_volume_direct :
-                              kernel_data.film.pass_volume_indirect;
-    if (pass != PASS_UNUSED) {
-      film_write_pass_spectrum(buffer + pass, contribution);
-    }
-  }
-#  endif
+  /* Component and light-group passes are written from every exact initial path candidate in
+   * light_passes.h. A resampled vector_sum mixes multiple techniques, path lengths, closure
+   * weights, and light groups, so assigning it using the selected sample's metadata is incorrect.
+   * Auxiliary replay phases deliberately write no component passes. */
 }
 
 #endif /* __KERNEL_METAL__ */

@@ -369,6 +369,8 @@ void PathTraceWorkGPU::alloc_restir_pt()
     integrator_state_gpu_.restir_pt_reservoir_capacity = 0;
     restir_pt_history_valid_ = false;
     restir_pt_external_history_available_ = false;
+    restir_pt_path_resampling_enabled_ = false;
+    restir_pt_reuse_enabled_ = false;
     return;
   }
 
@@ -377,28 +379,81 @@ void PathTraceWorkGPU::alloc_restir_pt()
     return;
   }
 
+  const bool reuse_requested =
+      device_scene_->data.integrator.restir_pt_temporal_history > 0 ||
+      device_scene_->data.integrator.restir_pt_spatial_neighbors > 0;
+  const size_t initial_bytes = capacity * sizeof(KernelReSTIRPTReservoir);
+  const size_t reuse_bytes = reuse_requested ?
+                                 capacity * (2 * sizeof(KernelReSTIRPTReservoir) +
+                                             2 * sizeof(KernelReSTIRPTSurface) + sizeof(float)) +
+                                     buffers_->buffer.memory_size() :
+                                 0;
+  /* Do not let optional full-frame random replay push memory-heavy production scenes into system
+   * swapping. Fresh ReSTIR DI remains active at every eligible bounce when this bounded
+   * path-resampling layer is skipped. */
+  constexpr size_t restir_pt_memory_budget = size_t(512) << 20;
+  restir_pt_path_resampling_enabled_ = initial_bytes + reuse_bytes <= restir_pt_memory_budget;
+  restir_pt_reuse_enabled_ = restir_pt_path_resampling_enabled_ && reuse_requested;
+
+  if (!restir_pt_path_resampling_enabled_) {
+    restir_pt_initial_.free();
+    restir_pt_reservoirs_a_.free();
+    restir_pt_reservoirs_b_.free();
+    restir_pt_surfaces_a_.free();
+    restir_pt_surfaces_b_.free();
+    restir_pt_duplication_.free();
+    restir_pt_scratch_buffer_.free();
+    integrator_state_gpu_.restir_pt_initial = nullptr;
+    integrator_state_gpu_.restir_pt_source = nullptr;
+    integrator_state_gpu_.restir_pt_previous = nullptr;
+    integrator_state_gpu_.restir_pt_current = nullptr;
+    integrator_state_gpu_.restir_pt_previous_surfaces = nullptr;
+    integrator_state_gpu_.restir_pt_source_surfaces = nullptr;
+    integrator_state_gpu_.restir_pt_current_surfaces = nullptr;
+    integrator_state_gpu_.restir_pt_duplication = nullptr;
+    integrator_state_gpu_.restir_pt_reservoir_capacity = 0;
+    restir_pt_history_valid_ = false;
+    restir_pt_external_history_available_ = false;
+    LOG_INFO << "ReSTIR PT full-frame path resampling disabled: requested "
+             << string_human_readable_size(initial_bytes + reuse_bytes)
+             << " exceeds the 512 MiB working-memory budget; retaining all-bounce ReSTIR DI.";
+    return;
+  }
+
+  if (!restir_pt_reuse_enabled_) {
+    restir_pt_reservoirs_a_.free();
+    restir_pt_reservoirs_b_.free();
+    restir_pt_surfaces_a_.free();
+    restir_pt_surfaces_b_.free();
+    restir_pt_duplication_.free();
+    restir_pt_scratch_buffer_.free();
+  }
+
   const bool resized = restir_pt_initial_.data_size != capacity ||
-                       restir_pt_reservoirs_a_.data_size != capacity ||
-                       restir_pt_reservoirs_b_.data_size != capacity ||
-                       restir_pt_surfaces_a_.data_size != capacity ||
-                       restir_pt_surfaces_b_.data_size != capacity ||
-                       restir_pt_duplication_.data_size != capacity ||
-                       restir_pt_scratch_buffer_.data_size != buffers_->buffer.data_size;
+                       (restir_pt_reuse_enabled_ &&
+                        (restir_pt_reservoirs_a_.data_size != capacity ||
+                         restir_pt_reservoirs_b_.data_size != capacity ||
+                         restir_pt_surfaces_a_.data_size != capacity ||
+                         restir_pt_surfaces_b_.data_size != capacity ||
+                         restir_pt_duplication_.data_size != capacity ||
+                         restir_pt_scratch_buffer_.data_size != buffers_->buffer.data_size));
   if (resized) {
     restir_pt_initial_.alloc_to_device(capacity, false);
-    restir_pt_reservoirs_a_.alloc_to_device(capacity, false);
-    restir_pt_reservoirs_b_.alloc_to_device(capacity, false);
-    restir_pt_surfaces_a_.alloc_to_device(capacity, false);
-    restir_pt_surfaces_b_.alloc_to_device(capacity, false);
-    restir_pt_duplication_.alloc_to_device(capacity, false);
-    restir_pt_scratch_buffer_.alloc_to_device(buffers_->buffer.data_size, false);
     queue_->zero_to_device(restir_pt_initial_);
-    queue_->zero_to_device(restir_pt_reservoirs_a_);
-    queue_->zero_to_device(restir_pt_reservoirs_b_);
-    queue_->zero_to_device(restir_pt_surfaces_a_);
-    queue_->zero_to_device(restir_pt_surfaces_b_);
-    queue_->zero_to_device(restir_pt_duplication_);
-    queue_->zero_to_device(restir_pt_scratch_buffer_);
+    if (restir_pt_reuse_enabled_) {
+      restir_pt_reservoirs_a_.alloc_to_device(capacity, false);
+      restir_pt_reservoirs_b_.alloc_to_device(capacity, false);
+      restir_pt_surfaces_a_.alloc_to_device(capacity, false);
+      restir_pt_surfaces_b_.alloc_to_device(capacity, false);
+      restir_pt_duplication_.alloc_to_device(capacity, false);
+      restir_pt_scratch_buffer_.alloc_to_device(buffers_->buffer.data_size, false);
+      queue_->zero_to_device(restir_pt_reservoirs_a_);
+      queue_->zero_to_device(restir_pt_reservoirs_b_);
+      queue_->zero_to_device(restir_pt_surfaces_a_);
+      queue_->zero_to_device(restir_pt_surfaces_b_);
+      queue_->zero_to_device(restir_pt_duplication_);
+      queue_->zero_to_device(restir_pt_scratch_buffer_);
+    }
     restir_pt_previous_is_a_ = true;
     restir_pt_current_is_a_ = false;
     restir_pt_surface_previous_is_a_ = true;
@@ -411,25 +466,33 @@ void PathTraceWorkGPU::alloc_restir_pt()
   integrator_state_gpu_.restir_pt_initial =
       (KernelReSTIRPTReservoir *)restir_pt_initial_.device_pointer;
   integrator_state_gpu_.restir_pt_previous =
-      (KernelReSTIRPTReservoir *)(restir_pt_previous_is_a_ ?
+      restir_pt_reuse_enabled_ ?
+          (KernelReSTIRPTReservoir *)(restir_pt_previous_is_a_ ?
                                       restir_pt_reservoirs_a_.device_pointer :
-                                      restir_pt_reservoirs_b_.device_pointer);
+                                      restir_pt_reservoirs_b_.device_pointer) :
+          nullptr;
   integrator_state_gpu_.restir_pt_current =
-      (KernelReSTIRPTReservoir *)(restir_pt_previous_is_a_ ?
+      restir_pt_reuse_enabled_ ?
+          (KernelReSTIRPTReservoir *)(restir_pt_previous_is_a_ ?
                                       restir_pt_reservoirs_b_.device_pointer :
-                                      restir_pt_reservoirs_a_.device_pointer);
+                                      restir_pt_reservoirs_a_.device_pointer) :
+          nullptr;
   integrator_state_gpu_.restir_pt_previous_surfaces =
-      (KernelReSTIRPTSurface *)(restir_pt_surface_previous_is_a_ ?
+      restir_pt_reuse_enabled_ ?
+          (KernelReSTIRPTSurface *)(restir_pt_surface_previous_is_a_ ?
                                     restir_pt_surfaces_a_.device_pointer :
-                                    restir_pt_surfaces_b_.device_pointer);
+                                    restir_pt_surfaces_b_.device_pointer) :
+          nullptr;
   integrator_state_gpu_.restir_pt_current_surfaces =
-      (KernelReSTIRPTSurface *)(restir_pt_surface_previous_is_a_ ?
+      restir_pt_reuse_enabled_ ?
+          (KernelReSTIRPTSurface *)(restir_pt_surface_previous_is_a_ ?
                                     restir_pt_surfaces_b_.device_pointer :
-                                    restir_pt_surfaces_a_.device_pointer);
+                                    restir_pt_surfaces_a_.device_pointer) :
+          nullptr;
   integrator_state_gpu_.restir_pt_source_surfaces =
       integrator_state_gpu_.restir_pt_previous_surfaces;
   integrator_state_gpu_.restir_pt_duplication =
-      (float *)restir_pt_duplication_.device_pointer;
+      restir_pt_reuse_enabled_ ? (float *)restir_pt_duplication_.device_pointer : nullptr;
 }
 
 void PathTraceWorkGPU::alloc_restir()
@@ -515,6 +578,28 @@ void PathTraceWorkGPU::prepare_restir_pt_sample()
   }
 
   queue_->zero_to_device(restir_pt_initial_);
+  integrator_state_gpu_.restir_pt_initial =
+      (KernelReSTIRPTReservoir *)restir_pt_initial_.device_pointer;
+  integrator_state_gpu_.restir_pt_phase = 0u;
+  if (!restir_pt_reuse_enabled_) {
+    integrator_state_gpu_.restir_pt_source = nullptr;
+    integrator_state_gpu_.restir_pt_previous = nullptr;
+    integrator_state_gpu_.restir_pt_current = nullptr;
+    integrator_state_gpu_.restir_pt_previous_surfaces = nullptr;
+    integrator_state_gpu_.restir_pt_source_surfaces = nullptr;
+    integrator_state_gpu_.restir_pt_current_surfaces = nullptr;
+    integrator_state_gpu_.restir_pt_duplication = nullptr;
+    integrator_state_gpu_.restir_buffer_full_x = effective_buffer_params_.full_x;
+    integrator_state_gpu_.restir_buffer_full_y = effective_buffer_params_.full_y;
+    integrator_state_gpu_.restir_buffer_width = effective_buffer_params_.width;
+    integrator_state_gpu_.restir_buffer_height = effective_buffer_params_.height;
+    integrator_state_gpu_.restir_buffer_offset = effective_buffer_params_.offset;
+    integrator_state_gpu_.restir_buffer_stride = effective_buffer_params_.stride;
+    device_->const_copy_to(
+        "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
+    return;
+  }
+
   device_only_memory<KernelReSTIRPTSurface> &current_surfaces =
       restir_pt_surface_previous_is_a_ ? restir_pt_surfaces_b_ : restir_pt_surfaces_a_;
   restir_pt_surface_current_is_a_ = !restir_pt_surface_previous_is_a_;
@@ -524,8 +609,6 @@ void PathTraceWorkGPU::prepare_restir_pt_sample()
                                                              restir_pt_reservoirs_a_;
   restir_pt_current_is_a_ = !restir_pt_previous_is_a_;
   queue_->zero_to_device(current);
-  integrator_state_gpu_.restir_pt_initial =
-      (KernelReSTIRPTReservoir *)restir_pt_initial_.device_pointer;
   integrator_state_gpu_.restir_pt_previous =
       (KernelReSTIRPTReservoir *)(restir_pt_previous_is_a_ ?
                                       restir_pt_reservoirs_a_.device_pointer :
@@ -541,7 +624,6 @@ void PathTraceWorkGPU::prepare_restir_pt_sample()
       integrator_state_gpu_.restir_pt_previous_surfaces;
   integrator_state_gpu_.restir_pt_current_surfaces =
       (KernelReSTIRPTSurface *)current_surfaces.device_pointer;
-  integrator_state_gpu_.restir_pt_phase = 0u;
   integrator_state_gpu_.restir_buffer_full_x = effective_buffer_params_.full_x;
   integrator_state_gpu_.restir_buffer_full_y = effective_buffer_params_.full_y;
   integrator_state_gpu_.restir_buffer_width = effective_buffer_params_.width;
@@ -603,6 +685,7 @@ void PathTraceWorkGPU::enqueue_restir_pt_normalize()
 void PathTraceWorkGPU::enqueue_restir_pt_duplication()
 {
   if (!device_scene_->data.integrator.use_restir_pt ||
+      !restir_pt_reuse_enabled_ ||
       !device_scene_->data.integrator.restir_pt_decorrelate ||
       integrator_state_gpu_.restir_pt_reservoir_capacity == 0)
   {
@@ -616,7 +699,7 @@ void PathTraceWorkGPU::enqueue_restir_pt_duplication()
 void PathTraceWorkGPU::finish_restir_pt_sample(const bool completed)
 {
   if (completed && device_scene_->data.integrator.use_restir_pt &&
-      integrator_state_gpu_.restir_pt_reservoir_capacity != 0)
+      restir_pt_reuse_enabled_ && integrator_state_gpu_.restir_pt_reservoir_capacity != 0)
   {
     restir_pt_previous_is_a_ = restir_pt_current_is_a_;
     restir_pt_surface_previous_is_a_ = restir_pt_surface_current_is_a_;
@@ -777,7 +860,7 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
    * temporal/spatial pass will replay that reservoir. Avoiding needless reset/finalize cycles is
    * important for offline renders where reuse is disabled and primary ReSTIR DI provides the
    * many-light variance reduction. */
-  const bool use_restir_pt_reuse = use_restir_pt &&
+  const bool use_restir_pt_reuse = use_restir_pt && restir_pt_reuse_enabled_ &&
                                    (temporal_history_from_previous_render ||
                                     device_scene_->data.integrator.restir_pt_spatial_neighbors >
                                         0);
@@ -880,7 +963,7 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
       }
     }
 
-    const int spatial_reuse_passes = use_restir_pt ?
+    const int spatial_reuse_passes = use_restir_pt && restir_pt_reuse_enabled_ ?
                                          device_scene_->data.integrator.restir_pt_spatial_neighbors :
                                          0;
     if (batch_complete && spatial_reuse_passes > 0) {
@@ -1956,11 +2039,14 @@ bool PathTraceWorkGPU::zero_render_buffers(const bool preserve_reuse_history)
     }
   }
   if (restir_pt_initial_.data_size != 0) {
-    restir_pt_external_history_available_ = preserve_reuse_history && restir_pt_history_valid_;
+    restir_pt_external_history_available_ = restir_pt_reuse_enabled_ &&
+                                            preserve_reuse_history && restir_pt_history_valid_;
     queue_->zero_to_device(restir_pt_initial_);
-    queue_->zero_to_device(restir_pt_duplication_);
-    queue_->zero_to_device(restir_pt_scratch_buffer_);
-    if (!preserve_reuse_history) {
+    if (restir_pt_reuse_enabled_) {
+      queue_->zero_to_device(restir_pt_duplication_);
+      queue_->zero_to_device(restir_pt_scratch_buffer_);
+    }
+    if (restir_pt_reuse_enabled_ && !preserve_reuse_history) {
       queue_->zero_to_device(restir_pt_reservoirs_a_);
       queue_->zero_to_device(restir_pt_reservoirs_b_);
       queue_->zero_to_device(restir_pt_surfaces_a_);

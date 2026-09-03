@@ -29,13 +29,9 @@ def main():
     parser.add_argument("--output-dir", default="/tmp/cycles-restir-viewport")
     options = parser.parse_args(sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else [])
     os.makedirs(options.output_dir, exist_ok=True)
-
-    # A normal GUI startup opens Blender's splash as a temporary window. Toggle it closed so the
-    # viewport screenshots measure the rendered editor rather than an obscuring startup overlay.
-    try:
-        bpy.ops.wm.splash("INVOKE_DEFAULT")
-    except RuntimeError:
-        pass
+    # The startup splash is scheduled after --python begins. Disable it for this unsaved test
+    # session so screenshots contain the rendered viewport rather than a popup.
+    bpy.context.preferences.view.show_splash = False
 
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)

@@ -298,15 +298,30 @@ ccl_device_inline bool restir_di_resample(KernelGlobals kg,
 {
   const uint pixel_index = INTEGRATOR_STATE(state, path, render_pixel_index);
   const uint sample = INTEGRATOR_STATE(state, path, sample);
-  uint rng = lcg_init(
-      hash_uint3(pixel_index, sample, uint(kernel_data.integrator.seed) ^ 0x72737472u));
+  const uint bounce = INTEGRATOR_STATE(state, path, bounce);
+  /* The first candidate is Cycles' canonical PRNG_LIGHT sample. Additional RIS candidates need a
+   * distinct stream at each path vertex; reusing one pixel/sample stream at every bounce creates
+   * strong inter-bounce light correlation and repeatedly tests unrelated indirect surfaces with
+   * the same emitter sequence. */
+  uint rng = lcg_init(hash_uint4(pixel_index,
+                                 sample,
+                                 bounce,
+                                 uint(kernel_data.integrator.seed) ^ 0x72737472u));
   ReSTIRDIWorkingReservoir reservoir;
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-  const uint bounce = INTEGRATOR_STATE(state, path, bounce);
   const int receiver = light_link_receiver_nee(kg, sd);
   const float3 base_rand = path_state_rng_3D(kg, rng_state, PRNG_LIGHT);
+  int candidate_count = kernel_data.integrator.restir_light_candidates;
+  if (kernel_data.integrator.use_restir_pt &&
+      !kernel_integrator_state.restir_pt_initial && bounce > 0u)
+  {
+    /* The bounded-memory high-resolution mode retains the full primary many-light search, where
+     * every camera pixel benefits, and uses a smaller unbiased RIS set on secondary vertices.
+     * This limits the all-bounce cost without restoring the old primary-only coverage gate. */
+    candidate_count = min(candidate_count, 2);
+  }
 
-  for (int i = 0; i < kernel_data.integrator.restir_light_candidates; i++) {
+  for (int i = 0; i < candidate_count; i++) {
     const float3 rand = (i == 0) ? base_rand :
                                    make_float3(lcg_step_float(&rng),
                                                lcg_step_float(&rng),

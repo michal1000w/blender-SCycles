@@ -141,6 +141,22 @@ def main():
         "16",
     ]
     enhanced_cases = {
+        "pt_initial_only": [
+            "--device",
+            "GPU",
+            "--restir-pt",
+            "--restir-pt-history",
+            "0",
+            "--restir-pt-neighbors",
+            "0",
+            "--samples",
+            "4",
+            "--resolution",
+            "16",
+            "--light-type",
+            "POINT",
+            "--no-glass",
+        ],
         "pt_point": enhanced + ["--light-type", "POINT", "--no-glass"],
         "pt_mesh": enhanced + ["--light-type", "MESH", "--no-glass"],
         "pt_world": enhanced + ["--light-type", "WORLD", "--no-glass"],

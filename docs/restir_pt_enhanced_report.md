@@ -32,16 +32,17 @@ Required components identified from the paper are:
 
 ## Implemented architecture
 
-- ReSTIR PT owns indirect paths and automatically layers fresh ReSTIR DI at every eligible primary
-  surface, including very large heterogeneous light trees. The RIS target and selected NEE
+- ReSTIR PT owns indirect paths and automatically layers fresh ReSTIR DI at every eligible
+  NEE-evaluable surface bounce, including very large heterogeneous light trees. The RIS target and selected NEE
   contribution include Cycles' ordinary light/BSDF balance heuristic, while forward BSDF light
   hits retain the complementary MIS weight. The explicit ReSTIR DI toggle remains authoritative.
   Directly visible emission/background keep exact Cycles film writes, and only indirect paths of
   length three or greater enter the path-tree reservoir.
 - Unsupported work falls back per path. Shadow-catcher paths and BDPT-supported strategies retain
   their existing estimators; their presence does not disable ReSTIR PT for another pixel.
-- Sharp surfaces retain normal Cycles BSDF/light MIS while eligible rough surfaces can use the
-  existing multi-candidate light RIS as the NEE proposal inside the unified path reservoir.
+- Singular closures naturally retain normal Cycles BSDF/light transport because they have no
+  finite NEE domain. Every finite diffuse, glossy, and transmission closure can use the
+  multi-candidate light RIS proposal, without a roughness or primary-bounce gate.
 - Initial, previous, and current path reservoirs are separate. Reuse reads an immutable source and
   writes a cleared destination, preventing in-pass feedback.
 - Replay uses the normal Cycles wavefront kernels and a scratch film buffer. Camera sample
@@ -173,6 +174,45 @@ The source `.blend` was never saved or modified. Nine missing texture files and 
 data-blocks were reported identically for baseline and enhanced runs, so they do not explain the
 before/after estimator difference.
 
+## High-resolution bounded-memory mode
+
+Full-frame PT replay originally allocated three 128-byte reservoirs, two 48-byte surface records,
+a duplication map, and a second complete film buffer for every pixel. Those allocations were
+unconditional even when the render was already dominated by scene geometry and textures. At
+1920 x 1080, Untitled's ordinary Cycles render peaked at `63,643,697,152` bytes resident; the old
+ReSTIR PT path peaked at `63,985,582,080` bytes and left too little system-memory headroom.
+
+The allocator now computes the actual initial/reuse/scratch footprint before allocation and limits
+optional PT working storage to 512 MiB. Below the limit it keeps the complete initial, temporal,
+and spatial implementation. Above the limit it allocates none of those full-frame layers and keeps
+fresh ReSTIR DI active per supported surface and at every bounce. This is a deterministic
+resolution/pass-layout decision, not a material or whole-image support test. A configuration with
+temporal and spatial reuse disabled allocates only the initial reservoir, rather than the six
+unused history/scratch arrays.
+
+In bounded mode, all eight configured candidates remain at the primary surface and two independent,
+unbiased RIS candidates are used at later finite-BSDF vertices. Testing two candidates everywhere
+was faster but lost too much variance reduction; eight candidates at every bounce preserved quality
+but cost `38.40 s`. The selected depth-adaptive candidate count preserved essentially the same
+error (`0.892752` versus `0.892079` RMSE) in `30.16 s`.
+
+Matched 1920 x 1080, seed-101 results against an independent 64-spp reference were:
+
+| 8-spp configuration | Render time | Peak resident memory | RMSE | Maximum absolute error |
+| --- | ---: | ---: | ---: | ---: |
+| Standard Cycles | `18.47 s` | `63,827,591,168` bytes | `1.300181` | `1512.751` |
+| Bounded ReSTIR PT | `30.16 s` | `63,699,337,216` bytes | `0.892752` | `580.049` |
+
+This is `31.3%` lower RMSE and `61.7%` lower worst-pixel error. Under inverse-square-root Monte
+Carlo convergence, standard Cycles would need about `39.1 s` to reach the same RMSE, making bounded
+ReSTIR about `23%` faster end-to-end despite its `63%` equal-sample overhead. A one-sample bounded
+render was pixel-equivalent to explicit all-bounce ReSTIR DI (RMSE `3.7e-11`, maximum difference
+`5.96e-8`), confirming that no stale PT reservoir contribution remains when the memory guard fires.
+The same scene also completed at 3840 x 2160 and 1 spp in `23.30 s` render time with
+`64,427,163,648` bytes maximum resident memory and zero swaps. A 1920 x 1080 MetalRT render also
+completed; its first `388.92 s` render included a new Apple pipeline specialization, while the
+cached end-to-end process took `28.45 s`. Repeated MetalRT images agreed to `4.4e-7` RMSE.
+
 ## Final time-to-noise optimization
 
 The final optimization pass compared equal-sample, no-denoiser images against independent
@@ -209,6 +249,66 @@ from `0.11266` to `0.1818` and
 cost `2.24x`, confirming that correlated progressive samples must not be replayed as independent
 film samples.
 
+## All-surface coverage and pass-correctness audit
+
+A matched-seed audit confirmed that the earlier production setting changed only `8.864%` of
+Untitled's pixels above `1e-6` and `2.456%` above `1e-2`. This was not used as a literal execution
+coverage counter—a reservoir may evaluate candidates and retain the canonical sample—but it did
+confirm the reported limited image-wide effect. Source inspection found two principal reasons:
+fresh ReSTIR DI was limited to the primary bounce and also rejected surfaces below a roughness
+threshold.
+
+Fresh DI RIS is now applied at every bounce where Cycles has a finite evaluable BSDF and can run
+NEE. Unsupported work falls back locally: delta/transparent events, BDPT-owned paths, shadow
+catchers, invalid candidates, and failed emitter evaluation do not disable ReSTIR elsewhere in the
+pixel or image. On Untitled at 480 x 270 and 8 spp this raised the matched-seed changed fraction to
+`22.167%` above `1e-6` and `4.750%` above `1e-2`. RMSE improved slightly from `0.762650` to
+`0.762559`; one reciprocal spatial pass reached `0.761910` but increased render time, so spatial
+reuse remains opt-in. Increasing the initial light candidates from 8 to 32 regressed RMSE to
+`0.924083` and was rejected.
+
+The additional RIS random stream now includes path bounce depth. Candidate zero remains Cycles'
+canonical `PRNG_LIGHT` sample, but candidates one and later no longer repeat the same emitter
+sequence at unrelated indirect vertices of the same pixel/sample. This removes an avoidable source
+of inter-bounce correlation introduced by expanding fresh RIS beyond the primary surface. Three
+single-layer Untitled seeds measured RMSE `0.790441`, `0.814739`, and `1.170710` (average
+`0.925297`). The immediately previous primary-only implementation measured `0.762650`, `1.054713`,
+and `1.325496` (average `1.047620`), so the all-bounce/decorrelated result is `11.7%` better on the
+three-seed aggregate even though seed 17 alone regressed slightly. The corresponding standard
+Cycles three-seed average was about `2.213`.
+
+The multilayer audit also found that the old finalizer incorrectly assigned the complete RGB
+`vector_sum` using one selected path's technique and closure weights. Combined remained valid, but
+diffuse/glossy direct/indirect, emission, environment, volume, transmission, and light-group
+passes could be misclassified. The fix gives the path reservoir ownership of Combined only;
+during the initial phase each exact candidate still uses Cycles' normal component/light-group pass
+writer, while auxiliary temporal/spatial replay writes no passes. This avoids selected-metadata
+classification and replay double counting without adding ten or more RGB accumulators to every
+128-byte reservoir.
+
+The corrected kernels compile for software Metal, MetalRT, and MetalRT-motion. First-use Apple
+pipeline specialization initially appeared stalled; a patient non-ReSTIR control completed in
+`404.36 s`, then its cached rerun completed in `0.476 s` with identical statistics. The final
+17-case physical-GPU suite passed; MetalRT-motion specialization took `455.22 s`, while ordinary
+cached cases took roughly `0.52–1.01 s`.
+
+The corrected Untitled multilayer render completed in `22.56 s`. Against the independent 64-spp
+multilayer reference, Combined RMSE improved from `1.035510` to `0.962703`. Its matched-seed changed
+fraction was `24.980%` above `1e-6`, `19.404%` above `1e-4`, and `5.530%` above `1e-2`. Most
+importantly, component passes recovered their expected support and energy: diffuse-indirect mean
+was `0.327967` versus baseline `0.329092` and reference `0.344865` (the broken implementation had
+`0.043400`); glossy-indirect mean was `0.073605` versus baseline `0.074515` and reference
+`0.075609` (broken: `0.010457`). Emission and environment matched baseline to numerical noise,
+instead of being reassigned by the selected path metadata.
+
+A fresh three-frame, 48-light animation benchmark at 32 x 32 and 4 spp measured RMSE `0.159733`
+versus baseline `0.256392` (`0.6230x`), residual flicker `0.181673` versus `0.288777`
+(`0.6291x`), and render time `1.913 s` versus `1.512 s` (`1.2648x`). Under the usual
+inverse-square-root convergence model this is about `2.04x` faster to equal RMSE. A real GUI
+rendered-viewport session also completed both the initial 16-sample state and a same-session moved
+scene in about eight seconds each. The smoke test now disables Blender's startup splash for its
+unsaved session; both screenshots were visually inspected and show the unobscured rendered scene.
+
 ## Known limits and follow-up work
 
 The complete Cycles integration is implemented and guarded by exact local fallback, but it does
@@ -220,15 +320,17 @@ following extensions would broaden reuse coverage or reduce cost without being c
 - validate the black-box glossy/transmission reconnection PDFs over a larger material corpus; the
   feature is implemented and locally guarded, but the current focused test was quality-neutral and
   roughly doubled runtime when a spatial neighbor was forced;
-- continue reservoir compression beyond the current 128-byte record. Three reservoir layers and
-  two 48-byte surface layers total 480 bytes/pixel (about 3.71 GiB at 4K) before scratch film and
-  ordinary Cycles state, so high-resolution memory use is the largest remaining engineering cost;
+- continue reservoir compression beyond the current 128-byte record. Full replay remains expensive
+  below the 512 MiB working-set limit; higher-resolution and pass-heavy buffers now switch to the
+  bounded all-bounce RIS mode instead of allocating several GiB of optional state;
 - replace post-motion fallback with the paper's explicit disocclusion motion construction; early
   camera-stage replay compaction is implemented, but a packed pair-index launch could remove the
   remaining dense initialization work;
 - extend forced NEE reconnection from triangle emitters to explicit, mathematically correct
   mappings for analytic finite and distant lights;
-- make vector-weighted combined and every specialized Cycles light pass agree exactly;
+- add the corrected exact-candidate component/light-group path to the small synthetic regression
+  matrix; the production multilayer render is validated, and at finite samples those unbiased
+  component estimators need not sum pixel-for-pixel to the separately resampled Combined estimator;
 - persist GPU temporal reservoirs across the offline animation driver's per-frame PathTrace
   lifetime; same-frame reuse is intentionally disabled because it duplicates film samples;
 - add a larger independent production-scene corpus and long animation sequences; the current
@@ -253,3 +355,18 @@ energy, MetalRT motion, point/mesh/world emitters, glass, hair, BSSRDF, volume, 
 finiteness, BDPT interoperability, and ReSTIR PT shadow-catcher fallback. Photon plus PT measured
 `1.81295994` mean versus `1.81804305` for its control (ratio `0.9972`); BDPT and shadow-catcher
 fallback images matched their controls. The same 17-case suite passed after the final MIS changes.
+
+After the all-surface, bounce-decorrelation, and light-pass fixes, the complete 35-case suite passed
+in one run. It includes CPU bit-exact fallback, light tree and flat distribution, point/mesh/world
+emitters, glass, hair, BSSRDF, volume, light linking, panorama, crop/adaptive sampling, photons,
+MetalRT motion, DI reuse, PT spatial reuse, BDPT, and all shadow-catcher combinations. Photon plus
+PT mean was `1.828986` versus `1.818043` for its control (ratio `1.0060`). Cached MetalRT-motion
+took `0.589 s`; BDPT and shadow-catcher fallbacks matched their controls within the suite's bound.
+
+After the bounded-memory change, the complete 35-case suite passed again. The one-time MetalRT
+specialization took `403.04 s`; its cached ReSTIR PT MetalRT-motion case took `0.555 s`. Photon plus
+PT mean was `1.828715` versus `1.818043` for its control (ratio `1.0059`), and BDPT/shadow-catcher
+fallbacks remained matched. A separate history-zero/spatial-zero test exercised the new
+initial-reservoir-only allocation and produced finite output. Interactive rendered-viewport motion
+tests completed on both Metal and MetalRT, and their captures were visually inspected.
+The follow-up 18-case enhanced suite incorporated that initial-only case and passed in one run.

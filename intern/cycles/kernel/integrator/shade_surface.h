@@ -531,21 +531,13 @@ ccl_device
     const uint32_t current_path_flag = INTEGRATOR_STATE(state, path, flag);
     const bool restir_surface_supported =
         !bdpt_enabled_for_surface_path(state) &&
-        !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS) &&
-        surface_shader_average_roughness(sd) >=
-            (kernel_data.integrator.use_restir_pt ?
-                 kernel_data.integrator.restir_pt_min_roughness :
-                 kernel_data.integrator.restir_min_roughness);
-    /* ReSTIR PT owns indirect paths, while fresh ReSTIR DI candidate resampling is a lower-cost,
-     * lower-variance estimator for primary many-light illumination. Do not force DI at later PT
-     * vertices: doing so changes every indirect proposal and regresses heterogeneous emissive
-     * production scenes. The primary DI path is disjoint from PT (which starts at path length 3),
-     * so this forms the paper's unified direct/global path space without double counting. */
-    const bool restir_pt_primary_di = kernel_data.integrator.use_restir_pt &&
-                                      INTEGRATOR_STATE(state, path, bounce) == 0u;
-
-    use_restir = (kernel_data.integrator.use_restir || restir_pt_primary_di) &&
-                 (!kernel_data.integrator.use_restir_pt || restir_pt_primary_di) &&
+        !(current_path_flag & PATH_RAY_SHADOW_CATCHER_PASS);
+    /* Fresh RIS is valid at every non-delta surface where Cycles can evaluate NEE, independent of
+     * roughness and path depth. ReSTIR PT therefore improves the direct-light component at every
+     * surface bounce, including indirect diffuse/glossy/transmission paths. Temporal and spatial
+     * reuse remain primary-only and compatibility guarded inside restir_di_resample(); this broad
+     * fresh-candidate coverage does not apply an invalid screen-space shift to later vertices. */
+    use_restir = (kernel_data.integrator.use_restir || kernel_data.integrator.use_restir_pt) &&
                  restir_surface_supported;
     if (use_restir) {
       if (!restir_di_resample(kg, state, sd, rng_state, &ls, &restir_weight)) {

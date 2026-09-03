@@ -502,8 +502,11 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
   const int sample = INTEGRATOR_STATE(state, shadow_path, sample);
 
 #ifdef __KERNEL_METAL__
-  if (!(path_flag & PATH_RAY_SHADOW_FOR_AO) &&
-      restir_pt_stream_initial(kg, state, contribution))
+  const bool restir_pt_streamed = !(path_flag & PATH_RAY_SHADOW_FOR_AO) &&
+                                  restir_pt_stream_initial(kg, state, contribution);
+  if (restir_pt_streamed &&
+      (kernel_integrator_state.restir_pt_phase != 0u ||
+       !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES)))
   {
     return;
   }
@@ -525,7 +528,16 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
   }
 
   /* Direct light shadow. */
-  film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+#ifdef __KERNEL_METAL__
+  /* ReSTIR PT owns Combined, but its vector-valued path sum cannot be decomposed using the
+   * metadata of one randomly selected path. During the initial phase, keep Cycles' exact
+   * per-candidate light-pass writes while suppressing only Combined. Replay phases must not write
+   * either: they are auxiliary evaluations, not additional camera samples. */
+  if (!restir_pt_streamed)
+#endif
+  {
+    film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+  }
 
 #ifdef __PASSES__
   if (kernel_data.film.light_pass_flag & PASS_ANY) {
@@ -651,9 +663,17 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
    * environment hits after an indirect suffix are complete ReSTIR PT candidates. This also makes
    * replayed background paths obey the same consume-or-fallback contract as emissive surfaces;
    * otherwise an auxiliary replay can write an additional camera-background sample to the film. */
-  if (!is_transparent_background_ray &&
+  const bool restir_pt_streamed =
+      !is_transparent_background_ray &&
       restir_pt_stream_initial(
-          kg, state, contribution, RESTIR_PT_TECHNIQUE_BACKGROUND, kernel_data.background.lightgroup))
+          kg,
+          state,
+          contribution,
+          RESTIR_PT_TECHNIQUE_BACKGROUND,
+          kernel_data.background.lightgroup);
+  if (restir_pt_streamed &&
+      (kernel_integrator_state.restir_pt_phase != 0u ||
+       !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES)))
   {
     return;
   }
@@ -668,8 +688,13 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
   }
   else {
     const int sample = INTEGRATOR_STATE(state, path, sample);
-    film_write_combined_transparent_pass(
-        kg, path_visibility, path_flag, sample, contribution, transparent, buffer);
+#ifdef __KERNEL_METAL__
+    if (!restir_pt_streamed)
+#endif
+    {
+      film_write_combined_transparent_pass(
+          kg, path_visibility, path_flag, sample, contribution, transparent, buffer);
+    }
   }
   film_write_emission_or_background_pass(kg,
                                          state,
@@ -690,8 +715,11 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
 #ifdef __KERNEL_METAL__
-  if (restir_pt_stream_initial(
-          kg, state, contribution, RESTIR_PT_TECHNIQUE_VOLUME_EMISSION, lightgroup))
+  const bool restir_pt_streamed = restir_pt_stream_initial(
+      kg, state, contribution, RESTIR_PT_TECHNIQUE_VOLUME_EMISSION, lightgroup);
+  if (restir_pt_streamed &&
+      (kernel_integrator_state.restir_pt_phase != 0u ||
+       !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES)))
   {
     return;
   }
@@ -702,7 +730,12 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const int sample = INTEGRATOR_STATE(state, path, sample);
 
-  film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+#ifdef __KERNEL_METAL__
+  if (!restir_pt_streamed)
+#endif
+  {
+    film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+  }
   film_write_emission_or_background_pass(
       kg, state, contribution, buffer, kernel_data.film.pass_emission, lightgroup);
 }
@@ -720,8 +753,11 @@ ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
 #ifdef __KERNEL_METAL__
-  if (restir_pt_stream_initial(
-          kg, state, contribution, restir_pt_technique, lightgroup))
+  const bool restir_pt_streamed = restir_pt_stream_initial(
+      kg, state, contribution, restir_pt_technique, lightgroup);
+  if (restir_pt_streamed &&
+      (kernel_integrator_state.restir_pt_phase != 0u ||
+       !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES)))
   {
     return;
   }
@@ -734,7 +770,12 @@ ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const int sample = INTEGRATOR_STATE(state, path, sample);
 
-  film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+#ifdef __KERNEL_METAL__
+  if (!restir_pt_streamed)
+#endif
+  {
+    film_write_combined_pass(kg, path_visibility, path_flag, sample, contribution, buffer);
+  }
   film_write_emission_or_background_pass(
       kg, state, contribution, buffer, kernel_data.film.pass_emission, lightgroup);
 }

@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--samples", type=int, required=True)
     parser.add_argument("--percentage", type=int, default=25)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--height", type=int)
     parser.add_argument("--restir-di", action="store_true")
     parser.add_argument("--restir-pt", action="store_true")
     parser.add_argument("--temporal", type=int, default=20)
@@ -30,6 +32,11 @@ def main():
     parser.add_argument("--candidates", type=int, default=8)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--metalrt", action="store_true")
+    parser.add_argument(
+        "--passes",
+        action="store_true",
+        help="Write a multilayer EXR with Cycles direct/indirect component passes",
+    )
     options = parser.parse_args(sys.argv[sys.argv.index("--") + 1 :])
 
     scene = bpy.context.scene
@@ -55,8 +62,29 @@ def main():
     scene.cycles.restir_pt_temporal_history = options.temporal
     scene.cycles.restir_pt_spatial_neighbors = options.spatial
     scene.cycles.restir_light_candidates = options.candidates
+    if (options.width is not None):
+        scene.render.resolution_x = options.width
+    if (options.height is not None):
+        scene.render.resolution_y = options.height
     scene.render.resolution_percentage = options.percentage
-    scene.render.image_settings.file_format = "OPEN_EXR"
+    if options.passes:
+        view_layer = scene.view_layers[0]
+        view_layer.use_pass_diffuse_direct = True
+        view_layer.use_pass_diffuse_indirect = True
+        view_layer.use_pass_glossy_direct = True
+        view_layer.use_pass_glossy_indirect = True
+        view_layer.use_pass_transmission_direct = True
+        view_layer.use_pass_transmission_indirect = True
+        view_layer.use_pass_emit = True
+        view_layer.use_pass_environment = True
+        view_layer.cycles.use_pass_volume_direct = True
+        view_layer.cycles.use_pass_volume_indirect = True
+    if options.passes:
+        scene.render.image_settings.media_type = "MULTI_LAYER_IMAGE"
+        scene.render.image_settings.file_format = "OPEN_EXR_MULTILAYER"
+    else:
+        scene.render.image_settings.media_type = "IMAGE"
+        scene.render.image_settings.file_format = "OPEN_EXR"
     scene.render.image_settings.color_mode = "RGBA"
     scene.render.image_settings.color_depth = "32"
     scene.render.filepath = os.path.abspath(options.output)
@@ -77,6 +105,7 @@ def main():
         "metalrt": options.metalrt,
         "temporal": options.temporal,
         "spatial": options.spatial,
+        "passes": options.passes,
     }
     print("RESTIR_SCENE_PROBE " + json.dumps(result, sort_keys=True), flush=True)
 

@@ -189,6 +189,11 @@ class PathTraceWorkGPU : public PathTraceWork {
   bool restir_pt_current_is_a_ = false;
   bool restir_pt_surface_previous_is_a_ = true;
   bool restir_pt_surface_current_is_a_ = false;
+  /* Full-frame path replay is bounded independently from fresh all-bounce ReSTIR DI. Large
+   * offline buffers can therefore keep the low-memory lighting proposal without allocating
+   * multiple reservoirs and a second film buffer. */
+  bool restir_pt_path_resampling_enabled_ = false;
+  bool restir_pt_reuse_enabled_ = false;
   /* Temporal PT history is useful across actual scene/frame resets. Reusing a sample produced
    * earlier in the same progressive film accumulation merely duplicates correlated evidence. */
   bool restir_pt_history_valid_ = false;
