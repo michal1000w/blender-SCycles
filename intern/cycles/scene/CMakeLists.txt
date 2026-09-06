@@ -47,6 +47,8 @@ set(SRC
   curves.cpp
   scene.cpp
   shader.cpp
+  shader_displacement.cpp
+  shader_displacement_image.cpp
   shader.tables
   shader_graph.cpp
   shader_nodes.cpp
@@ -88,6 +90,7 @@ set(SRC_HEADERS
   scene.h
   scene_attributes.h
   shader.h
+  shader_displacement.h
   shader_graph.h
   shader_nodes.h
   stats.h
