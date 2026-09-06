@@ -22,6 +22,9 @@ def configure_cycles(samples, resolution):
     scene.cycles.pixel_displacement_resolution = int(
         os.environ.get("PIXEL_DISPLACEMENT_BENCH_MICROMESH_RESOLUTION", "1024")
     )
+    scene.cycles.use_pixel_displacement_resolution_clamp = os.environ.get(
+        "PIXEL_DISPLACEMENT_BENCH_CLAMP_RESOLUTION", "1"
+    ) not in {"0", "false", "False"}
     scene.cycles.device = os.environ.get("PIXEL_DISPLACEMENT_BENCH_DEVICE", "GPU")
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.look = "None"
