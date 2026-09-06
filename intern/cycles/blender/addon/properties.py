@@ -1055,16 +1055,25 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=32,
     )
 
+    use_pixel_displacement_resolution_clamp: BoolProperty(
+        name="Clamp Resolution",
+        description=(
+            "Limit displacement detail with a cached micromesh; disable to evaluate the shader "
+            "directly without a micromesh resolution limit"
+        ),
+        default=False,
+    )
+
     pixel_displacement_resolution: IntProperty(
         name="Micromesh Resolution",
         description=(
-            "Maximum cached displacement samples across one UV tile; this controls visible "
-            "microtriangle detail independently of the base mesh subdivision"
+            "Maximum cached displacement samples across one UV tile when Clamp Resolution is enabled; "
+            "large caches use direct shader evaluation if they exceed the memory budget"
         ),
         min=64,
-        max=2048,
+        max=16384,
         soft_min=256,
-        soft_max=2048,
+        soft_max=16384,
         default=1024,
     )
 

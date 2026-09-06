@@ -574,7 +574,10 @@ class CYCLES_RENDER_PT_pixel_displacement(CyclesButtonsPanel, Panel):
         col = layout.column(align=True)
         col.prop(cscene, "pixel_displacement_scale")
         col.prop(cscene, "pixel_displacement_max_distance")
-        col.prop(cscene, "pixel_displacement_resolution")
+        col.prop(cscene, "use_pixel_displacement_resolution_clamp")
+        resolution_col = col.column(align=True)
+        resolution_col.active = cscene.use_pixel_displacement_resolution_clamp
+        resolution_col.prop(cscene, "pixel_displacement_resolution")
         col.prop(cscene, "pixel_displacement_steps")
 
 

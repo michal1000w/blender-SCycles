@@ -809,7 +809,7 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_bvh(KernelGlobals k
     const uint meta0 = __float_as_uint(node_min.w);
     const uint meta1 = __float_as_uint(node_max.w);
     if ((meta0 & 0x80000000u) == 0) {
-      /* Balanced construction has depth below 20 for the maximum 2048 grid resolution. */
+      /* Balanced construction has depth below 27 for the maximum 16384 grid resolution. */
       stack[stack_size++] = int(meta0);
       stack[stack_size++] = int(meta1);
       continue;
@@ -974,7 +974,7 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_micro_mesh(KernelGl
   const float dir_plane = dot(ray_D, face_Ng);
 
   /* A line can cross at most grid boundaries from each of the u, v, and u + v families. */
-  for (int iteration = 0; iteration < 6148 && s < 1.0f + 1.0e-6f; iteration++) {
+  for (int iteration = 0; iteration < 3 * grid + 4 && s < 1.0f + 1.0e-6f; iteration++) {
     float next_s = 1.0f;
     next_s = min(next_s, pixel_displacement_next_grid_crossing(gu0, gdu, s));
     next_s = min(next_s, pixel_displacement_next_grid_crossing(gv0, gdv, s));
