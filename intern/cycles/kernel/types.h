@@ -1491,8 +1491,13 @@ struct KernelObject {
   uint receiver_light_set;
   uint64_t shadow_set_membership;
   uint blocker_shadow_set;
+
+  /* Fits the existing tail padding. Upper bounds for the linear transform norms. */
+  float displacement_transform_bound;
+  float displacement_inverse_bound;
 };
 static_assert_align(KernelObject, 16);
+static_assert(sizeof(KernelObject) == 256);
 
 struct KernelCurve {
   int shader_id;
@@ -1754,7 +1759,9 @@ struct KernelShader {
   float cryptomatte_id;
   int flags;
   int pass_id;
-  int pad2, pad3;
+  /* 0: full SVM, 1: compact SVM, >= 2: fused image descriptor offset + 2. */
+  int displacement_evaluator;
+  float displacement_bound;
 };
 static_assert_align(KernelShader, 16);
 

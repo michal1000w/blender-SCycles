@@ -398,12 +398,33 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
 
 MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const MetalDevice *device)
 {
+  /* Generic kernels omit pixel displacement. These specializations are required for
+   * correctness, so pending or failed compilation must never select the generic fallback. */
+  const bool requires_displacement = device->scene_use_pixel_displacement &&
+                                     device->scene_pixel_displacement_scale != 0.0f &&
+                                     device->scene_pixel_displacement_max_distance > 0.0f &&
+                                     kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+                                     kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT;
+  const MetalPipelineType required_type = kernel < DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND ?
+                                             PSO_SPECIALIZED_INTERSECT : PSO_SPECIALIZED_SHADE;
   while (running && !device->has_error) {
     /* Search all loaded pipelines with matching kernels_md5 checksums. */
     MetalKernelPipeline *best_match = nullptr;
     {
       thread_scoped_lock lock(cache_mutex);
       for (auto &candidate : pipelines[kernel]) {
+        if (requires_displacement) {
+          if (candidate->pso_type != required_type ||
+              candidate->kernels_md5 != device->kernels_md5[required_type])
+          {
+            continue;
+          }
+          /* Entries are published only after compile() returns. An unloaded matching
+           * entry therefore represents a failed compilation, not an in-flight request. */
+          if (!candidate->loaded) {
+            return nullptr;
+          }
+        }
         if (candidate->loaded &&
             candidate->kernels_md5 == device->kernels_md5[candidate->pso_type])
         {
@@ -545,6 +566,11 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   const MetalKernelPipeline *best_pipeline = MetalDeviceKernels::get_best_pipeline(metal_device,
                                                                                    kernel);
   if (!best_pipeline) {
+    if (!metal_device->have_error()) {
+      metal_device->set_error(string_printf(
+          "Failed to load required Metal kernel %s. See the Cycles log for the compiler error.",
+          device_kernel_as_string(kernel)));
+    }
     return false;
   }
 

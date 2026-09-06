@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 
 #include "device/device.h"
@@ -12,6 +13,7 @@
 #include "scene/mesh.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
+#include "scene/shader_displacement.h"
 #include "scene/shader_graph.h"
 #include "scene/shader_nodes.h"
 #include "scene/stats.h"
@@ -51,6 +53,8 @@ void SVMShaderManager::device_update_shader(Scene *scene,
 
   LOG_DEBUG << "Compilation summary:\n"
             << "Shader name: " << shader->name << "\n"
+            << "Compact displacement: " << shader->has_compact_displacement << "\n"
+            << "Fused image displacement: " << (shader->displacement_image_offset >= 0) << "\n"
             << summary.full_report();
 }
 
@@ -121,6 +125,9 @@ void SVMShaderManager::device_update_specific(Device *device,
         .offset_surface = shader_svm_nodes[i][1] - jump_node_size + node_offset,
         .offset_volume = shader_svm_nodes[i][2] - jump_node_size + node_offset,
         .offset_displacement = shader_svm_nodes[i][3] - jump_node_size + node_offset};
+    if (shader->displacement_image_offset >= 0) {
+      shader->displacement_image_offset += node_offset - jump_node_size;
+    }
     node_offset += shader_svm_nodes[i].size() - jump_node_size;
   }
 
@@ -219,6 +226,7 @@ SVMStackOffset SVMCompiler::stack_find_offset(const int size)
     if (num_unused == size) {
       offset = i + 1 - size;
       max_stack_use = max(i + 1, max_stack_use);
+      type_max_stack_use = max(i + 1, type_max_stack_use);
 
       while (i >= offset) {
         active_stack.users[i--] = 1;
@@ -431,8 +439,23 @@ void SVMCompiler::stack_clear_temporary(ShaderNode *node)
   }
 }
 
+bool SVMCompiler::displacement_node_supported(const ShaderNodeType type)
+{
+  switch (type) {
+#define DISPLACEMENT_SVM_NODE(name, ...) case name: return true;
+#include "kernel/svm/displacement_nodes_template.h"
+#undef DISPLACEMENT_SVM_NODE
+    default:
+      if (current_type == SHADER_TYPE_DISPLACEMENT) {
+        LOG_DEBUG << "Compact displacement unsupported opcode " << int(type);
+      }
+      return false;
+  }
+}
+
 void SVMCompiler::add_node(ShaderNodeType type)
 {
+  displacement_nodes_supported &= displacement_node_supported(type);
   svm_node_types_used[type] = true;
   current_svm_nodes.push_back_slow(type);
 }
@@ -1057,6 +1080,8 @@ void SVMCompiler::compile_type(Shader *shader, ShaderGraph *graph, ShaderType ty
    * closure.
    */
 
+  type_max_stack_use = 0;
+  displacement_nodes_supported = true;
   current_type = type;
   current_graph = graph;
 
@@ -1166,6 +1191,7 @@ void SVMCompiler::compile_type(Shader *shader, ShaderGraph *graph, ShaderType ty
 
   /* if compile failed, generate empty shader */
   if (compile_failed) {
+    displacement_nodes_supported = false;
     current_svm_nodes.clear();
     compile_failed = false;
   }
@@ -1226,8 +1252,20 @@ void SVMCompiler::compile(Shader *shader, array<int> &svm_nodes, const int index
     const scoped_timer timer((summary != nullptr) ? &summary->time_generate_displacement :
                                                     nullptr);
     compile_type(shader, shader->graph.get(), SHADER_TYPE_DISPLACEMENT);
+    shader->has_compact_displacement = displacement_nodes_supported && type_max_stack_use <= 32;
     svm_nodes[index + 3] = svm_nodes.size();
     svm_nodes.append(current_svm_nodes);
+    shader->displacement_image_offset = -1;
+    SVMDisplacementImage image_program;
+    /* Verified image programs use the lean intersection evaluator; final shading keeps SVM. */
+    if (getenv("CYCLES_PIXEL_DISPLACEMENT_DISABLE_FUSED_IMAGE") == nullptr &&
+        shader_displacement_image(current_svm_nodes, image_program))
+    {
+      shader->displacement_image_offset = svm_nodes.size();
+      const size_t old_size = svm_nodes.size();
+      svm_nodes.resize(old_size + sizeof(image_program) / sizeof(int));
+      memcpy(svm_nodes.data() + old_size, &image_program, sizeof(image_program));
+    }
   }
 
   /* Fill in summary information. */

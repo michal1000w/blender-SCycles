@@ -4,6 +4,8 @@
 
 #include "device/device.h"
 
+#include <cstdlib>
+
 #include "scene/background.h"
 #include "scene/camera.h"
 #include "scene/integrator.h"
@@ -14,6 +16,7 @@
 #include "scene/procedural.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
+#include "scene/shader_displacement.h"
 #include "scene/shader_graph.h"
 #include "scene/shader_nodes.h"
 #include "scene/svm.h"
@@ -613,12 +616,39 @@ void ShaderManager::device_update_post(Device *device,
   dscene->svm_nodes.copy_to_device_if_modified();
 }
 
+void ShaderManager::device_update_displacement_bounds(DeviceScene *dscene,
+                                                       Scene *scene,
+                                                       Progress &progress)
+{
+  if (!scene->integrator->get_use_pixel_displacement() ||
+      dscene->shaders.size() != scene->shaders.size() ||
+      !scene->image_manager->consume_displacement_range_update())
+  {
+    return;
+  }
+  bool changed = false;
+  for (size_t i = 0; i < scene->shaders.size(); i++) {
+    const float2 range = shader_displacement_bounds(scene->shaders[i], scene, progress);
+    const float bound = range.x <= range.y ? max(fabsf(range.x), fabsf(range.y)) : -1.0f;
+    if (dscene->shaders[i].displacement_bound != bound) {
+      dscene->shaders[i].displacement_bound = bound;
+      changed = true;
+      LOG_DEBUG << "Loaded displacement magnitude bound for " << scene->shaders[i]->name
+                << ": " << bound;
+    }
+  }
+  if (changed) {
+    dscene->shaders.copy_to_device();
+  }
+}
+
 void ShaderManager::device_update_common(Device * /*device*/,
                                          DeviceScene *dscene,
                                          Scene *scene,
-                                         Progress & /*progress*/)
+                                         Progress &progress)
 {
   dscene->shaders.free();
+  dscene->data.integrator.pixel_displacement_evaluator_set = 32;
 
   if (scene->shaders.empty()) {
     return;
@@ -686,6 +716,14 @@ void ShaderManager::device_update_common(Device * /*device*/,
     }
     if (shader->has_displacement && shader->get_displacement_method() != DISPLACE_BUMP) {
       flag |= SD_HAS_DISPLACEMENT;
+      if (shader->reference_count()) {
+        dscene->data.integrator.pixel_displacement_evaluator_set |=
+            shader->displacement_image_offset >= 0 ? 4 :
+            shader->has_compact_displacement ? 1 : 2;
+        if (shader->displacement_image_offset >= 0 && !shader->has_compact_displacement) {
+          dscene->data.integrator.pixel_displacement_evaluator_set |= 16;
+        }
+      }
     }
     if (shader->get_use_bump_map_correction()) {
       flag |= SD_USE_BUMP_MAP_CORRECTION;
@@ -709,6 +747,15 @@ void ShaderManager::device_update_common(Device * /*device*/,
     /* regular shader */
     kshader->flags = flag;
     kshader->pass_id = shader->get_pass_id();
+    kshader->displacement_evaluator = shader->displacement_image_offset >= 0 ?
+                                          shader->displacement_image_offset + 2 :
+                                          int(shader->has_compact_displacement);
+    const float2 displacement_bounds = shader_displacement_bounds(shader, scene, progress);
+    kshader->displacement_bound = displacement_bounds.x <= displacement_bounds.y ?
+                                     max(fabsf(displacement_bounds.x), fabsf(displacement_bounds.y)) :
+                                     -1.0f;
+    LOG_DEBUG << "Displacement magnitude bound for " << shader->name << ": "
+              << kshader->displacement_bound;
     kshader->constant_emission[0] = shader->emission_estimate.x;
     kshader->constant_emission[1] = shader->emission_estimate.y;
     kshader->constant_emission[2] = shader->emission_estimate.z;
@@ -716,6 +763,11 @@ void ShaderManager::device_update_common(Device * /*device*/,
     kshader++;
 
     has_transparent_shadow |= (flag & SD_HAS_TRANSPARENT_SHADOW) != 0;
+  }
+
+  /* Diagnostic: preserve the compiled metadata while comparing the original evaluator. */
+  if (getenv("CYCLES_PIXEL_DISPLACEMENT_FORCE_FULL_EVALUATOR") != nullptr) {
+    dscene->data.integrator.pixel_displacement_evaluator_set |= 8;
   }
 
   /* lookup tables */
