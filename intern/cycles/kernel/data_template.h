@@ -287,7 +287,8 @@ KERNEL_STRUCT_MEMBER(integrator, int, use_surface_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_volume_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_direct_light)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_mis_weights)
-KERNEL_STRUCT_MEMBER(integrator, int, pad1)
+/* Evaluators: 1 compact, 2 full, 4 image, 8 diagnostic force-full, 16 full image reference. */
+KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_evaluator_set)
 
 KERNEL_STRUCT_MEMBER(integrator, float2, pixel_jitter)
 KERNEL_STRUCT_END(KernelIntegrator)

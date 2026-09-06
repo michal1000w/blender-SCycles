@@ -51,6 +51,7 @@ set(SRC_KERNEL_CLOSURE_HEADERS
 
 set(SRC_KERNEL_SVM_HEADERS
   svm/svm.h
+  svm/displacement_nodes_template.h
   svm/ao.h
   svm/aov.h
   svm/attribute.h

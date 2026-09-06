@@ -100,6 +100,7 @@ class SVMCompiler {
     requires(std::is_class_v<T> && sizeof(T) % sizeof(int) == 0 && alignof(T) <= sizeof(uint))
   {
     const ShaderNodeType resolved_type = node_type(shader_node, type, use_derivatives);
+    displacement_nodes_supported &= displacement_node_supported(resolved_type);
     current_svm_nodes.push_back_slow(resolved_type);
     const int *data = reinterpret_cast<const int *>(&node);
     svm_node_types_used[resolved_type] = true;
@@ -284,6 +285,9 @@ class SVMCompiler {
   Shader *current_shader;
   Stack active_stack;
   int max_stack_use;
+  int type_max_stack_use = 0;
+  bool displacement_nodes_supported = true;
+  bool displacement_node_supported(ShaderNodeType type);
   SVMStackOffset mix_weight_offset;
   SVMStackOffset bump_state_offset;
   bool compile_failed;

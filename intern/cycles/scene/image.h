@@ -78,6 +78,7 @@ class ImageHandle {
   int num_tiles() const;
 
   ImageMetaData metadata(Progress &progress);
+  float2 displacement_range();
   bool all_udim_tiled(Progress &progress);
   int kernel_id() const;
 
@@ -113,6 +114,8 @@ class ImageSingle : public ImageTexture {
  public:
   ~ImageSingle();
 
+  void update_displacement_range();
+
   /* Index into ImageManager::images and DeviceScene::image_textures. */
   int image_texture_id = KERNEL_IMAGE_NONE;
 
@@ -121,6 +124,8 @@ class ImageSingle : public ImageTexture {
   unique_ptr<ImageLoader> loader;
 
   bool need_metadata = true;
+  bool need_displacement_range = false;
+  float2 displacement_pixel_range = make_float2(1.0f, -1.0f);
   bool builtin = false;
 
   /* Number of top mip levels in the image file to discard. */
@@ -184,8 +189,14 @@ class ImageManager {
   bool get_use_texture_cache() const;
   bool get_auto_texture_cache() const;
 
+  bool consume_displacement_range_update()
+  {
+    return displacement_ranges_changed.exchange(false);
+  }
+
  private:
   bool need_update_ = true;
+  std::atomic<bool> displacement_ranges_changed{false};
 
   thread_mutex device_mutex;
   thread_mutex images_mutex;

@@ -30,6 +30,44 @@ ccl_device void kernel_displace_evaluate(KernelGlobals kg,
   /* Setup shader data. */
   const KernelShaderEvalInput in = input[offset];
 
+#ifdef __KERNEL_METAL__
+  /* Negative primitive IDs request exact samples for the pixel-displacement grazing fallback.
+   * Evaluate with the same shader setup and arithmetic as a ray query; apply scene scale and clamp
+   * at lookup. */
+  if (in.prim < 0) {
+    const int prim = ~in.prim;
+    const bool compare_image = in.object < 0;
+    const int object = compare_image ? ~in.object : in.object;
+    const uint3 indices = kernel_data_fetch(tri_vindex, prim);
+    const int position_offset = kernel_data_fetch(objects, object).position_offset;
+    const float3 verts[3] = {
+        kernel_data_fetch(tri_verts, position_offset + indices.x),
+        kernel_data_fetch(tri_verts, position_offset + indices.y),
+        kernel_data_fetch(tri_verts, position_offset + indices.z),
+    };
+    /* Integer coordinates keep the division/multiplication on the GPU, matching the ray
+     * fallback's floating-point sample lattice instead of rounding it on the host. */
+    const int packed_u = int(in.u);
+    const int grid = compare_image ? 1 : packed_u >> 4;
+    const float inv_grid = 1.0f / float(grid);
+    const float u = compare_image ? in.u : float(packed_u & 15) * inv_grid;
+    const float v = compare_image ? in.v : in.v * inv_grid;
+    bool missed = false;
+    const float3 D = compare_image ?
+                         pixel_displacement_eval_object_direct<false, true>(
+                             kg, object, prim, u, v, 0.5f, false, verts, &missed) :
+                         pixel_displacement_eval_object_direct<false>(
+                             kg, object, prim, u, v, 0.5f, false, verts, &missed);
+    if (missed) {
+      *cache_miss = true;
+    }
+    output[offset * 3 + 0] = D.x;
+    output[offset * 3 + 1] = D.y;
+    output[offset * 3 + 2] = D.z;
+    return;
+  }
+#endif
+
   ShaderData sd;
   shader_setup_from_displace(kg, &sd, in.object, in.prim, in.u, in.v);
 
