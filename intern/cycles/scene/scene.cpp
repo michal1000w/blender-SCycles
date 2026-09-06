@@ -355,6 +355,9 @@ void Scene::device_update(Device *device_, Progress &progress)
     return;
   }
 
+  /* Tighten displacement bounds using statistics from images loaded above. */
+  shader_manager->device_update_displacement_bounds(&dscene, this, progress);
+
   /* Evaluate volume shader to build volume octrees. */
   progress.set_status("Updating Volume");
   volume_manager->device_update(device, &dscene, this, progress);

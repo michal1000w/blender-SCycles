@@ -8,11 +8,13 @@
 #include "scene/devicescene.h"
 #include "scene/image.h"
 #include "scene/image_loader.h"
+#include "scene/integrator.h"
 #include "scene/image_oiio.h"
 #include "scene/image_vdb.h"
 #include "scene/scene.h"
 #include "scene/stats.h"
 
+#include "util/color.h"
 #include "util/colorspace.h"
 #include "util/debug.h"
 #include "util/log.h"
@@ -142,6 +144,25 @@ bool ImageHandle::all_udim_tiled(Progress &progress)
   return metadata(progress).has_tiles_and_mipmaps;
 }
 
+float2 ImageHandle::displacement_range()
+{
+  if (image_texture && image_texture->type == ImageTexture::SINGLE) {
+    ImageSingle *img = static_cast<ImageSingle *>(image_texture);
+    const thread_scoped_lock image_lock(img->mutex);
+    const bool first_request = !img->need_displacement_range;
+    img->need_displacement_range = true;
+    if (!img->need_load && !img->need_metadata) {
+      /* Displacement may be enabled after the texture has already been uploaded. Reuse
+       * its retained host storage once, without reloading or duplicating the image. */
+      if (first_request) {
+        img->update_displacement_range();
+      }
+      return img->displacement_pixel_range;
+    }
+  }
+  return make_float2(1.0f, -1.0f);
+}
+
 int ImageHandle::kernel_id() const
 {
   if (!image_texture) {
@@ -211,6 +232,42 @@ void ImageHandle::add_to_set(set<const ImageSingle *> &images) const
 /* Image Single */
 
 ImageSingle::~ImageSingle() = default;
+
+void ImageSingle::update_displacement_range()
+{
+  displacement_pixel_range = make_float2(1.0f, -1.0f);
+  device_image *mem = vdb_memory;
+  if (metadata.has_tiles_and_mipmaps || !mem || mem->data_size == 0 ||
+      !(metadata.colorspace == u_colorspace_data ||
+        metadata.colorspace == u_colorspace_scene_linear ||
+        metadata.colorspace == u_colorspace_scene_linear_srgb))
+  {
+    return;
+  }
+
+  /* Scalar integer images have a monotonic decode. Scan existing storage, retaining
+   * just the bound; unsupported formats keep the conservative unknown range. */
+  float upper = -1.0f;
+  if (metadata.type == IMAGE_DATA_TYPE_USHORT) {
+    const uint16_t *pixels = mem->data<uint16_t>();
+    if (pixels) {
+      upper = float(*std::max_element(pixels, pixels + mem->data_size)) / 65535.0f;
+    }
+  }
+  else if (metadata.type == IMAGE_DATA_TYPE_BYTE) {
+    const uchar *pixels = mem->data<uchar>();
+    if (pixels) {
+      upper = float(*std::max_element(pixels, pixels + mem->data_size)) / 255.0f;
+    }
+  }
+  if (upper >= 0.0f) {
+    if (metadata.is_compressible_as_srgb) {
+      upper = color_srgb_to_linear(upper);
+    }
+    /* Include clip-extension black and normalized texture sampling roundoff. */
+    displacement_pixel_range = make_float2(0.0f, min(1.0f, upper + 1.0e-6f));
+  }
+}
 
 /* Image Manager */
 
@@ -477,6 +534,11 @@ void ImageManager::device_load_image(Device *device,
 
   progress.set_status("Updating Images", "Loading " + img->loader->name());
 
+  img->displacement_pixel_range = make_float2(1.0f, -1.0f);
+  if (img->need_displacement_range) {
+    displacement_ranges_changed = true;
+  }
+
   load_image_metadata(img, progress);
 
   KernelImageTexture tex;
@@ -511,6 +573,9 @@ void ImageManager::device_load_image(Device *device,
     }
     img->vdb_memory = image_cache.load_image_full(
         *device, *img->loader, img->metadata, texture_resolution, tex);
+    if (scene->integrator->get_use_pixel_displacement() && img->need_displacement_range) {
+      img->update_displacement_range();
+    }
   }
 
   /* Update image texture device data. */
