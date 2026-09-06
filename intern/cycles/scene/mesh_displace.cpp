@@ -40,6 +40,7 @@ constexpr uint PIXEL_DISPLACEMENT_CACHE_BVH_FLAG = (1u << 31);
 constexpr uint PIXEL_DISPLACEMENT_CACHE_OPEN_SURFACE_FLAG = (1u << 30);
 constexpr uint PIXEL_DISPLACEMENT_CACHE_GRID_MASK = (1u << 30) - 1;
 constexpr int PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE = 2;
+constexpr size_t PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES = 8 * 1024 * 1024;
 
 struct PixelDisplacementBVHBlock {
   BoundBox bounds;
@@ -243,6 +244,12 @@ static bool mesh_triangle_uv_extent(const Mesh *mesh, const int triangle, float 
 
 static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const int triangle)
 {
+  /* An unbounded procedural shader has no finite cache resolution. Evaluate it at ray hits
+   * instead of imposing a hidden sampling limit or allocating an unbounded micromesh. */
+  if (!scene->integrator->get_use_pixel_displacement_resolution_clamp()) {
+    return 0;
+  }
+
   const int shader_index = mesh->get_shader()[triangle];
   const array<Node *> &mesh_used_shaders = mesh->get_used_shaders();
   const Shader *shader = (shader_index < mesh_used_shaders.size()) ?
@@ -253,7 +260,7 @@ static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const 
     return 0;
   }
 
-  const int resolution = clamp(scene->integrator->get_pixel_displacement_resolution(), 64, 2048);
+  const int resolution = clamp(scene->integrator->get_pixel_displacement_resolution(), 64, 16384);
   float max_uv_edge;
   if (!mesh_triangle_uv_extent(mesh, triangle, &max_uv_edge)) {
     return resolution;
@@ -266,12 +273,15 @@ static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const 
   /* UVs produced by regular subdivisions should land on an integer resolution. Avoid ceilf()
    * turning harmless float round-off (for example 8.000001) into a different micromesh density,
    * which would make the rendered surface depend on the base mesh subdivision. */
-  return clamp(int(ceilf(scaled_resolution - 1.0e-5f)), 1, 2048);
+  if (!std::isfinite(scaled_resolution)) {
+    return 0;
+  }
+  /* Clamp before converting to int, including for very large but finite UV coordinates. */
+  return int(clamp(ceilf(scaled_resolution - 1.0e-5f), 1.0f, float(resolution)));
 }
 
 bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
 {
-  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
   size_t total_samples = 0;
 
   for (const Geometry *geom : scene->geometry) {
@@ -309,7 +319,7 @@ bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
         return false;
       }
       total_samples += size_t(pixel_displacement_cache_sample_count(grid));
-      if (total_samples > max_cache_samples) {
+      if (total_samples > PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES) {
         return false;
       }
     }
@@ -323,6 +333,11 @@ static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
                                                       device_vector<int> &cache_offset,
                                                       size_t *r_cacheable_triangles)
 {
+  *r_cacheable_triangles = 0;
+  if (!scene->integrator->get_use_pixel_displacement_resolution_clamp()) {
+    return 0;
+  }
+
   uint *grid_data = cache_grid.data();
   int *offset_data = cache_offset.data();
   size_t total_samples = 0;
@@ -346,10 +361,16 @@ static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
       if (grid == 0) {
         continue;
       }
+      const size_t samples = size_t(pixel_displacement_cache_sample_count(grid));
+      /* Stop before writing offsets that cannot fit the bounded cache. The caller clears the
+       * partial layout and uses direct shader evaluation for the entire scene. */
+      if (samples > PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES - total_samples) {
+        return PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES + 1;
+      }
       const int prim = int(mesh->prim_offset) + triangle;
       grid_data[prim] = uint(grid) | surface_flag;
       offset_data[prim] = int(total_samples);
-      total_samples += size_t(pixel_displacement_cache_sample_count(grid));
+      total_samples += samples;
       cacheable_triangles++;
     }
   }
@@ -620,8 +641,9 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
   size_t cacheable_triangles = 0;
   const size_t total_samples = prepare_pixel_displacement_cache_layout(
       scene, cache_info, cache_offset, &cacheable_triangles);
-  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
-  if (cacheable_triangles == 0 || total_samples == 0 || total_samples > max_cache_samples) {
+  if (cacheable_triangles == 0 || total_samples == 0 ||
+      total_samples > PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES)
+  {
     for (int i = 0; i < cache_info.size(); i++) {
       info[i] = 0;
     }
