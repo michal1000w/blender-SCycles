@@ -1,6 +1,0 @@
-{
-  "intern/cycles/device/metal/kernel.mm": "0188867d659d88da855987699e729f44865562540bb91a9a3c592c0979b8601d",
-  "intern/cycles/kernel/geom/pixel_displacement_shader.h": "1e6ec8dffe14e5d14fee4f30b8cd235ea9b1f3fc8b0676fc2dbcb4f7360cd3ee",
-  "intern/cycles/scene/mesh_displace.cpp": "86fc24017e4de581d2ab48ee2f99089b66226457bf15aa1f49f9e45108fcd264",
-  "install/Blender-Direct.app/Contents/MacOS/Blender": "994b693fe4c9c5004525eeca4bf75abc36dc839325bfeb66dc0cd5021f3c6ae2"
-}
