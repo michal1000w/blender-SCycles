@@ -1026,6 +1026,29 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
   if (motion || (ctx->object_flag & SD_OBJECT_MOTION) || (info & (5u << 27)) != (5u << 27)) {
     return;
   }
+  const int header = kernel_data_fetch(pixel_displacement_bvh_offset, prim);
+  const int record = header < 0 ? -1 :
+      int(kernel_data_fetch(pixel_displacement_bvh_nodes, header * 2 + 5).y) - 1;
+  if (record >= 0) {
+    for (int i = 0; i < 3; i++) {
+      ctx->normal_projection[i] = make_float3(
+          kernel_data_fetch(pixel_displacement_bvh_nodes, record * 2 + i));
+    }
+    ctx->normal_projection_valid = true;
+    if (ctx->program_offset < 0 && (kernel_data.integrator.pixel_displacement_evaluator_set &
+                                    PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE))
+    {
+      const int shader = kernel_data_fetch(tri_shader, prim) & SHADER_MASK;
+      ctx->normal_program_offset = kernel_data_fetch(shaders, shader).displacement_evaluator - 2;
+      const float4 a = kernel_data_fetch(pixel_displacement_bvh_nodes, record * 2 + 3);
+      const float4 b = kernel_data_fetch(pixel_displacement_bvh_nodes, record * 2 + 4);
+      ctx->uv[0] = make_float2(a.x, a.y);
+      ctx->uv[1] = make_float2(a.z, a.w);
+      ctx->uv[2] = make_float2(b.x, b.y);
+      ctx->gram = kernel_data_fetch(pixel_displacement_bvh_nodes, record * 2 + 5);
+    }
+    return;
+  }
   const uint3 indices = kernel_data_fetch(tri_vindex, prim);
   const int normal_offset = kernel_data_fetch(objects, object).normal_offset;
   const float3 e0 = verts[1] - verts[0], e1 = verts[2] - verts[0];
@@ -1063,6 +1086,9 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
   ctx->normal_projection[1] = coefficients[1] - coefficients[0];
   ctx->normal_projection[2] = coefficients[2] - coefficients[0];
   ctx->normal_projection_valid = true;
+  if (ctx->program_offset < 0) {
+    ctx->gram = make_float4(d00, d01, d11, determinant > 0.01f * d00 * d11 ? 1.0f : 0.0f);
+  }
   if (ctx->program_offset < 0 && (kernel_data.integrator.pixel_displacement_evaluator_set &
                                   PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE))
   {
@@ -1269,12 +1295,9 @@ pixel_displacement_context_eval(KernelGlobals kg,
 
 /* Evaluate the native image in the prepared normal field. Final intersection
  * validation and shading retain the original vector evaluator. */
-ccl_device_inline float pixel_displacement_normal_height(
+ccl_device_inline float pixel_displacement_normal_scalar(
     KernelGlobals kg,
-    const int object,
     const float2 bary,
-    const float3 Ng,
-    ccl_private const float3 verts[3],
     ccl_private const PixelDisplacementImageContext *ctx)
 {
   int offset = ctx->normal_program_offset;
@@ -1287,11 +1310,28 @@ ccl_device_inline float pixel_displacement_normal_height(
   const float4 color = pixel_displacement_resident_sample(kg, make_float2(uv), program);
   const float height = program.height_is_alpha ? color.w :
                                                  linear_rgb_to_gray(kg, make_float3(color));
-  const float scalar = (height - __uint_as_float(program.displacement.midlevel.bits)) *
+  return (height - __uint_as_float(program.displacement.midlevel.bits)) *
                        __uint_as_float(program.displacement.scale.bits);
+}
+
+ccl_device_inline float3 pixel_displacement_normal_eval(
+    KernelGlobals kg,
+    const int object,
+    const float2 bary,
+    const float3 Ng,
+    ccl_private const float3 verts[3],
+    ccl_private const PixelDisplacementImageContext *ctx)
+{
+  const float scalar = pixel_displacement_normal_scalar(kg, bary, ctx);
   const float3 q = ctx->normal_projection[0] + bary.x * ctx->normal_projection[1] +
                    bary.y * ctx->normal_projection[2];
   float3 normal = (verts[1] - verts[0]) * q.x + (verts[2] - verts[0]) * q.y + Ng * q.z;
+  if ((kernel_data.integrator.pixel_displacement_evaluator_set & PIXEL_DISPLACEMENT_RIGID_TRANSFORMS)) {
+    const float distance = kernel_data.integrator.pixel_displacement_max_distance;
+    const float scaled = scalar * kernel_data.integrator.pixel_displacement_scale;
+    return safe_normalize(normal) *
+           (isfinite_safe(scaled) ? clamp(scaled, -distance, distance) : 0.0f);
+  }
   const bool applied = (ctx->object_flag & SD_OBJECT_TRANSFORM_APPLIED) != 0;
   if (applied) {
     const Transform itfm = object_fetch_transform(kg, object, OBJECT_INVERSE_TRANSFORM);
@@ -1302,7 +1342,33 @@ ccl_device_inline float pixel_displacement_normal_height(
     const Transform tfm = object_fetch_transform(kg, object, OBJECT_TRANSFORM);
     displacement = transform_direction(&tfm, displacement);
   }
-  return dot(pixel_displacement_apply_settings(kg, displacement), Ng);
+  return pixel_displacement_apply_settings(kg, displacement);
+}
+
+ccl_device_inline float pixel_displacement_normal_height(
+    KernelGlobals kg,
+    const int object,
+    const float2 bary,
+    const float3 Ng,
+    ccl_private const float3 verts[3],
+    ccl_private const PixelDisplacementImageContext *ctx)
+{
+  if ((kernel_data.integrator.pixel_displacement_evaluator_set &
+       PIXEL_DISPLACEMENT_RIGID_TRANSFORMS) &&
+      ctx->program_offset < 0 && ctx->gram.w != 0.0f)
+  {
+    const float3 q = ctx->normal_projection[0] + bary.x * ctx->normal_projection[1] +
+                     bary.y * ctx->normal_projection[2];
+    const float4 g = ctx->gram;
+    const float norm_squared = q.x * q.x * g.x + 2.0f * q.x * q.y * g.y +
+                               q.y * q.y * g.z + q.z * q.z;
+    const float scalar = pixel_displacement_normal_scalar(kg, bary, ctx) *
+                         kernel_data.integrator.pixel_displacement_scale;
+    const float distance = kernel_data.integrator.pixel_displacement_max_distance;
+    return (isfinite_safe(scalar) ? clamp(scalar, -distance, distance) : 0.0f) * q.z /
+           sqrtf(max(norm_squared, 1.0e-30f));
+  }
+  return dot(pixel_displacement_normal_eval(kg, object, bary, Ng, verts, ctx), Ng);
 }
 
 ccl_device_forceinline bool pixel_displacement_height_sample(
@@ -2043,6 +2109,58 @@ ccl_device_inline float pixel_displacement_magnitude_bound(KernelGlobals kg,
   return min(max_distance, bound + max(4.0e-4f, max_distance * 0.004f));
 }
 
+/* Conservative broad phase for the native surface. Keep the original search lattice;
+ * the hierarchy only limits which part can contain a root. */
+ccl_device_noinline bool pixel_displacement_direct_interval(
+    KernelGlobals kg,
+    const int prim,
+    const float3 ray_P,
+    const float3 ray_D,
+    ccl_private float *begin,
+    ccl_private float *end)
+{
+  const int header = kernel_data_fetch(pixel_displacement_bvh_offset, prim);
+  if (header < 0) {
+    return true;
+  }
+  const int root = int(kernel_data_fetch(pixel_displacement_bvh_nodes, header * 2 + 5).x) - 1;
+  if (root < 0) {
+    return true;
+  }
+  int node = root;
+  float first = *end, last = *begin;
+  bool found = false;
+  while (node >= 0) {
+    const float4 lower = kernel_data_fetch(pixel_displacement_bvh_nodes, node * 2);
+    const float4 upper = kernel_data_fetch(pixel_displacement_bvh_nodes, node * 2 + 1);
+    float lo = *begin, hi = *end;
+    if (pixel_displacement_clip_bounds(
+            make_float3(lower), make_float3(upper), ray_P, ray_D, &lo, &hi))
+    {
+      if (found && lo >= first && hi <= last) {
+        node = int(__float_as_uint(upper.w));
+        continue;
+      }
+      const uint child = __float_as_uint(lower.w);
+      if (child & 0x80000000u) {
+        first = min(first, lo);
+        last = max(last, hi);
+        found = true;
+      }
+      else {
+        node = int(child);
+        continue;
+      }
+    }
+    node = int(__float_as_uint(upper.w));
+  }
+  if (found) {
+    *begin = first;
+    *end = last;
+  }
+  return found;
+}
+
 ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                                const int object,
                                                                const int prim,
@@ -2073,6 +2191,12 @@ ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
   const bool use_cache = pixel_displacement_cache_lookup(
       kg, prim, motion, &cache_grid, &cache_offset);
   (void)cache_offset;
+  float direct_begin = hit_tmin, direct_end = ray_tmax;
+  const bool direct_interval = use_cache || motion ||
+      pixel_displacement_direct_interval(kg, prim, ray_P, ray_D, &direct_begin, &direct_end);
+  if (!direct_interval && abs_dir_plane >= 0.35f) {
+    return false;
+  }
   const float magnitude_bound = use_cache ?
                                     max_distance :
                                     pixel_displacement_magnitude_bound(
@@ -2273,12 +2397,14 @@ ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
 
   /* Retry unresolved normal-prism intervals at higher density. The retry keeps
    * native shader evaluation and allocates no displacement sample cache. */
-  const int passes = image_ctx.normal_projection_valid && steps < 128 ? 2 : 1;
+  const int passes = direct_interval ? (image_ctx.normal_projection_valid && steps < 128 ? 2 : 1) : 0;
   for (int pass = 0; pass < passes; pass++) {
     const int pass_steps = pass == 0 ? steps : 128;
-    const int pass_first = pass == 0 ? first_step : 0;
-    const int pass_last = pass == 0 ? last_step : pass_steps;
     const float pass_dt = (t1 - t0) / float(pass_steps);
+    const int pass_first = max(pass == 0 ? first_step : 0,
+        int(clamp(floorf((direct_begin - t0) / pass_dt) - 1.0f, 0.0f, float(pass_steps))));
+    const int pass_last = min(pass == 0 ? last_step : pass_steps,
+        int(clamp(ceilf((direct_end - t0) / pass_dt) + 1.0f, 0.0f, float(pass_steps))));
     have_prev = false;
     for (int i = pass_first; i <= pass_last; i++) {
 
@@ -2405,6 +2531,10 @@ ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                                             &surface_dPdv);
             if (!cached_geometry) {
               surface_P =
+                  (image_ctx.normal_projection_valid && image_ctx.normal_program_offset >= 0) ?
+                      pixel_displacement_base_position(verts, refined_bary.x, refined_bary.y) +
+                          pixel_displacement_normal_eval(
+                              kg, object, refined_bary, Ng, verts, &image_ctx) :
                   (pixel_displacement_certified_image_scene() || image_ctx.program_offset >= 0) ?
                       pixel_displacement_base_position(verts, refined_bary.x, refined_bary.y) +
                           pixel_displacement_context_eval(
@@ -2495,6 +2625,10 @@ ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                     &unused_dPdv))
             {
               surface_P =
+                  (image_ctx.normal_projection_valid && image_ctx.normal_program_offset >= 0) ?
+                      pixel_displacement_base_position(verts, refined_bary.x, refined_bary.y) +
+                          pixel_displacement_normal_eval(
+                              kg, object, refined_bary, Ng, verts, &image_ctx) :
                   (pixel_displacement_certified_image_scene() || image_ctx.program_offset >= 0) ?
                       pixel_displacement_base_position(verts, refined_bary.x, refined_bary.y) +
                           pixel_displacement_context_eval(

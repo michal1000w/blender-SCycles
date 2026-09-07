@@ -61,4 +61,52 @@ TEST(image_displacement_bounds, ByteNormalizationAndInvalidInput)
   EXPECT_FALSE(bounds.build<uint8_t>(pixels, 2, 2, 0));
 }
 
+TEST(image_displacement_bounds, ContinuousBilinearFootprints)
+{
+  using Extension = DisplacementImageBounds::Extension;
+  for (const auto [w, h] : {std::pair{1, 1}, {37, 65}, {2053, 9}, {9, 2063}}) {
+    std::vector<uint16_t> pixels(size_t(w) * h);
+    uint32_t state = 71;
+    auto random = [&]() { return state = 1664525u * state + 1013904223u; };
+    for (auto &pixel : pixels) {
+      pixel = uint16_t(random() >> 16);
+    }
+    DisplacementImageBounds bounds;
+    ASSERT_TRUE(bounds.build<uint16_t>(pixels, w, h));
+    for (const Extension extension : {Extension::Repeat, Extension::Extend, Extension::Clip}) {
+      auto texel = [&](int x, int y) -> double {
+        if (extension == Extension::Repeat) {
+          x = ((x % w) + w) % w;
+          y = ((y % h) + h) % h;
+        }
+        else if (extension == Extension::Clip && (x < 0 || y < 0 || x >= w || y >= h)) {
+          return 0.0;
+        }
+        x = std::clamp(x, 0, w - 1);
+        y = std::clamp(y, 0, h - 1);
+        return pixels[size_t(y) * w + x];
+      };
+      for (int trial = 0; trial < 1000; trial++) {
+        const double u0 = double(random() % 50000) / 10000.0 - 2.0;
+        const double v0 = double(random() % 50000) / 10000.0 - 2.0;
+        const double du = double(random() % 100) / 1000.0;
+        const double dv = double(random() % 100) / 1000.0;
+        const uint32_t range = bounds.query_linear(u0, v0, u0 + du, v0 + dv, extension);
+        for (int sample = 0; sample < 10; sample++) {
+          const double x = (u0 + du * double(random() % 1001) / 1000.0) * w - 0.5;
+          const double y = (v0 + dv * double(random() % 1001) / 1000.0) * h - 0.5;
+          const int ix = int(std::floor(x)), iy = int(std::floor(y));
+          const double fx = x - ix, fy = y - iy;
+          const double value = (1 - fy) * ((1 - fx) * texel(ix, iy) + fx * texel(ix + 1, iy)) +
+                               fy * ((1 - fx) * texel(ix, iy + 1) + fx * texel(ix + 1, iy + 1));
+          EXPECT_LE(bounds.lower(range), value + 1.0e-9);
+          EXPECT_GE(bounds.upper(range), value - 1.0e-9);
+        }
+      }
+    }
+    EXPECT_EQ(bounds.query_linear(-1.0e100, 0, 0, 1, Extension::Repeat),
+              bounds.pack(0, UINT16_MAX));
+  }
+}
+
 CCL_NAMESPACE_END
