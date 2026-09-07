@@ -172,9 +172,10 @@ class Mesh : public Geometry {
   size_t face_offset;
   size_t corner_offset;
 
-  /* Tight render-time bounds of cached pixel-displacement micromeshes. Not serialized and only
-   * consumed by hardware ray-tracing backends while building acceleration structures. */
+  /* Render-time bounds of cached micromeshes or conservative native-image surfaces.
+   * Direct bounds also enclose the grazing fallback and can tighten the software BVH. */
   array<BoundBox> pixel_displacement_bounds;
+  bool pixel_displacement_bounds_are_direct = false;
 
  private:
   size_t num_subd_added_verts;
