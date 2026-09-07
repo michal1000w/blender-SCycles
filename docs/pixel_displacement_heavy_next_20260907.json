@@ -1,0 +1,1121 @@
+{
+  "baseline_commit": "65c65ac597d",
+  "hardware": "Apple M2 Max, 38 GPU cores; MetalRT",
+  "measurement": "Sequential GPU renders outside sandbox; warm medians exclude first render; --warm-up waits for Metal compilation",
+  "manifest": {
+    "kernel/geom/pixel_displacement_shader.h": {
+      "candidate": "b0ee3f1592dfb238be409fa16fec6d890937a3396203da781b551b5b907091f3",
+      "baseline": "22be88e2b4af8fe1aed61bd22d49ccaa53009b43ed9ed1899b02d1c0934f6e73"
+    },
+    "kernel/types.h": {
+      "candidate": "5b977ca59c5c6f4ba910c6ead7cedf5826bca4ace7931b9b5509da3738383816",
+      "baseline": "b77bc73c6a19bb542995d92da68f5fe7e5072acc545ae85f21cbe6b5b7844ff5"
+    },
+    "kernel/data_template.h": {
+      "candidate": "bcf4b6a8106c7cfafb116de5a9db7ac6314fe30b1e860b3fbb9095f766491ddd",
+      "baseline": "c4da50573c349a9e94593572b188890357e65e3a6d3dedacc6ae1f1f6f1b3c7c"
+    },
+    "executable": "cbb4ab8a02c234e49829f126ad7264545c28063d87e78f06f96887c9bc0a935f",
+    "baseline_executable": "81cd759146c8eae4fab8edb66fc1b3338b44342670a6353c58ca800ed6da0ca7",
+    "scenes": {
+      "JAR-test-Cycles.blend": "04a13941c1179298509633158bae5a812eb6e121a6b3ed4d7475570b10659293",
+      "JAR-test-Cycles2.blend": "56e223ed994c01fac6a5ddd6947bef1fcf5018e268177001dc23b2c56fb18819",
+      "JAR-test-Cycles2-1.blend": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef"
+    }
+  },
+  "results": [
+    {
+      "case": "high-unlimited",
+      "mode": "unlimited",
+      "wait_for_metal_compilation": true,
+      "baseline_seconds": 15.691440624992538,
+      "candidate_seconds": 7.112266541502322,
+      "speedup": 2.20625036103864,
+      "rss_ratio": 1.122511930440225,
+      "image": {
+        "baseline": "/tmp/displacement-heavy-next/final-validation/high-unlimited/baseline-unlimited.exr",
+        "candidate": "/tmp/displacement-heavy-next/final-validation/high-unlimited/candidate-unlimited.exr",
+        "size": [
+          3000,
+          2000
+        ],
+        "finite": true,
+        "max_abs": 0.2823088467121124,
+        "rmse": 0.0009593636692668389,
+        "mean_abs": 6.108056923998028e-05,
+        "relative_l1": 0.004225657217948115,
+        "pixels_over_0_001": 93999,
+        "pixels": 6000000,
+        "p99_abs": 0.00108114914037288
+      }
+    },
+    {
+      "case": "high-clamped",
+      "mode": "16384",
+      "wait_for_metal_compilation": true,
+      "baseline_seconds": 15.70998264550144,
+      "candidate_seconds": 7.1530389379986445,
+      "speedup": 2.1962668988206224,
+      "rss_ratio": 1.0600089615772377,
+      "image": {
+        "baseline": "/tmp/displacement-heavy-next/final-validation/high-clamped/baseline-16384.exr",
+        "candidate": "/tmp/displacement-heavy-next/final-validation/high-clamped/candidate-16384.exr",
+        "size": [
+          3000,
+          2000
+        ],
+        "finite": true,
+        "max_abs": 0.2823088467121124,
+        "rmse": 0.0009593636623433601,
+        "mean_abs": 6.108056849437209e-05,
+        "relative_l1": 0.004225657166365677,
+        "pixels_over_0_001": 93999,
+        "pixels": 6000000,
+        "p99_abs": 0.00108114914037288
+      }
+    },
+    {
+      "case": "high-odd",
+      "mode": "4097",
+      "wait_for_metal_compilation": true,
+      "baseline_seconds": 6.575087770499522,
+      "candidate_seconds": 2.927186458502547,
+      "speedup": 2.2462141936332687,
+      "rss_ratio": 1.0231196620442649,
+      "image": {
+        "baseline": "/tmp/displacement-heavy-next/final-validation/high-odd/baseline-4097.exr",
+        "candidate": "/tmp/displacement-heavy-next/final-validation/high-odd/candidate-4097.exr",
+        "size": [
+          2593,
+          2053
+        ],
+        "finite": true,
+        "max_abs": 0.6777515560388565,
+        "rmse": 0.0011835967955705039,
+        "mean_abs": 5.407919369355144e-05,
+        "relative_l1": 0.0038675773782639446,
+        "pixels_over_0_001": 55556,
+        "pixels": 5323429,
+        "p99_abs": 0.0006366305425763163
+      }
+    },
+    {
+      "case": "second",
+      "mode": "unlimited",
+      "wait_for_metal_compilation": true,
+      "baseline_seconds": 5.206787645496661,
+      "candidate_seconds": 2.702414000494173,
+      "speedup": 1.9267172404170974,
+      "rss_ratio": 1.0117559142063643,
+      "image": {
+        "baseline": "/tmp/displacement-heavy-next/final-validation/second/baseline-unlimited.exr",
+        "candidate": "/tmp/displacement-heavy-next/final-validation/second/candidate-unlimited.exr",
+        "size": [
+          3000,
+          2000
+        ],
+        "finite": true,
+        "max_abs": 0.3585895150899887,
+        "rmse": 0.0006455722586927488,
+        "mean_abs": 1.960474744457881e-05,
+        "relative_l1": 0.0007004402078033497,
+        "pixels_over_0_001": 23393,
+        "pixels": 6000000,
+        "p99_abs": 0.00016191601753234863
+      }
+    },
+    {
+      "case": "original",
+      "mode": "unlimited",
+      "wait_for_metal_compilation": true,
+      "baseline_seconds": 3.4939653545006877,
+      "candidate_seconds": 3.5102480210043723,
+      "speedup": 0.9953613914440651,
+      "rss_ratio": 0.9933164992209745,
+      "image": {
+        "baseline": "/tmp/displacement-heavy-next/final-validation/original/baseline-unlimited.exr",
+        "candidate": "/tmp/displacement-heavy-next/final-validation/original/candidate-unlimited.exr",
+        "size": [
+          3000,
+          2000
+        ],
+        "finite": true,
+        "max_abs": 1.9073486328125e-06,
+        "rmse": 8.799456808774439e-09,
+        "mean_abs": 1.1424327967688442e-09,
+        "relative_l1": 9.872450703688347e-09,
+        "pixels_over_0_001": 0,
+        "pixels": 6000000,
+        "p99_abs": 2.9802322387695312e-08
+      }
+    }
+  ],
+  "raw_runs": {
+    "high-unlimited": {
+      "baseline": {
+        "label": "baseline",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+        "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+        "build_hash": "278039837469",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "unlimited",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          26.58608695800649,
+          15.720501790987328,
+          15.691314124997007,
+          15.718006249997416,
+          15.691567124988069,
+          15.79460491699865,
+          15.528806208996684,
+          15.479585749999387,
+          15.471555584008456
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1465991168,
+        "renders_completed": 9,
+        "warm_median_seconds": 15.691440624992538
+      },
+      "candidate": {
+        "label": "candidate",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+        "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+        "build_hash": "65c65ac597d7",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "unlimited",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          43.688785457998165,
+          7.099993249998079,
+          7.143375875006313,
+          7.092316790993209,
+          7.157332832997781,
+          7.205554290994769,
+          7.080243333999533,
+          7.0964327919937205,
+          7.1245398330065655
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1645592576,
+        "renders_completed": 9,
+        "warm_median_seconds": 7.112266541502322
+      }
+    },
+    "high-clamped": {
+      "baseline": {
+        "label": "baseline",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+        "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+        "build_hash": "278039837469",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "16384",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          26.643965292008943,
+          15.707836208006484,
+          15.642790040990803,
+          15.65177599999879,
+          15.75626112500322,
+          15.634188791998895,
+          15.827384583011735,
+          15.712129082996398,
+          15.745864500000607
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1462599680,
+        "renders_completed": 9,
+        "warm_median_seconds": 15.70998264550144
+      },
+      "candidate": {
+        "label": "candidate",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+        "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+        "build_hash": "65c65ac597d7",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "16384",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          42.33426691699424,
+          7.071203291998245,
+          7.063924332993338,
+          7.066647083993303,
+          7.157410041996627,
+          7.185278457996901,
+          7.148667834000662,
+          7.25853449999704,
+          7.193924916995456
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1550368768,
+        "renders_completed": 9,
+        "warm_median_seconds": 7.1530389379986445
+      }
+    },
+    "high-odd": {
+      "baseline": {
+        "label": "baseline",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+        "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+        "build_hash": "278039837469",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "4097",
+        "resolution": [
+          2593,
+          2053,
+          100
+        ],
+        "render_pixels": [
+          2593,
+          2053
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 8,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          18.327025165999657,
+          6.56135970800824,
+          6.56517650000751,
+          6.606907666006009,
+          6.530728915997315,
+          6.594994458006113,
+          6.5849990409915335,
+          6.514641791000031,
+          6.68073683300463
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1427243008,
+        "renders_completed": 9,
+        "warm_median_seconds": 6.575087770499522
+      },
+      "candidate": {
+        "label": "candidate",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+        "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+        "build_hash": "65c65ac597d7",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "4097",
+        "resolution": [
+          2593,
+          2053,
+          100
+        ],
+        "render_pixels": [
+          2593,
+          2053
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 8,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          14.429856999995536,
+          2.916801667000982,
+          2.9196765829983633,
+          2.9355048750003334,
+          2.9403501249908004,
+          2.9274657500063768,
+          2.9270181250030873,
+          2.9260882910020882,
+          2.9273547920020064
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1460240384,
+        "renders_completed": 9,
+        "warm_median_seconds": 2.927186458502547
+      }
+    },
+    "second": {
+      "baseline": {
+        "label": "baseline",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2.blend",
+        "scene_sha256": "56e223ed994c01fac6a5ddd6947bef1fcf5018e268177001dc23b2c56fb18819",
+        "build_hash": "278039837469",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "unlimited",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          17.069241459001205,
+          5.36753887499799,
+          5.182964584004367,
+          5.201541332993656,
+          5.13402004200907,
+          5.186647167007322,
+          5.265681542005041,
+          5.212033957999665,
+          5.280481875000987
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1468940288,
+        "renders_completed": 9,
+        "warm_median_seconds": 5.206787645496661
+      },
+      "candidate": {
+        "label": "candidate",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2.blend",
+        "scene_sha256": "56e223ed994c01fac6a5ddd6947bef1fcf5018e268177001dc23b2c56fb18819",
+        "build_hash": "65c65ac597d7",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "unlimited",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 8,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          14.13485445799597,
+          2.715583750003134,
+          2.713694708989351,
+          2.6853515839902684,
+          2.6838818329997594,
+          2.6911332919989945,
+          2.7269055409997236,
+          2.689847166999243,
+          2.7248814159975154
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1486209024,
+        "renders_completed": 9,
+        "warm_median_seconds": 2.702414000494173
+      }
+    },
+    "original": {
+      "baseline": {
+        "label": "baseline",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles.blend",
+        "scene_sha256": "04a13941c1179298509633158bae5a812eb6e121a6b3ed4d7475570b10659293",
+        "build_hash": "278039837469",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "unlimited",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 16,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          31.73093620799773,
+          3.5133165000006557,
+          3.472865333998925,
+          3.4796968750015367,
+          3.5082338339998387
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1524776960,
+        "renders_completed": 5,
+        "warm_median_seconds": 3.4939653545006877
+      },
+      "candidate": {
+        "label": "candidate",
+        "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles.blend",
+        "scene_sha256": "04a13941c1179298509633158bae5a812eb6e121a6b3ed4d7475570b10659293",
+        "build_hash": "65c65ac597d7",
+        "version": "5.3.0 Alpha",
+        "gpu": [
+          "Apple M2 Max (GPU - 38 cores)"
+        ],
+        "mode": "unlimited",
+        "resolution": [
+          3000,
+          2000,
+          100
+        ],
+        "render_pixels": [
+          3000,
+          2000
+        ],
+        "displacement_environment": {},
+        "wait_for_metal_compilation": true,
+        "samples": 16,
+        "seed": 7,
+        "steps": 16,
+        "max_distance": 1.0,
+        "scale": 1.0,
+        "renders_seconds": [
+          28.349578958994243,
+          3.4781556250090944,
+          3.5511014579969924,
+          3.5045748749980703,
+          3.5159211670106743
+        ],
+        "completed": true,
+        "peak_process_rss_bytes": 1514586112,
+        "renders_completed": 5,
+        "warm_median_seconds": 3.5102480210043723
+      }
+    }
+  },
+  "memory_repeat": {
+    "summary": [
+      {
+        "case": "high-unlimited",
+        "mode": "unlimited",
+        "wait_for_metal_compilation": true,
+        "baseline_seconds": 15.77547941699595,
+        "candidate_seconds": 7.234801062499173,
+        "speedup": 2.1804994056804796,
+        "rss_ratio": 1.005663501876794,
+        "image": {
+          "baseline": "/tmp/displacement-heavy-next/memory-repeat/high-unlimited/baseline-unlimited.exr",
+          "candidate": "/tmp/displacement-heavy-next/memory-repeat/high-unlimited/candidate-unlimited.exr",
+          "size": [
+            3000,
+            2000
+          ],
+          "finite": true,
+          "max_abs": 0.2823088467121124,
+          "rmse": 0.000959363664109038,
+          "mean_abs": 6.108056943510164e-05,
+          "relative_l1": 0.0042256572314469405,
+          "pixels_over_0_001": 93999,
+          "pixels": 6000000,
+          "p99_abs": 0.00108114914037288
+        }
+      }
+    ],
+    "baseline": {
+      "label": "baseline",
+      "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+      "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+      "build_hash": "278039837469",
+      "version": "5.3.0 Alpha",
+      "gpu": [
+        "Apple M2 Max (GPU - 38 cores)"
+      ],
+      "mode": "unlimited",
+      "resolution": [
+        3000,
+        2000,
+        100
+      ],
+      "render_pixels": [
+        3000,
+        2000
+      ],
+      "displacement_environment": {},
+      "wait_for_metal_compilation": true,
+      "samples": 16,
+      "seed": 7,
+      "steps": 8,
+      "max_distance": 1.0,
+      "scale": 1.0,
+      "renders_seconds": [
+        27.542014999999083,
+        15.745618374989135,
+        15.805340459002764
+      ],
+      "completed": true,
+      "peak_process_rss_bytes": 1484062720,
+      "renders_completed": 3,
+      "warm_median_seconds": 15.77547941699595
+    },
+    "candidate": {
+      "label": "candidate",
+      "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+      "scene_sha256": "f5e5a0fd1bebc4899d6a21b9fd0ca22396a981c2b212ab7216da94f76681d5ef",
+      "build_hash": "65c65ac597d7",
+      "version": "5.3.0 Alpha",
+      "gpu": [
+        "Apple M2 Max (GPU - 38 cores)"
+      ],
+      "mode": "unlimited",
+      "resolution": [
+        3000,
+        2000,
+        100
+      ],
+      "render_pixels": [
+        3000,
+        2000
+      ],
+      "displacement_environment": {},
+      "wait_for_metal_compilation": true,
+      "samples": 16,
+      "seed": 7,
+      "steps": 8,
+      "max_distance": 1.0,
+      "scale": 1.0,
+      "renders_seconds": [
+        18.55306304100668,
+        7.245468749999418,
+        7.224133374998928
+      ],
+      "completed": true,
+      "peak_process_rss_bytes": 1492467712,
+      "renders_completed": 3,
+      "warm_median_seconds": 7.234801062499173
+    }
+  },
+  "regressions": {
+    "cases": [
+      {
+        "fixture": "direct-original",
+        "case": "cached_mode",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 4.76837158203125e-07,
+        "relative_l1": 3.494154795430735e-09,
+        "rmse": 6.044063470126329e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "distance",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 2.384185791015625e-07,
+        "relative_l1": 3.7103470013865416e-09,
+        "rmse": 6.403604834466183e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "initial",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 2.384185791015625e-07,
+        "relative_l1": 2.3624600386904733e-09,
+        "rmse": 3.4647397271218693e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "odd_clamp",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 2.384185791015625e-07,
+        "relative_l1": 3.2237110324923846e-09,
+        "rmse": 5.846464364749803e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "odd_native",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 2.384185791015625e-07,
+        "relative_l1": 2.8917614424108677e-09,
+        "rmse": 3.8333154960070494e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "odd_texture",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 4.76837158203125e-07,
+        "relative_l1": 3.6182440805348704e-09,
+        "rmse": 7.138086484603944e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "restored_direct",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 4.76837158203125e-07,
+        "relative_l1": 3.377256609813004e-09,
+        "rmse": 6.418884438637393e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "restored_native",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 2.384185791015625e-07,
+        "relative_l1": 2.4691000895300277e-09,
+        "rmse": 3.3081200780067035e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "scale",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 4.76837158203125e-07,
+        "relative_l1": 3.8158605983640356e-09,
+        "rmse": 6.614001315292582e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "steps",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 4.76837158203125e-07,
+        "relative_l1": 3.9668736826158146e-09,
+        "rmse": 7.758217357170852e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-original",
+        "case": "transform",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 4.76837158203125e-07,
+        "relative_l1": 3.1671896631683353e-09,
+        "rmse": 6.266814480985719e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-high",
+        "case": "cached_mode",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 3.657146507389295e-09,
+        "rmse": 2.1613652612220364e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-high",
+        "case": "distance",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.014835018664598465,
+        "relative_l1": 4.280981965280493e-05,
+        "rmse": 0.00011829921715192876,
+        "pixels_over_0_001": 5
+      },
+      {
+        "fixture": "direct-high",
+        "case": "initial",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.09787309635430574,
+        "relative_l1": 0.004319892616873425,
+        "rmse": 0.001237159106778768,
+        "pixels_over_0_001": 144
+      },
+      {
+        "fixture": "direct-high",
+        "case": "odd_clamp",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 3.784693074201665e-09,
+        "rmse": 2.1930102044960977e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-high",
+        "case": "odd_native",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.10749426670372486,
+        "relative_l1": 0.00250504711350864,
+        "rmse": 0.0009888035994679886,
+        "pixels_over_0_001": 82
+      },
+      {
+        "fixture": "direct-high",
+        "case": "odd_texture",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 4.0470133600616636e-09,
+        "rmse": 2.1743986095353256e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-high",
+        "case": "restored_direct",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 3.4628143636060702e-09,
+        "rmse": 2.0033183892422e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "direct-high",
+        "case": "restored_native",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.09787309635430574,
+        "relative_l1": 0.004319892581253314,
+        "rmse": 0.0012371591071567384,
+        "pixels_over_0_001": 144
+      },
+      {
+        "fixture": "direct-high",
+        "case": "scale",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.09713560342788696,
+        "relative_l1": 0.002130169435827518,
+        "rmse": 0.0008270702990431617,
+        "pixels_over_0_001": 88
+      },
+      {
+        "fixture": "direct-high",
+        "case": "steps",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.01853528618812561,
+        "relative_l1": 5.536021882276209e-05,
+        "rmse": 0.00016050964001201857,
+        "pixels_over_0_001": 5
+      },
+      {
+        "fixture": "direct-high",
+        "case": "transform",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.02316402643918991,
+        "relative_l1": 5.2835305075065265e-05,
+        "rmse": 0.00015446551304715053,
+        "pixels_over_0_001": 3
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "generated",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.0,
+        "relative_l1": 0.0,
+        "rmse": 0.0,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "initial",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.07652473449707031,
+        "relative_l1": 0.0005306421697886876,
+        "rmse": 0.0005637739014751723,
+        "pixels_over_0_001": 32
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "missing_uv",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.0,
+        "relative_l1": 0.0,
+        "rmse": 0.0,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "missing_uv_repeated",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.0,
+        "relative_l1": 0.0,
+        "rmse": 0.0,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "normals",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.029403939843177795,
+        "relative_l1": 0.00041426188187211106,
+        "rmse": 0.00026853113746318257,
+        "pixels_over_0_001": 43
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "uv_edit",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.2879133936949074,
+        "relative_l1": 0.0009174790414658972,
+        "rmse": 0.0017483094366989868,
+        "pixels_over_0_001": 34
+      },
+      {
+        "fixture": "inputs-second",
+        "case": "uv_switch",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.036999911069869995,
+        "relative_l1": 0.00039790618537485274,
+        "rmse": 0.0003733922810572636,
+        "pixels_over_0_001": 33
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "closest",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 3.3867797025040085e-09,
+        "rmse": 1.6458725025011599e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "cubic",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 5.960464477539063e-08,
+        "relative_l1": 2.808523628010506e-09,
+        "rmse": 1.3612974329918866e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "initial",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.11796227097511292,
+        "relative_l1": 0.0005950803078360868,
+        "rmse": 0.0007734971025520276,
+        "pixels_over_0_001": 35
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "large_coordinates",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 2.925257318854836e-09,
+        "rmse": 1.4780134372766836e-09,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "rgba_alpha_height",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 0.011379629373550415,
+        "relative_l1": 6.843601545312717e-05,
+        "rmse": 0.00010550785131224325,
+        "pixels_over_0_001": 12
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "rgba_linear",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 8.618831634521484e-05,
+        "relative_l1": 1.9620768513668536e-07,
+        "rmse": 5.374626439565562e-07,
+        "pixels_over_0_001": 0
+      },
+      {
+        "fixture": "sampler-second",
+        "case": "sphere",
+        "finite": true,
+        "pixels": 15000,
+        "max_abs": 1.1920928955078125e-07,
+        "relative_l1": 3.752721954635222e-09,
+        "rmse": 1.9984624972475848e-09,
+        "pixels_over_0_001": 0
+      }
+    ],
+    "consistency_checks": [
+      {
+        "fixture": "direct-original",
+        "check": "restore_direct",
+        "max_abs": 4.76837158203125e-07,
+        "passed": true
+      },
+      {
+        "fixture": "direct-original",
+        "check": "restore_native_image",
+        "max_abs": 1.1920928955078125e-07,
+        "passed": true
+      },
+      {
+        "fixture": "direct-high",
+        "check": "restore_direct",
+        "max_abs": 1.1920928955078125e-07,
+        "passed": true
+      },
+      {
+        "fixture": "direct-high",
+        "check": "restore_native_image",
+        "max_abs": 2.9802322387695312e-08,
+        "passed": true
+      },
+      {
+        "fixture": "inputs-second",
+        "check": "repeat_missing_uv",
+        "max_abs": 0.0,
+        "passed": true
+      }
+    ],
+    "max_relative_l1": 0.004319892616873425
+  },
+  "coverage": [
+    {
+      "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles.blend",
+      "mode": "unlimited",
+      "size": [
+        3000,
+        2000
+      ],
+      "finite": true,
+      "reference": "/tmp/displacement-heavy-next/regressions/coverage/JAR-test-Cycles/baseline.exr",
+      "margin": 48,
+      "interior_pixels": 5491186,
+      "interior_misses": 0
+    },
+    {
+      "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2.blend",
+      "mode": "unlimited",
+      "size": [
+        3000,
+        2000
+      ],
+      "finite": true,
+      "reference": "/tmp/displacement-heavy-next/regressions/coverage/JAR-test-Cycles2/baseline.exr",
+      "margin": 48,
+      "interior_pixels": 1305571,
+      "interior_misses": 0
+    },
+    {
+      "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles2-1.blend",
+      "mode": "unlimited",
+      "size": [
+        3000,
+        2000
+      ],
+      "finite": true,
+      "reference": "/tmp/displacement-heavy-next/regressions/coverage/JAR-test-Cycles2-1/baseline.exr",
+      "margin": 48,
+      "interior_pixels": 1210441,
+      "interior_misses": 0
+    }
+  ],
+  "unit_tests": {
+    "suite": "util_image_displacement_bounds",
+    "passed": 3
+  },
+  "build_passed": true
+}

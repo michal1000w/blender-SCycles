@@ -52,6 +52,22 @@ def main():
         print("DIRECT_REGRESSION", label, flush=True)
 
     render("initial")
+    # Exercise arbitrary native dimensions while the rigid-image fast path is still
+    # eligible, then verify that restoring the source image invalidates temporary inputs.
+    nodes = bpy.data.materials["Material.002"].node_tree
+    texture = nodes.nodes["Image Texture.003"]
+    original_image = texture.image
+    odd_image = original_image.copy()
+    odd_image.scale(2053, 2063)
+    odd_image.update()
+    odd_image.pack()
+    texture.image = odd_image
+    nodes.update_tag()
+    render("odd_native")
+    texture.image = original_image
+    nodes.update_tag()
+    render("restored_native")
+    bpy.data.images.remove(odd_image)
     scene.cycles.pixel_displacement_scale = 0.4
     render("scale")
     scene.cycles.pixel_displacement_max_distance = 0.015

@@ -385,7 +385,7 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
     pipeline->num_threads_per_block = occupancy_tuning[device_kernel].num_threads_per_block;
   }
 
-  /* Direct displacement keeps shadow rays active for very different numbers of samples.
+  /* General direct displacement keeps shadow rays active for very different numbers of samples.
    * Smaller dispatch groups reduce that scheduling tail on M2 Max/Ultra. Preserve the
    * architecture's compiler register budget; reducing it hurts this evaluator's throughput. */
   if (MetalInfo::get_apple_gpu_architecture(mtlDevice) == APPLE_M2_BIG &&
@@ -397,6 +397,20 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
       device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW)
   {
     pipeline->num_threads_per_block = 128;
+  }
+
+  /* The certified normal-image solver omits the general evaluator and its large
+   * temporary state. On M2 Max/Ultra, a reduced compiler thread limit
+   * and small dispatch groups improve occupancy and reduce long-ray scheduling tails. */
+  if (MetalInfo::get_apple_gpu_architecture(mtlDevice) == APPLE_M2_BIG &&
+      pso_type == PSO_SPECIALIZED_INTERSECT &&
+      (pipeline->kernel_data_.integrator.pixel_displacement_evaluator_set &
+       PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS) &&
+      (device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW))
+  {
+    pipeline->threads_per_threadgroup = 512;
+    pipeline->num_threads_per_block = 64;
   }
 
   /* metalrt options */
