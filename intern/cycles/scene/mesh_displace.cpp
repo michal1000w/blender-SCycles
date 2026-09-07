@@ -607,8 +607,8 @@ static void read_pixel_displacement_cache_output(
   }
 }
 
-/* The image fast path is restricted to constant native triangle normals. Varying
- * normals amplify arithmetic differences in the lean evaluator into visible shading changes. */
+/* Certify constant normals separately from native UV eligibility. The uniform-normal
+ * context can reuse its displacement direction; varying normals retain per-sample evaluation. */
 static bool pixel_displacement_has_uniform_normals(const Mesh *mesh, const int triangle)
 {
   const Attribute *normals = mesh->attributes.find(ATTR_STD_CORNER_NORMAL);
@@ -761,6 +761,7 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
     float4 data[4];
   };
   vector<ContextRecord> contexts;
+  float max_normal_tangent_squared = 0.0f;
   const float scale = scene->integrator->get_pixel_displacement_scale();
   const float max_distance = scene->integrator->get_pixel_displacement_max_distance();
   for (Geometry *geom : scene->geometry) {
@@ -834,12 +835,21 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
         if (!(flag & SD_OBJECT_TRANSFORM_APPLIED)) {
           N = transform_direction(&object.itfm, N);
         }
+        max_normal_tangent_squared = max(max_normal_tangent_squared,
+                                         len_squared(cross(N, safe_normalize(cross(e0, e1)))) /
+                                             max(len_squared(N), 1.0e-20f));
         const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
         const float denominator = d00 * d11 - d01 * d01;
         contexts.push_back(
             {header,
              mapped,
-             {make_float4(N.x, N.y, N.z, 0.0f),
+             {make_float4(N.x,
+                          N.y,
+                          N.z,
+                          len_squared(cross(N, safe_normalize(cross(e0, e1)))) <=
+                                  1.0e-8f * len_squared(N) ?
+                              1.0f :
+                              0.0f),
               make_float4(uv[0].x, uv[0].y, uv[1].x, uv[1].y),
               make_float4(uv[2].x, uv[2].y, 0.0f, 0.0f),
               make_float4(
@@ -911,7 +921,8 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
   dscene->pixel_displacement_bvh_offset.copy_to_device();
   LOG_DEBUG << "Displacement fallback BVH: " << headers.size() << " triangles, " << nodes.size()
             << " nodes, " << sample_bytes + nodes.size() * 2 * sizeof(float4)
-            << " combined sample and bounds bytes";
+            << " combined sample and bounds bytes; uniform normal tangent squared "
+            << max_normal_tangent_squared;
 }
 
 static void build_pixel_displacement_patch_cache(Device *device,
@@ -987,7 +998,6 @@ static void build_pixel_displacement_patch_cache(Device *device,
                                        triangle,
                                        object_index,
                                        scene->integrator->get_pixel_displacement_max_distance()) &&
-                                   pixel_displacement_has_uniform_normals(mesh, triangle) &&
                                    pixel_displacement_cache_attribute(
                                        dscene, shader, object_index, prim, descriptor) &&
                                    uint(descriptor.y) == NODE_ATTR_FLOAT2;
@@ -995,7 +1005,9 @@ static void build_pixel_displacement_patch_cache(Device *device,
       if (triangle_samples > max_patch_samples - total_samples) {
         continue;
       }
-      dscene->pixel_displacement_info[prim] = packed_grids | (cache_attribute ? (3u << 27) : 0);
+      const bool uniform_normal = pixel_displacement_has_uniform_normals(mesh, triangle);
+      dscene->pixel_displacement_info[prim] =
+          packed_grids | (cache_attribute ? (1u << 27) | (uniform_normal ? (1u << 28) : 0) : 0);
       dscene->pixel_displacement_offset[prim] = int(total_samples);
       total_samples += triangle_samples;
       triangles.push_back({object_index, prim, cache_attribute, descriptor});
@@ -1091,10 +1103,26 @@ static void build_pixel_displacement_patch_cache(Device *device,
   /* Keep the full fallback available unless every image triangle has certified inputs.
    * This scene-wide flag lets Metal omit the unused interpreter in fully eligible scenes. */
   bool needs_full_evaluator = false;
+  bool all_uniform_normals = true;
+  bool all_parallel_normals = true;
   for (size_t prim = 0; prim < dscene->tri_shader.size(); prim++) {
     const int shader_id = dscene->tri_shader[prim] & SHADER_MASK;
+    if (dscene->shaders[shader_id].displacement_evaluator >= 2) {
+      const int header = dscene->pixel_displacement_bvh_offset[prim];
+      if (header < 0 || size_t(header) * 2 + 1 >= dscene->pixel_displacement_bvh_nodes.size() ||
+          dscene->pixel_displacement_bvh_nodes[header * 2].w == 0.0f ||
+          dscene->pixel_displacement_bvh_nodes[header * 2 + 1].w != 1.0f)
+      {
+        all_parallel_normals = false;
+      }
+    }
     if (dscene->shaders[shader_id].displacement_evaluator >= 2 &&
-        ((dscene->pixel_displacement_info[prim] & (7u << 27)) != (7u << 27) ||
+        !(dscene->pixel_displacement_info[prim] & (1u << 28)))
+    {
+      all_uniform_normals = false;
+    }
+    if (dscene->shaders[shader_id].displacement_evaluator >= 2 &&
+        ((dscene->pixel_displacement_info[prim] & (5u << 27)) != (5u << 27) ||
          dscene->pixel_displacement_offset[prim] < 0))
     {
       needs_full_evaluator = true;
@@ -1104,6 +1132,14 @@ static void build_pixel_displacement_patch_cache(Device *device,
   if (!needs_full_evaluator && success && !progress.get_cancel()) {
     dscene->data.integrator.pixel_displacement_evaluator_set &=
         ~PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
+    if (all_uniform_normals) {
+      dscene->data.integrator.pixel_displacement_evaluator_set |=
+          PIXEL_DISPLACEMENT_UNIFORM_NORMALS;
+    }
+    if (all_uniform_normals && all_parallel_normals) {
+      dscene->data.integrator.pixel_displacement_evaluator_set |=
+          PIXEL_DISPLACEMENT_PARALLEL_NORMALS;
+    }
     bool resident_linear = true;
     for (size_t shader_index = 0; shader_index < dscene->shaders.size(); shader_index++) {
       const KernelShader &shader = dscene->shaders[shader_index];
@@ -1131,7 +1167,9 @@ static void build_pixel_displacement_patch_cache(Device *device,
       dscene->data.integrator.pixel_displacement_evaluator_set |=
           PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE;
     }
-    LOG_DEBUG << "Direct resident linear image specialization: " << resident_linear;
+    LOG_DEBUG << "Direct resident linear image specialization: " << resident_linear
+              << "; uniform normals " << all_uniform_normals << "; parallel normals "
+              << all_parallel_normals;
   }
   dscene->pixel_displacement_info.copy_to_device();
   dscene->pixel_displacement_offset.copy_to_device();
@@ -1143,8 +1181,8 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
                                                              Scene *scene,
                                                              Progress &progress)
 {
-  dscene->data.integrator.pixel_displacement_evaluator_set &=
-      ~PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE;
+  dscene->data.integrator.pixel_displacement_evaluator_set &= ~(
+      PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE | PIXEL_DISPLACEMENT_UNIFORM_NORMALS);
   dscene->data.integrator.pixel_displacement_evaluator_set |=
       PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
   device_vector<uint> &cache_info = dscene->pixel_displacement_info;
