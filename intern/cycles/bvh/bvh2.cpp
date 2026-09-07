@@ -32,6 +32,14 @@ static void grow_pixel_displacement_bounds(const Mesh *mesh,
     return;
   }
 
+  if (mesh->pixel_displacement_bounds_are_direct && !mesh->has_motion_blur() &&
+      triangle_index < mesh->pixel_displacement_bounds.size() &&
+      mesh->pixel_displacement_bounds[triangle_index].valid())
+  {
+    bounds.grow(mesh->pixel_displacement_bounds[triangle_index]);
+    return;
+  }
+
   const float pad = mesh->pixel_displacement_max_distance;
   if (pad <= 0.0f) {
     return;

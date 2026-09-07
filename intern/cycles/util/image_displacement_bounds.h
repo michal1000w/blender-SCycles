@@ -5,6 +5,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <type_traits>
@@ -102,6 +103,51 @@ class DisplacementImageBounds {
       h = next_h;
     }
     return true;
+  }
+
+  enum class Extension { Repeat, Extend, Clip, Unknown };
+
+  /* Enclose every native texel in a continuous bilinear UV rectangle. The extra
+   * texels cover host/device coordinate rounding as well as the half-texel offset. */
+  uint32_t query_linear(const double u0,
+                        const double v0,
+                        const double u1,
+                        const double v1,
+                        const Extension extension) const
+  {
+    if (nodes.empty() || !std::isfinite(u0) || !std::isfinite(v0) ||
+        !std::isfinite(u1) || !std::isfinite(v1) || u0 > u1 || v0 > v1 ||
+        std::max(std::abs(u0), std::abs(u1)) * width > 1.0e8 ||
+        std::max(std::abs(v0), std::abs(v1)) * height > 1.0e8)
+    {
+      return pack(0, UINT16_MAX);
+    }
+    int x0 = int(std::floor(u0 * width - 0.5)) - 1;
+    int y0 = int(std::floor(v0 * height - 0.5)) - 1;
+    int x1 = int(std::floor(u1 * width - 0.5)) + 2;
+    int y1 = int(std::floor(v1 * height - 0.5)) + 2;
+    uint32_t result = nodes.back();
+    if (extension == Extension::Repeat) {
+      const int tile_x = int(std::floor(double(x0) / width));
+      const int tile_y = int(std::floor(double(y0) / height));
+      x0 -= tile_x * width;
+      x1 -= tile_x * width;
+      y0 -= tile_y * height;
+      y1 -= tile_y * height;
+      if (x1 < width && y1 < height) {
+        result = query(x0, y0, x1, y1);
+      }
+    }
+    else if (extension == Extension::Extend || extension == Extension::Clip) {
+      result = query(std::clamp(x0, 0, width - 1),
+                     std::clamp(y0, 0, height - 1),
+                     std::clamp(x1, 0, width - 1),
+                     std::clamp(y1, 0, height - 1));
+      if (extension == Extension::Clip && (x0 < 0 || y0 < 0 || x1 >= width || y1 >= height)) {
+        result = pack(0, upper(result));
+      }
+    }
+    return result;
   }
 
   /* Inclusive native pixel rectangle. The caller handles texture wrapping and filtering
