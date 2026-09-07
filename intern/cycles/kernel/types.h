@@ -1761,6 +1761,8 @@ enum PixelDisplacementEvaluatorFlags {
   /* Also retained by dense-cache mode; cleared only after a certified direct bake. */
   PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS = 32,
   PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE = 64,
+  PIXEL_DISPLACEMENT_UNIFORM_NORMALS = 128,
+  PIXEL_DISPLACEMENT_PARALLEL_NORMALS = 256,
 };
 
 struct KernelShader {
