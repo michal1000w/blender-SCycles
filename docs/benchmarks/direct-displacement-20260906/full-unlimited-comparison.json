@@ -1,0 +1,16 @@
+{
+  "baseline": "/tmp/direct-speed-20260906/baseline-full-unlimited.exr",
+  "candidate": "/tmp/direct-speed-20260906/accepted-full-unlimited.exr",
+  "size": [
+    3000,
+    2000
+  ],
+  "finite": true,
+  "max_abs": 1.651996104978025,
+  "rmse": 0.0015990482162255508,
+  "mean_abs": 5.3544249679188295e-05,
+  "relative_l1": 0.00046270720549210643,
+  "pixels_over_0_001": 62665,
+  "pixels": 6000000,
+  "p99_abs": 0.0006702542304992676
+}

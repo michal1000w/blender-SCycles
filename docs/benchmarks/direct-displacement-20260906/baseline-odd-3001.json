@@ -1,0 +1,35 @@
+{
+  "label": "baseline-odd",
+  "scene": "/Users/michal/Documents/BlenderProjects/JAR/JAR-test-Cycles.blend",
+  "scene_sha256": "60fc6874361d86ba3aca4ccab799437e05ce29ddd9cc410c58bab759ae8e264d",
+  "build_hash": "dc254206de2b",
+  "version": "5.3.0 Alpha",
+  "gpu": [
+    "Apple M2 Max (GPU - 38 cores)"
+  ],
+  "mode": "3001",
+  "resolution": [
+    2593,
+    2053,
+    100
+  ],
+  "render_pixels": [
+    2593,
+    2053
+  ],
+  "displacement_environment": {},
+  "samples": 8,
+  "seed": 7,
+  "steps": 16,
+  "max_distance": 1.0,
+  "scale": 1.0,
+  "renders_seconds": [
+    26.582893750004587,
+    14.269487208002829,
+    13.983473249994859
+  ],
+  "completed": true,
+  "peak_process_rss_bytes": 1407107072,
+  "renders_completed": 3,
+  "warm_median_seconds": 14.126480228998844
+}
