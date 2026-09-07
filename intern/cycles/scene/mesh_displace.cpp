@@ -711,6 +711,114 @@ static bool pixel_displacement_cache_attribute(DeviceScene *dscene,
   return false;
 }
 
+/* Accelerate the existing finite grazing fallback. No additional shader samples are
+ * created; the combined samples and bounds remain inside the fallback's 16 MiB budget. */
+static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
+                                               Scene *scene,
+                                               const int grids[3],
+                                               const int num_grids)
+{
+  const size_t budget = 16 * 1024 * 1024;
+  const size_t sample_bytes = dscene->pixel_displacement_data.size() * sizeof(float4);
+  if (sample_bytes >= budget) {
+    return;
+  }
+  const size_t max_nodes = (budget - sample_bytes) / (2 * sizeof(float4));
+  std::vector<PixelDisplacementBVHNode> nodes;
+  vector<pair<int, int3>> headers;
+  const float scale = scene->integrator->get_pixel_displacement_scale();
+  const float max_distance = scene->integrator->get_pixel_displacement_max_distance();
+  for (Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    int object_index;
+    if (!single_object_for_mesh(scene, mesh, &object_index)) {
+      continue;
+    }
+    const packed_float3 *verts = mesh->get_position();
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int prim = int(mesh->prim_offset) + triangle;
+      const uint info = dscene->pixel_displacement_info[prim];
+      if (!(info & (1u << 29)) || dscene->pixel_displacement_offset[prim] < 0) {
+        continue;
+      }
+      /* All three bounded grids together need fewer than 256 nodes. */
+      if (nodes.size() + 256 > max_nodes) {
+        continue;
+      }
+      const int header = int(nodes.size());
+      nodes.push_back({BoundBox::empty, 0, 0, 0, 0, false});
+      int3 roots = make_int3(-1, -1, -1);
+      int sample_offset = dscene->pixel_displacement_offset[prim] + ((info & (1u << 27)) ? 1 : 0);
+      const Mesh::Triangle tri = mesh->get_triangle(triangle);
+      const float3 p0 = float3(verts[tri.v[0]]);
+      const float3 e0 = float3(verts[tri.v[1]]) - p0;
+      const float3 e1 = float3(verts[tri.v[2]]) - p0;
+      for (int slot = 0; slot < num_grids; slot++) {
+        const int grid = grids[slot];
+        const float inv_grid = 1.0f / float(grid);
+        std::vector<PixelDisplacementBVHBlock> blocks;
+        for (int u0 = 0; u0 < grid; u0 += 2) {
+          for (int v0 = 0; u0 + v0 < grid; v0 += 2) {
+            BoundBox bounds = BoundBox::empty;
+            for (int u = u0; u <= min(u0 + 2, grid); u++) {
+              for (int v = v0; v <= min(v0 + 2, grid - u); v++) {
+                const int index = sample_offset +
+                                  pixel_displacement_cache_sample_index(grid, u, v);
+                float3 D = make_float3(dscene->pixel_displacement_data[index]) * scale;
+                const float distance = len(D);
+                if (distance > max_distance && distance > 0.0f) {
+                  D *= max_distance / distance;
+                }
+                bounds.grow(p0 + (float(u) * inv_grid) * e0 + (float(v) * inv_grid) * e1 +
+                            ensure_finite(D));
+              }
+            }
+            /* Enclose the microtriangle edge tolerance as well as CPU/GPU roundoff. */
+            const float margin = 0.002f * max(1.0f, len(bounds.max - bounds.min)) +
+                                 128.0f * FLT_EPSILON * max(len(bounds.min), len(bounds.max));
+            bounds.min -= make_float3(margin);
+            bounds.max += make_float3(margin);
+            blocks.push_back({bounds, u0, v0});
+          }
+        }
+        roots[slot] = int(nodes.size());
+        build_pixel_displacement_bvh_recursive(blocks, 0, int(blocks.size()), nodes);
+        sample_offset += pixel_displacement_cache_sample_count(grid);
+      }
+      headers.push_back({header, roots});
+      dscene->pixel_displacement_bvh_offset[prim] = header;
+    }
+  }
+  if (nodes.empty()) {
+    return;
+  }
+  float4 *data = dscene->pixel_displacement_bvh_nodes.alloc(nodes.size() * 2);
+  for (size_t i = 0; i < nodes.size(); i++) {
+    const auto &node = nodes[i];
+    data[i * 2] = make_float4(
+        node.bounds.min.x,
+        node.bounds.min.y,
+        node.bounds.min.z,
+        __uint_as_float(node.leaf ? (0x80000000u | uint(node.u)) : uint(node.child0)));
+    data[i * 2 + 1] = make_float4(node.bounds.max.x,
+                                  node.bounds.max.y,
+                                  node.bounds.max.z,
+                                  __uint_as_float(node.leaf ? uint(node.v) : uint(node.child1)));
+  }
+  for (const auto &header : headers) {
+    data[header.first * 2] = make_float4(
+        float(header.second.x), float(header.second.y), float(header.second.z), 0.0f);
+  }
+  dscene->pixel_displacement_bvh_nodes.copy_to_device();
+  dscene->pixel_displacement_bvh_offset.copy_to_device();
+  LOG_DEBUG << "Displacement fallback BVH: " << headers.size() << " triangles, " << nodes.size()
+            << " nodes, " << sample_bytes + nodes.size() * 2 * sizeof(float4)
+            << " combined sample and bounds bytes";
+}
+
 static void build_pixel_displacement_patch_cache(Device *device,
                                                  DeviceScene *dscene,
                                                  Scene *scene,
@@ -875,6 +983,9 @@ static void build_pixel_displacement_patch_cache(Device *device,
       dscene->pixel_displacement_offset[triangle.prim] = -1;
     }
     dscene->pixel_displacement_data.free();
+  }
+  if (success && !progress.get_cancel()) {
+    build_pixel_displacement_patch_bvh(dscene, scene, grids, num_grids);
   }
   /* Keep the full fallback available unless every image triangle has certified inputs.
    * This scene-wide flag lets Metal omit the unused interpreter in fully eligible scenes. */
