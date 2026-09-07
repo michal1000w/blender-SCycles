@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repeat", type=int, default=7)
+    parser.add_argument("--warm-up", action="store_true",
+                        help="Wait for all Metal kernel compilation before rendering")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--label", default="candidate")
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
@@ -92,6 +94,7 @@ def main():
                           scene.render.resolution_y * args.percentage // 100],
         "displacement_environment": {key: value for key, value in os.environ.items()
                                      if key.startswith("CYCLES_PIXEL_DISPLACEMENT_")},
+        "wait_for_metal_compilation": args.warm_up,
         "samples": args.samples,
         "seed": scene.cycles.seed,
         "steps": scene.cycles.pixel_displacement_steps,

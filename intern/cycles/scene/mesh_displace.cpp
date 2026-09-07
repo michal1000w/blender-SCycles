@@ -846,10 +846,12 @@ static int build_pixel_displacement_direct_bounds(DeviceScene *dscene,
                                                   const size_t max_nodes,
                                                   int &bounds_image,
                                                   DisplacementImageBounds &pyramid,
+                                                  float3 frame[3],
+                                                  const bool dense_bounds,
                                                   std::vector<PixelDisplacementBVHNode> &nodes)
 {
-  constexpr int grid = 32;
-  if (nodes.size() + grid * (grid + 1) > max_nodes) {
+  const int grid = dense_bounds ? 64 : 32;
+  if (nodes.size() + grid * (grid + 1) + 1 > max_nodes) {
     return -1;
   }
   const int prim = int(mesh->prim_offset) + triangle;
@@ -899,11 +901,11 @@ static int build_pixel_displacement_direct_bounds(DeviceScene *dscene,
     bool built = false;
     if (image.data_type == IMAGE_DATA_TYPE_BYTE && memory->data<uchar>()) {
       built = pyramid.build<uchar>(
-          {memory->data<uchar>(), memory->data_size}, image.width, image.height);
+          {memory->data<uchar>(), memory->data_size}, image.width, image.height, 256);
     }
     else if (image.data_type == IMAGE_DATA_TYPE_USHORT && memory->data<uint16_t>()) {
       built = pyramid.build<uint16_t>(
-          {memory->data<uint16_t>(), memory->data_size}, image.width, image.height);
+          {memory->data<uint16_t>(), memory->data_size}, image.width, image.height, 256);
     }
     bounds_image = built ? program.image.id : -1;
     if (!built) {
@@ -932,6 +934,20 @@ static int build_pixel_displacement_direct_bounds(DeviceScene *dscene,
     p[i] = float3(mesh->get_position()[tri.v[i]]);
     const int ni = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 + i : indices[i];
     n[i] = dscene->attributes_normal[object.normal_offset + ni].decode();
+  }
+  frame[2] = safe_normalize(n[0] + n[1] + n[2]);
+  if (is_zero(frame[2])) {
+    return -1;
+  }
+  make_orthonormals(frame[2], &frame[0], &frame[1]);
+  if (!dense_bounds) {
+    frame[0] = make_float3(1.0f, 0.0f, 0.0f);
+    frame[1] = make_float3(0.0f, 1.0f, 0.0f);
+    frame[2] = make_float3(0.0f, 0.0f, 1.0f);
+  }
+  for (int i = 0; i < 3; i++) {
+    p[i] = make_float3(dot(p[i], frame[0]), dot(p[i], frame[1]), dot(p[i], frame[2]));
+    n[i] = make_float3(dot(n[i], frame[0]), dot(n[i], frame[1]), dot(n[i], frame[2]));
   }
   const float scale = __uint_as_float(program.displacement.scale.bits) *
                       scene->integrator->get_pixel_displacement_scale();
@@ -1029,7 +1045,8 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
   const size_t max_nodes = (budget - sample_bytes) / (2 * sizeof(float4));
   std::vector<PixelDisplacementBVHNode> nodes;
   /* Each header occupies six float4s: fallback roots/tag, four flat-input records,
-   * then (direct root + 1, normal-input record + 1, 0, 0). Zero means unavailable. */
+   * then (direct root + 1, normal-input record + 1, bounds frame + 1, 0).
+   * Zero means unavailable. */
   vector<pair<int, int3>> headers;
   struct DirectBoundsTask {
     Mesh *mesh;
@@ -1037,7 +1054,7 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
     int3 fallback_roots;
   };
   vector<DirectBoundsTask> direct_tasks;
-  vector<pair<int, int>> direct_roots;
+  vector<int3> direct_roots;
   struct ContextRecord {
     int header;
     bool mapped;
@@ -1202,11 +1219,34 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
    * for every image in a large scene. */
   DisplacementImageBounds pyramid;
   int bounds_image = -1;
+  bool dense_bounds = !normal_records.empty() && normal_records.size() == direct_tasks.size();
+  for (const NormalRecord &record : normal_records) {
+    dense_bounds &= record.data[5].w != 0.0f;
+  }
   for (const DirectBoundsTask &task : direct_tasks) {
-    const int root = build_pixel_displacement_direct_bounds(
-        dscene, scene, progress, task.mesh, task.triangle, task.object, max_nodes,
-        bounds_image, pyramid, nodes);
-    direct_roots.push_back({task.header, root});
+    float3 frame[3];
+    const int root = build_pixel_displacement_direct_bounds(dscene,
+                                                            scene,
+                                                            progress,
+                                                            task.mesh,
+                                                            task.triangle,
+                                                            task.object,
+                                                            max_nodes,
+                                                            bounds_image,
+                                                            pyramid,
+                                                            frame,
+                                                            dense_bounds,
+                                                            nodes);
+    int frame_index = -1;
+    /* World-axis bounds do not need a per-ray frame transform. */
+    if (root >= 0 && dense_bounds) {
+      frame_index = int(nodes.size());
+      BoundBox frame_data;
+      frame_data.min = frame[0];
+      frame_data.max = frame[1];
+      nodes.push_back({frame_data, 0, 0, 0, 0, false});
+    }
+    direct_roots.push_back(make_int3(task.header, root, frame_index));
     if (root >= 0) {
       if (task.mesh->pixel_displacement_bounds.empty()) {
         task.mesh->pixel_displacement_bounds.resize(task.mesh->num_triangles());
@@ -1214,7 +1254,14 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
           bounds = BoundBox::empty;
         }
       }
-      BoundBox bounds = nodes[root].bounds;
+      const BoundBox local_bounds = nodes[root].bounds;
+      BoundBox bounds = BoundBox::empty;
+      for (int corner = 0; corner < 8; corner++) {
+        const float3 point = make_float3(corner & 1 ? local_bounds.max.x : local_bounds.min.x,
+                                         corner & 2 ? local_bounds.max.y : local_bounds.min.y,
+                                         corner & 4 ? local_bounds.max.z : local_bounds.min.z);
+        bounds.grow(frame[0] * point.x + frame[1] * point.y + frame[2] * point.z);
+      }
       for (int slot = 0; slot < num_grids; slot++) {
         bounds.grow(nodes[task.fallback_roots[slot]].bounds);
       }
@@ -1240,7 +1287,7 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
         float(header.second.x), float(header.second.y), float(header.second.z), 0.0f);
   }
   for (const auto &root : direct_roots) {
-    data[root.first * 2 + 5] = make_float4(float(root.second + 1), 0.0f, 0.0f, 0.0f);
+    data[root.x * 2 + 5] = make_float4(float(root.y + 1), 0.0f, float(root.z + 1), 0.0f);
   }
   for (const NormalRecord &record : normal_records) {
     data[record.header * 2 + 5].y = float(record.offset + 1);
@@ -1442,10 +1489,31 @@ static void build_pixel_displacement_patch_cache(Device *device,
   bool needs_full_evaluator = false;
   bool all_uniform_normals = true;
   bool all_parallel_normals = true;
+  bool all_normal_inputs = true;
   for (size_t prim = 0; prim < dscene->tri_shader.size(); prim++) {
     const int shader_id = dscene->tri_shader[prim] & SHADER_MASK;
     if (dscene->shaders[shader_id].displacement_evaluator >= 2) {
       const int header = dscene->pixel_displacement_bvh_offset[prim];
+      if (header < 0 || size_t(header) * 2 + 5 >= dscene->pixel_displacement_bvh_nodes.size() ||
+          dscene->pixel_displacement_bvh_nodes[header * 2 + 5].y <= 0.0f)
+      {
+        all_normal_inputs = false;
+      }
+      else {
+        for (int slot = 0; slot < num_grids; slot++) {
+          const int root = int(dscene->pixel_displacement_bvh_nodes[header * 2][slot]);
+          if (int((dscene->pixel_displacement_info[prim] >> (slot * 4)) & 15u) != grids[slot] ||
+              root < 0 || size_t(root) * 2 + 1 >= dscene->pixel_displacement_bvh_nodes.size())
+          {
+            all_normal_inputs = false;
+          }
+        }
+        const int record = int(dscene->pixel_displacement_bvh_nodes[header * 2 + 5].y) - 1;
+        if (dscene->pixel_displacement_bvh_nodes[record * 2 + 5].w == 0.0f) {
+          all_normal_inputs = false;
+        }
+      }
+
       if (header < 0 || size_t(header) * 2 + 1 >= dscene->pixel_displacement_bvh_nodes.size() ||
           dscene->pixel_displacement_bvh_nodes[header * 2].w == 0.0f ||
           dscene->pixel_displacement_bvh_nodes[header * 2 + 1].w != 1.0f)
@@ -1478,6 +1546,8 @@ static void build_pixel_displacement_patch_cache(Device *device,
           PIXEL_DISPLACEMENT_PARALLEL_NORMALS;
     }
     bool resident_linear = true;
+    bool scalar_images = true;
+    bool identity_mapping = true;
     for (size_t shader_index = 0; shader_index < dscene->shaders.size(); shader_index++) {
       const KernelShader &shader = dscene->shaders[shader_index];
       if (shader.displacement_evaluator < 2) {
@@ -1492,12 +1562,36 @@ static void build_pixel_displacement_patch_cache(Device *device,
         resident_linear = false;
         break;
       }
+      if (program.use_mapping && !(make_transform(program.mapping.tfm) == transform_identity())) {
+        identity_mapping = false;
+      }
       const KernelImageTexture &tex = dscene->image_textures[program.image.id];
       if (tex.tile_descriptor_offset != KERNEL_TILE_LOAD_NONE ||
           tex.image_info_id == KERNEL_IMAGE_NONE || tex.interpolation != INTERPOLATION_LINEAR)
       {
         resident_linear = false;
         break;
+      }
+      device_image *image_memory = nullptr;
+      for (ShaderNode *node : scene->shaders[shader_index]->graph->nodes) {
+        if (node->type == ImageTextureNode::get_node_type()) {
+          auto *image_node = static_cast<ImageTextureNode *>(node);
+          if (image_node->handle.kernel_id() == program.image.id) {
+            image_memory = image_node->handle.vdb_image_memory();
+            break;
+          }
+        }
+      }
+      if (!image_memory || program.height_is_alpha) {
+        scalar_images = false;
+      }
+      else {
+        const auto type = image_memory->info.data_type;
+        if (!(type == IMAGE_DATA_TYPE_BYTE || type == IMAGE_DATA_TYPE_USHORT ||
+              type == IMAGE_DATA_TYPE_HALF || type == IMAGE_DATA_TYPE_FLOAT))
+        {
+          scalar_images = false;
+        }
       }
     }
     if (resident_linear) {
@@ -1515,11 +1609,26 @@ static void build_pixel_displacement_patch_cache(Device *device,
       if (rigid) {
         dscene->data.integrator.pixel_displacement_evaluator_set |=
             PIXEL_DISPLACEMENT_RIGID_TRANSFORMS;
+        if (all_normal_inputs && !all_uniform_normals &&
+            !(dscene->data.integrator.pixel_displacement_evaluator_set & (1 | 2 | 8)))
+        {
+          dscene->data.integrator.pixel_displacement_evaluator_set |=
+              PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS;
+          if (scalar_images) {
+            dscene->data.integrator.pixel_displacement_evaluator_set |=
+                PIXEL_DISPLACEMENT_SCALAR_IMAGE;
+          }
+          if (identity_mapping) {
+            dscene->data.integrator.pixel_displacement_evaluator_set |=
+                PIXEL_DISPLACEMENT_IDENTITY_MAPPING;
+          }
+        }
       }
     }
     LOG_DEBUG << "Direct resident linear image specialization: " << resident_linear
               << "; uniform normals " << all_uniform_normals << "; parallel normals "
-              << all_parallel_normals;
+              << all_parallel_normals << "; normal inputs " << all_normal_inputs
+              << "; scalar images " << scalar_images << "; identity mapping " << identity_mapping;
   }
   dscene->pixel_displacement_info.copy_to_device();
   dscene->pixel_displacement_offset.copy_to_device();
@@ -1533,7 +1642,9 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
 {
   dscene->data.integrator.pixel_displacement_evaluator_set &= ~(
       PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE | PIXEL_DISPLACEMENT_UNIFORM_NORMALS |
-      PIXEL_DISPLACEMENT_PARALLEL_NORMALS | PIXEL_DISPLACEMENT_RIGID_TRANSFORMS);
+      PIXEL_DISPLACEMENT_PARALLEL_NORMALS | PIXEL_DISPLACEMENT_RIGID_TRANSFORMS |
+      PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS | PIXEL_DISPLACEMENT_SCALAR_IMAGE |
+      PIXEL_DISPLACEMENT_IDENTITY_MAPPING);
   dscene->data.integrator.pixel_displacement_evaluator_set |=
       PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
   device_vector<uint> &cache_info = dscene->pixel_displacement_info;
