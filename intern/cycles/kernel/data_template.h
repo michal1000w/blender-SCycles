@@ -287,7 +287,9 @@ KERNEL_STRUCT_MEMBER(integrator, int, use_surface_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_volume_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_direct_light)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_mis_weights)
-/* Evaluators: 1 compact, 2 full, 4 image, 8 diagnostic force-full, 16 full image reference. */
+/* Evaluator kinds: 1 compact, 2 full, 4 image, 8 diagnostic force-full.
+ * Capabilities: 16 full image reference, 32 uncertified/cache inputs, 64 resident linear image.
+ * See PixelDisplacementEvaluatorFlags; capability bits are independent of evaluator kinds. */
 KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_evaluator_set)
 
 KERNEL_STRUCT_MEMBER(integrator, float2, pixel_jitter)
