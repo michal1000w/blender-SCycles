@@ -1,1 +1,0 @@
-00:00.965  cycles           | Displacement fallback BVH: 8 triangles, 480 nodes, 33280 combined sample and bounds bytes
