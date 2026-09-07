@@ -648,7 +648,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
                                          Progress &progress)
 {
   dscene->shaders.free();
-  dscene->data.integrator.pixel_displacement_evaluator_set = 32;
+  dscene->data.integrator.pixel_displacement_evaluator_set = PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
 
   if (scene->shaders.empty()) {
     return;

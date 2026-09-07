@@ -392,7 +392,8 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
       pso_type == PSO_SPECIALIZED_INTERSECT && device->scene_use_pixel_displacement &&
       device->scene_pixel_displacement_scale != 0.0f &&
       device->scene_pixel_displacement_max_distance > 0.0f &&
-      !(pipeline->kernel_data_.integrator.pixel_displacement_evaluator_set & 32) &&
+      !(pipeline->kernel_data_.integrator.pixel_displacement_evaluator_set &
+        PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS) &&
       device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW)
   {
     pipeline->num_threads_per_block = 128;

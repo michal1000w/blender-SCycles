@@ -1754,6 +1754,15 @@ struct KernelParticle {
 };
 static_assert_align(KernelParticle, 16);
 
+/* Orthogonal scene specialization flags. Compare evaluator kinds through the mask:
+ * adding an input/sampler capability must not disable single-evaluator specialization. */
+enum PixelDisplacementEvaluatorFlags {
+  PIXEL_DISPLACEMENT_EVALUATOR_MASK = 1 | 2 | 4 | 8,
+  /* Also retained by dense-cache mode; cleared only after a certified direct bake. */
+  PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS = 32,
+  PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE = 64,
+};
+
 struct KernelShader {
   float constant_emission[3];
   float cryptomatte_id;

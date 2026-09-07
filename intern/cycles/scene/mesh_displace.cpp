@@ -635,6 +635,35 @@ static bool pixel_displacement_has_uniform_normals(const Mesh *mesh, const int t
   return values[indices[0]] == values[indices[1]] && values[indices[0]] == values[indices[2]];
 }
 
+/* Keep the original point/displacement arithmetic when its rounding is material, or
+ * the triangle/instance conversion is ill-conditioned. */
+static bool pixel_displacement_stable_context(DeviceScene *dscene,
+                                              const Mesh *mesh,
+                                              const int triangle,
+                                              const int object_index,
+                                              const float max_distance)
+{
+  const Mesh::Triangle tri = mesh->get_triangle(triangle);
+  const float3 p[3] = {float3(mesh->get_position()[tri.v[0]]),
+                       float3(mesh->get_position()[tri.v[1]]),
+                       float3(mesh->get_position()[tri.v[2]])};
+  const float3 e0 = p[1] - p[0], e1 = p[2] - p[0];
+  const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
+  if (!(d00 * d11 - d01 * d01 > max(1.0e-20f, 1.0e-6f * d00 * d11))) {
+    return false;
+  }
+  const KernelObject &object = dscene->objects[object_index];
+  if (!(object.displacement_transform_bound * object.displacement_inverse_bound < 1000.0f)) {
+    return false;
+  }
+  float position_bound = len(max(fabs(p[0]), max(fabs(p[1]), fabs(p[2]))));
+  if (!(dscene->object_flag[object_index] & SD_OBJECT_TRANSFORM_APPLIED)) {
+    position_bound = position_bound * object.displacement_transform_bound +
+                     len(make_float3(object.tfm.x.w, object.tfm.y.w, object.tfm.z.w));
+  }
+  return std::isfinite(position_bound) && position_bound * FLT_EPSILON <= 1.0e-4f * max_distance;
+}
+
 /* Cache lookup metadata only. The original GPU evaluator still fetches and interpolates
  * native values, preserving its floating-point arithmetic and conversion paths. */
 static bool pixel_displacement_cache_attribute(DeviceScene *dscene,
@@ -726,6 +755,12 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
   const size_t max_nodes = (budget - sample_bytes) / (2 * sizeof(float4));
   std::vector<PixelDisplacementBVHNode> nodes;
   vector<pair<int, int3>> headers;
+  struct ContextRecord {
+    int header;
+    bool mapped;
+    float4 data[4];
+  };
+  vector<ContextRecord> contexts;
   const float scale = scene->integrator->get_pixel_displacement_scale();
   const float max_distance = scene->integrator->get_pixel_displacement_max_distance();
   for (Geometry *geom : scene->geometry) {
@@ -749,13 +784,67 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
         continue;
       }
       const int header = int(nodes.size());
-      nodes.push_back({BoundBox::empty, 0, 0, 0, 0, false});
+      for (int record = 0; record < 3; record++) {
+        nodes.push_back({BoundBox::empty, 0, 0, 0, 0, false});
+      }
       int3 roots = make_int3(-1, -1, -1);
       int sample_offset = dscene->pixel_displacement_offset[prim] + ((info & (1u << 27)) ? 1 : 0);
       const Mesh::Triangle tri = mesh->get_triangle(triangle);
       const float3 p0 = float3(verts[tri.v[0]]);
       const float3 e0 = float3(verts[tri.v[1]]) - p0;
       const float3 e1 = float3(verts[tri.v[2]]) - p0;
+      if ((info & (7u << 27)) == (7u << 27)) {
+        const float4 desc =
+            dscene->pixel_displacement_data[dscene->pixel_displacement_offset[prim]];
+        const int attr_offset = int(uint(desc.z) | (uint(desc.w) << 16));
+        const uint3 indices = dscene->tri_vindex[prim];
+        float2 uv[3];
+        for (int i = 0; i < 3; i++) {
+          const int index = uint(desc.x) == ATTR_ELEMENT_CORNER ? prim * 3 + i : indices[i];
+          uv[i] = dscene->attributes_float2[attr_offset + index];
+        }
+        const int shader = dscene->tri_shader[prim] & SHADER_MASK;
+        const int evaluator = dscene->shaders[shader].displacement_evaluator;
+        SVMDisplacementImage program;
+        memcpy(&program, dscene->svm_nodes.data() + evaluator - 2, sizeof(program));
+        const bool mapped = program.use_mapping &&
+                            program.image.projection == NODE_IMAGE_PROJ_FLAT;
+        if (mapped) {
+          const Transform mapping = make_transform(program.mapping.tfm);
+          for (int i = 0; i < 3; i++) {
+            uv[i] = make_float2(transform_point(&mapping, make_float3(uv[i])));
+          }
+        }
+        const uint flag = dscene->object_flag[object_index];
+        const KernelObject &object = dscene->objects[object_index];
+        const int normal_index = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 : indices.x;
+        float3 N = safe_normalize(
+            dscene->attributes_normal[object.normal_offset + normal_index].decode());
+        if (is_zero(N)) {
+          N = safe_normalize(cross(e0, e1));
+          if ((flag & SD_OBJECT_NEGATIVE_SCALE) && (flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+            N = -N;
+          }
+        }
+        if (!(flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+          N = normalize(transform_direction_transposed(&object.itfm, N));
+        }
+        N = safe_normalize(transform_direction_transposed(&object.tfm, N));
+        N = transform_direction(&object.tfm, N);
+        if (!(flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+          N = transform_direction(&object.itfm, N);
+        }
+        const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
+        const float denominator = d00 * d11 - d01 * d01;
+        contexts.push_back(
+            {header,
+             mapped,
+             {make_float4(N.x, N.y, N.z, 0.0f),
+              make_float4(uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+              make_float4(uv[2].x, uv[2].y, 0.0f, 0.0f),
+              make_float4(
+                  d00, d01, d11, fabsf(denominator) < 1.0e-20f ? 0.0f : 1.0f / denominator)}});
+      }
       for (int slot = 0; slot < num_grids; slot++) {
         const int grid = grids[slot];
         const float inv_grid = 1.0f / float(grid);
@@ -811,6 +900,12 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
   for (const auto &header : headers) {
     data[header.first * 2] = make_float4(
         float(header.second.x), float(header.second.y), float(header.second.z), 0.0f);
+  }
+  for (const ContextRecord &ctx : contexts) {
+    data[ctx.header * 2].w = ctx.mapped ? 2.0f : 1.0f;
+    for (int i = 0; i < 4; i++) {
+      data[ctx.header * 2 + 1 + i] = ctx.data[i];
+    }
   }
   dscene->pixel_displacement_bvh_nodes.copy_to_device();
   dscene->pixel_displacement_bvh_offset.copy_to_device();
@@ -886,6 +981,12 @@ static void build_pixel_displacement_patch_cache(Device *device,
       const int prim = int(mesh->prim_offset) + triangle;
       float4 descriptor = zero_float4();
       const bool cache_attribute = cache_inputs &&
+                                   pixel_displacement_stable_context(
+                                       dscene,
+                                       mesh,
+                                       triangle,
+                                       object_index,
+                                       scene->integrator->get_pixel_displacement_max_distance()) &&
                                    pixel_displacement_has_uniform_normals(mesh, triangle) &&
                                    pixel_displacement_cache_attribute(
                                        dscene, shader, object_index, prim, descriptor) &&
@@ -1001,7 +1102,36 @@ static void build_pixel_displacement_patch_cache(Device *device,
     }
   }
   if (!needs_full_evaluator && success && !progress.get_cancel()) {
-    dscene->data.integrator.pixel_displacement_evaluator_set &= ~32;
+    dscene->data.integrator.pixel_displacement_evaluator_set &=
+        ~PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
+    bool resident_linear = true;
+    for (size_t shader_index = 0; shader_index < dscene->shaders.size(); shader_index++) {
+      const KernelShader &shader = dscene->shaders[shader_index];
+      if (shader.displacement_evaluator < 2) {
+        continue;
+      }
+      SVMDisplacementImage program;
+      memcpy(
+          &program, dscene->svm_nodes.data() + shader.displacement_evaluator - 2, sizeof(program));
+      if (program.image.projection != NODE_IMAGE_PROJ_FLAT || program.image.id < 0 ||
+          program.image.id >= dscene->image_textures.size())
+      {
+        resident_linear = false;
+        break;
+      }
+      const KernelImageTexture &tex = dscene->image_textures[program.image.id];
+      if (tex.tile_descriptor_offset != KERNEL_TILE_LOAD_NONE ||
+          tex.image_info_id == KERNEL_IMAGE_NONE || tex.interpolation != INTERPOLATION_LINEAR)
+      {
+        resident_linear = false;
+        break;
+      }
+    }
+    if (resident_linear) {
+      dscene->data.integrator.pixel_displacement_evaluator_set |=
+          PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE;
+    }
+    LOG_DEBUG << "Direct resident linear image specialization: " << resident_linear;
   }
   dscene->pixel_displacement_info.copy_to_device();
   dscene->pixel_displacement_offset.copy_to_device();
@@ -1013,7 +1143,10 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
                                                              Scene *scene,
                                                              Progress &progress)
 {
-  dscene->data.integrator.pixel_displacement_evaluator_set |= 32;
+  dscene->data.integrator.pixel_displacement_evaluator_set &=
+      ~PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE;
+  dscene->data.integrator.pixel_displacement_evaluator_set |=
+      PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
   device_vector<uint> &cache_info = dscene->pixel_displacement_info;
   device_vector<int> &cache_offset = dscene->pixel_displacement_offset;
   device_vector<float4> &cache_data = dscene->pixel_displacement_data;
