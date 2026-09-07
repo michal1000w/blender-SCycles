@@ -1,0 +1,274 @@
+{
+  "compare-initial": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/initial.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/initial.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.14509578235447407,
+    "rmse": 0.0013665760062339298,
+    "mean_abs": 5.699888403630919e-05,
+    "relative_l1": 0.00048781462480614746,
+    "pixels_over_0_001": 140,
+    "pixels": 15000,
+    "p99_abs": 0.0006008341908454934
+  },
+  "compare-scale": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/scale.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/scale.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.06384038925170898,
+    "rmse": 0.0005672414987428374,
+    "mean_abs": 3.341433731839061e-05,
+    "relative_l1": 0.00016293422511551176,
+    "pixels_over_0_001": 122,
+    "pixels": 15000,
+    "p99_abs": 0.0004975633323192654
+  },
+  "change-scale": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/initial.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/scale.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 13.85568917170167,
+    "rmse": 0.4027434473700864,
+    "mean_abs": 0.18953435122483966,
+    "relative_l1": 1.6220954145650426,
+    "pixels_over_0_001": 14996,
+    "pixels": 15000,
+    "p99_abs": 1.5309750740788888
+  },
+  "compare-distance": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/distance.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/distance.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.0446353554725647,
+    "rmse": 0.0003151121321422064,
+    "mean_abs": 1.5758291621589e-05,
+    "relative_l1": 6.769644049069954e-05,
+    "pixels_over_0_001": 55,
+    "pixels": 15000,
+    "p99_abs": 0.00023675531148910638
+  },
+  "change-distance": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/scale.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/distance.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 8.973635286092758,
+    "rmse": 0.213080130249507,
+    "mean_abs": 0.05949374377573323,
+    "relative_l1": 0.29010202862783524,
+    "pixels_over_0_001": 10290,
+    "pixels": 15000,
+    "p99_abs": 0.8304032570123694
+  },
+  "compare-steps": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/steps.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/steps.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.036139488220214844,
+    "rmse": 0.00023967474988764457,
+    "mean_abs": 9.645973663363192e-06,
+    "relative_l1": 4.0627136317357944e-05,
+    "pixels_over_0_001": 36,
+    "pixels": 15000,
+    "p99_abs": 0.00013344414532184687
+  },
+  "change-steps": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/distance.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/steps.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 13.301468908786774,
+    "rmse": 0.14594405389990422,
+    "mean_abs": 0.021821548073852642,
+    "relative_l1": 0.09374373606417279,
+    "pixels_over_0_001": 8649,
+    "pixels": 15000,
+    "p99_abs": 0.3844236743450299
+  },
+  "compare-transform": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/transform.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/transform.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.05719196796417236,
+    "rmse": 0.00042481785499911173,
+    "mean_abs": 1.2411441586704718e-05,
+    "relative_l1": 6.0528777488428416e-05,
+    "pixels_over_0_001": 39,
+    "pixels": 15000,
+    "p99_abs": 0.0001407586038112645
+  },
+  "change-transform": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/steps.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/transform.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 28.021364703774452,
+    "rmse": 0.47791759806158995,
+    "mean_abs": 0.20057014375530804,
+    "relative_l1": 0.8447659983240997,
+    "pixels_over_0_001": 14999,
+    "pixels": 15000,
+    "p99_abs": 1.7754700202681153
+  },
+  "compare-odd_texture": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/odd_texture.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/odd_texture.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.2240300178527832,
+    "rmse": 0.0013366658826486455,
+    "mean_abs": 1.9913741594387425e-05,
+    "relative_l1": 9.57339084307136e-05,
+    "pixels_over_0_001": 28,
+    "pixels": 15000,
+    "p99_abs": 0.0001410738378763208
+  },
+  "change-odd_texture": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/transform.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/odd_texture.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 17.379108428955078,
+    "rmse": 0.19186203144401917,
+    "mean_abs": 0.04038114779016469,
+    "relative_l1": 0.19693292614264082,
+    "pixels_over_0_001": 13450,
+    "pixels": 15000,
+    "p99_abs": 0.5008020222187054
+  },
+  "compare-odd_clamp": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/odd_clamp.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/odd_clamp.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.2240300178527832,
+    "rmse": 0.0013366658849262875,
+    "mean_abs": 1.991374311554763e-05,
+    "relative_l1": 9.573391574358403e-05,
+    "pixels_over_0_001": 28,
+    "pixels": 15000,
+    "p99_abs": 0.0001410738378763208
+  },
+  "change-odd_clamp": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/odd_texture.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/odd_clamp.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 4.76837158203125e-07,
+    "rmse": 6.7943416298115546e-09,
+    "mean_abs": 7.01627383629481e-10,
+    "relative_l1": 3.373024169189644e-09,
+    "pixels_over_0_001": 0,
+    "pixels": 15000,
+    "p99_abs": 1.4901161193847656e-08
+  },
+  "compare-cached_mode": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/cached_mode.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/cached_mode.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 4.76837158203125e-07,
+    "rmse": 6.56443546020262e-09,
+    "mean_abs": 7.066875696182251e-10,
+    "relative_l1": 3.5415539091328884e-09,
+    "pixels_over_0_001": 0,
+    "pixels": 15000,
+    "p99_abs": 1.4901161193847656e-08
+  },
+  "change-cached_mode": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/odd_clamp.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/cached_mode.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 16.238168047741055,
+    "rmse": 0.25222722231376365,
+    "mean_abs": 0.07453675445380052,
+    "relative_l1": 0.3583301908273169,
+    "pixels_over_0_001": 14282,
+    "pixels": 15000,
+    "p99_abs": 0.8798759245872508
+  },
+  "compare-restored_direct": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/restored_direct.exr",
+    "candidate": "/tmp/direct-speed-20260906/candidate-direct-tagged/restored_direct.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 0.2240300178527832,
+    "rmse": 0.0013366658399722245,
+    "mean_abs": 1.9913696471808686e-05,
+    "relative_l1": 9.573369150709829e-05,
+    "pixels_over_0_001": 28,
+    "pixels": 15000,
+    "p99_abs": 0.0001410738378763208
+  },
+  "change-restored_direct": {
+    "baseline": "/tmp/direct-speed-20260906/baseline-direct-tagged/cached_mode.exr",
+    "candidate": "/tmp/direct-speed-20260906/baseline-direct-tagged/restored_direct.exr",
+    "size": [
+      150,
+      100
+    ],
+    "finite": true,
+    "max_abs": 16.238168047741055,
+    "rmse": 0.25222722236020667,
+    "mean_abs": 0.07453675441549729,
+    "relative_l1": 0.3735398007876247,
+    "pixels_over_0_001": 14282,
+    "pixels": 15000,
+    "p99_abs": 0.8798759245872508
+  }
+}

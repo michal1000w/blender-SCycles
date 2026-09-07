@@ -385,6 +385,19 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
     pipeline->num_threads_per_block = occupancy_tuning[device_kernel].num_threads_per_block;
   }
 
+  /* Direct displacement keeps shadow rays active for very different numbers of samples.
+   * Smaller dispatch groups reduce that scheduling tail on M2 Max/Ultra. Preserve the
+   * architecture's compiler register budget; reducing it hurts this evaluator's throughput. */
+  if (MetalInfo::get_apple_gpu_architecture(mtlDevice) == APPLE_M2_BIG &&
+      pso_type == PSO_SPECIALIZED_INTERSECT && device->scene_use_pixel_displacement &&
+      device->scene_pixel_displacement_scale != 0.0f &&
+      device->scene_pixel_displacement_max_distance > 0.0f &&
+      !(pipeline->kernel_data_.integrator.pixel_displacement_evaluator_set & 32) &&
+      device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW)
+  {
+    pipeline->num_threads_per_block = 128;
+  }
+
   /* metalrt options */
   pipeline->use_metalrt = device->use_metalrt_for_current_scene();
   pipeline->kernel_features = device->kernel_features;

@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import os
 import platform
 import resource
 import statistics
@@ -29,7 +30,10 @@ import bpy
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("unlimited", "2048", "4096", "8192", "16384"), required=True)
+    parser.add_argument("--mode", required=True,
+                        help="unlimited or a displacement resolution from 64 to 16384")
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--height", type=int)
     parser.add_argument("--percentage", type=int, default=10)
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
@@ -39,6 +43,12 @@ def main():
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else [])
     if not 1 <= args.percentage <= 100 or args.samples < 1 or args.repeat < 3:
         parser.error("percentage must be 1..100, samples positive, and repeat at least 3")
+
+    if args.mode != "unlimited" and (not args.mode.isdecimal() or not 64 <= int(args.mode) <= 16384):
+        parser.error("mode must be unlimited or an integer from 64 to 16384")
+    if ((args.width is None) != (args.height is None) or
+            (args.width is not None and min(args.width, args.height) < 1)):
+        parser.error("width and height must both be positive integers")
 
     scene = bpy.context.scene
     prefs = bpy.context.preferences.addons["cycles"].preferences
@@ -59,6 +69,9 @@ def main():
     scene.cycles.seed = args.seed
     scene.cycles.use_adaptive_sampling = False
     scene.cycles.use_denoising = False
+    if args.width is not None:
+        scene.render.resolution_x = args.width
+        scene.render.resolution_y = args.height
     scene.render.resolution_percentage = args.percentage
     scene.render.use_persistent_data = True
     scene.render.image_settings.file_format = "OPEN_EXR"
@@ -75,6 +88,10 @@ def main():
         "gpu": [device.name for device in metal_devices],
         "mode": args.mode,
         "resolution": [scene.render.resolution_x, scene.render.resolution_y, args.percentage],
+        "render_pixels": [scene.render.resolution_x * args.percentage // 100,
+                          scene.render.resolution_y * args.percentage // 100],
+        "displacement_environment": {key: value for key, value in os.environ.items()
+                                     if key.startswith("CYCLES_PIXEL_DISPLACEMENT_")},
         "samples": args.samples,
         "seed": scene.cycles.seed,
         "steps": scene.cycles.pixel_displacement_steps,
@@ -91,12 +108,14 @@ def main():
         report["renders_seconds"].append(elapsed)
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         report["peak_process_rss_bytes"] = rss if platform.system() == "Darwin" else rss * 1024
-        report["completed"] = index + 1 == args.repeat
+        report["renders_completed"] = index + 1
         if index > 0:
             report["warm_median_seconds"] = statistics.median(report["renders_seconds"][1:])
         (args.output / f"{stem}.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"DISPLACEMENT_BENCH_RENDER {index} {elapsed:.9f}", flush=True)
     bpy.data.images["Render Result"].save_render(str(args.output / f"{stem}.exr"), scene=scene)
+    report["completed"] = True
+    (args.output / f"{stem}.json").write_text(json.dumps(report, indent=2) + "\n")
     print("DISPLACEMENT_BENCH_RESULT " + json.dumps(report), flush=True)
 
 

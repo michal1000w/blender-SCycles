@@ -185,6 +185,14 @@ ccl_device_noinline Float3Type pixel_displacement_image_coordinate(
     desc.element = AttributeElement(uint(record.x));
     desc.type = NodeAttributeType(uint(record.y));
     desc.offset = int(uint(record.z) | (uint(record.w) << 16));
+    /* Host certification restricts this path to native float2 triangle attributes.
+     * Keep the original interpolation, without the generic attribute type dispatch. */
+    if constexpr (is_dual_v<Float3Type>) {
+      return make_float3(triangle_attribute<dual2>(kg, sd, desc));
+    }
+    else {
+      return make_float3(triangle_attribute<float2>(kg, sd, desc));
+    }
   }
   else {
     desc = svm_node_attr_init(kg, sd, program.attribute, &type);
@@ -286,11 +294,9 @@ pixel_displacement_eval_object_direct(KernelGlobals kg,
   bool position_derivatives = true;
   if constexpr (apply_scene_settings && !force_full) {
     if (image_fast_path && !(evaluator_set & 8) && (evaluator_set & 4) && evaluator >= 2) {
-      int offset = evaluator - 2;
-      const ccl_global auto &program = svm_node_get<SVMDisplacementImage>(kg, &offset);
-      /* Only the generated-coordinate fallback reads position differentials. Ordinary
-       * triangle attributes derive coordinates from barycentrics and their derivatives. */
-      position_derivatives = program.attribute.attr == ATTR_STD_GENERATED;
+      /* Certified native triangle UV attributes use barycentric derivatives only.
+       * Even a generated attribute is present here, so the position fallback is unreachable. */
+      position_derivatives = false;
     }
   }
   pixel_displacement_setup_shader_data(kg,
@@ -856,6 +862,135 @@ ccl_device_inline bool pixel_displacement_clip_bounds(const float3 bounds_min,
          pixel_displacement_clip_bounds_axis(ray_P.z, ray_D.z, bounds_min.z, bounds_max.z, t0, t1);
 }
 
+/* Per-ray inputs, not a displacement cache. Native UV values retain their interpolation
+ * arithmetic. Certified uniform normals and triangle conversion are prepared once. */
+struct PixelDisplacementImageContext {
+  int program_offset;
+  uint object_flag;
+  float2 uv[3];
+  float3 normal;
+  float4 gram;
+};
+
+ccl_device_inline PixelDisplacementImageContext
+pixel_displacement_image_context(KernelGlobals kg,
+                                 const int object,
+                                 const int prim,
+                                 const bool motion,
+                                 ccl_private const float3 verts[3])
+{
+  PixelDisplacementImageContext ctx = {};
+  ctx.program_offset = -1;
+  ctx.object_flag = kernel_data_fetch(object_flag, object);
+  const int set = kernel_data.integrator.pixel_displacement_evaluator_set;
+  const uint info = kernel_data_fetch(pixel_displacement_info, prim);
+  const int metadata = kernel_data_fetch(pixel_displacement_offset, prim);
+  if (motion || (ctx.object_flag & SD_OBJECT_MOTION) || (set & 8) || !(set & 4) ||
+      (info & (7u << 27)) != (7u << 27) || metadata < 0)
+  {
+    return ctx;
+  }
+  const int shader = kernel_data_fetch(tri_shader, prim) & SHADER_MASK;
+  const int evaluator = kernel_data_fetch(shaders, shader).displacement_evaluator;
+  if (evaluator < 2) {
+    return ctx;
+  }
+  ctx.program_offset = evaluator - 2;
+  const float4 record = kernel_data_fetch(pixel_displacement_data, metadata);
+  const int offset = int(uint(record.z) | (uint(record.w) << 16));
+  const uint3 indices = kernel_data_fetch(tri_vindex, prim);
+  const bool corner = uint(record.x) == ATTR_ELEMENT_CORNER;
+  ctx.uv[0] = kernel_data_fetch(attributes_float2, offset + (corner ? prim * 3 : indices.x));
+  ctx.uv[1] = kernel_data_fetch(attributes_float2, offset + (corner ? prim * 3 + 1 : indices.y));
+  ctx.uv[2] = kernel_data_fetch(attributes_float2, offset + (corner ? prim * 3 + 2 : indices.z));
+  const int normal_offset = kernel_data_fetch(objects, object).normal_offset;
+  const int normal_index = (ctx.object_flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 : indices.x;
+  ShaderDataTinyStorage storage;
+  ccl_private ShaderData *sd = AS_SHADER_DATA(&storage);
+  sd->object = object;
+  sd->object_flag = ctx.object_flag;
+  ctx.normal = safe_normalize(attribute_data_fetch_normal(kg, normal_offset + normal_index));
+  if (is_zero(ctx.normal)) {
+    ctx.normal = pixel_displacement_face_normal(verts, ctx.object_flag);
+  }
+  if (!(ctx.object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    object_normal_transform(kg, sd, &ctx.normal);
+  }
+  object_inverse_normal_transform(kg, sd, &ctx.normal);
+  const float3 e0 = verts[1] - verts[0];
+  const float3 e1 = verts[2] - verts[0];
+  const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
+  const float denom = d00 * d11 - d01 * d01;
+  ctx.gram = make_float4(d00, d01, d11, fabsf(denom) < 1.0e-20f ? 0.0f : 1.0f / denom);
+  return ctx;
+}
+
+template<typename T>
+ccl_device_inline float4
+pixel_displacement_context_sample(KernelGlobals kg,
+                                  ccl_private ShaderData *sd,
+                                  ccl_private const PixelDisplacementImageContext *ctx,
+                                  const ccl_global SVMDisplacementImage &program,
+                                  const float u,
+                                  const float v)
+{
+  T co;
+  const float2 uv = triangle_interpolate(u, v, ctx->uv[0], ctx->uv[1], ctx->uv[2]);
+  if constexpr (is_dual_v<T>) {
+    co.val = make_float3(uv);
+    const differential du = {1.0f, 0.0f};
+    const differential dv = {0.0f, 1.0f};
+    co.dx = make_float3(triangle_attribute_dfdx(du, dv, ctx->uv[0], ctx->uv[1], ctx->uv[2]));
+    co.dy = make_float3(triangle_attribute_dfdy(du, dv, ctx->uv[0], ctx->uv[1], ctx->uv[2]));
+  }
+  else {
+    co = make_float3(uv);
+  }
+  if (program.use_mapping) {
+    co = pixel_displacement_image_mapping(co, program);
+  }
+  const dual2 mapped(svm_node_tex_image_mapping(co, program.image.projection));
+  return svm_image_texture(kg, sd, program.image.id, mapped, program.image.flags);
+}
+
+ccl_device_inline float3
+pixel_displacement_context_eval(KernelGlobals kg,
+                                ccl_private const PixelDisplacementImageContext *ctx,
+                                const int object,
+                                const float u,
+                                const float v,
+                                ccl_private const float3 verts[3],
+                                const float3 Ng)
+{
+  ShaderDataTinyStorage storage;
+  ccl_private ShaderData *sd = AS_SHADER_DATA(&storage);
+  sd->object = object;
+  sd->object_flag = ctx->object_flag;
+  sd->lcg_state = 0;
+  sd->runtime_flag = 0;
+  sd->P = pixel_displacement_base_position(verts, u, v);
+  if (!(ctx->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    object_position_transform(kg, sd, &sd->P);
+  }
+  int offset = ctx->program_offset;
+  const ccl_global auto &program = svm_node_get<SVMDisplacementImage>(kg, &offset);
+  const float4 color = program.use_derivatives ?
+                           pixel_displacement_context_sample<dual3>(kg, sd, ctx, program, u, v) :
+                           pixel_displacement_context_sample<float3>(kg, sd, ctx, program, u, v);
+  const float height = program.height_is_alpha ? color.w :
+                                                 linear_rgb_to_gray(kg, make_float3(color));
+  const float3 P = sd->P;
+  float3 delta = ctx->normal * ((height - __uint_as_float(program.displacement.midlevel.bits)) *
+                                __uint_as_float(program.displacement.scale.bits));
+  object_dir_transform(kg, sd, &delta);
+  sd->P += delta;
+  float3 D = ensure_finite(sd->P - P);
+  if (!(ctx->object_flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    object_inverse_dir_transform(kg, sd, &D);
+  }
+  return pixel_displacement_apply_settings(kg, D);
+}
+
 ccl_device_noinline bool pixel_displacement_height_sample(
     KernelGlobals kg,
     ccl_private const float3 verts[3],
@@ -870,12 +1005,24 @@ ccl_device_noinline bool pixel_displacement_height_sample(
     const float dir_plane,
     const float t,
     const float bary_eps,
-    ccl_private PixelDisplacementHeightSample *r_sample)
+    ccl_private PixelDisplacementHeightSample *r_sample,
+    ccl_private const PixelDisplacementImageContext *ctx)
 {
   const float plane_distance = origin_plane + t * dir_plane;
   const float3 ray_point = ray_P + ray_D * t;
   const float3 projected = ray_point - plane_distance * Ng;
-  float2 bary = pixel_displacement_bary_from_point(verts, projected);
+  float2 bary;
+  if (ctx->program_offset >= 0) {
+    const float3 vp = projected - verts[0];
+    const float d20 = dot(vp, verts[1] - verts[0]);
+    const float d21 = dot(vp, verts[2] - verts[0]);
+    const float4 g = ctx->gram;
+    bary = g.w == 0.0f ? zero_float2() :
+                         make_float2((g.z * d20 - g.y * d21) * g.w, (g.x * d21 - g.y * d20) * g.w);
+  }
+  else {
+    bary = pixel_displacement_bary_from_point(verts, projected);
+  }
 
   if (!pixel_displacement_bary_inside(bary, bary_eps)) {
     return false;
@@ -884,8 +1031,10 @@ ccl_device_noinline bool pixel_displacement_height_sample(
   bary.x = clamp(bary.x, 0.0f, 1.0f);
   bary.y = clamp(bary.y, 0.0f, 1.0f - bary.x);
 
-  const float3 D = pixel_displacement_eval_object(
-      kg, object, prim, bary.x, bary.y, time, motion, verts);
+  const float3 D =
+      ctx->program_offset >= 0 ?
+          pixel_displacement_context_eval(kg, ctx, object, bary.x, bary.y, verts, Ng) :
+          pixel_displacement_eval_object(kg, object, prim, bary.x, bary.y, time, motion, verts);
   const float height = dot(D, Ng);
 
   r_sample->plane_distance = plane_distance;
@@ -956,6 +1105,18 @@ ccl_device_inline bool pixel_displacement_intersect_micro_triangle(const float3 
   return true;
 }
 
+template<bool raw>
+ccl_device_inline float3 pixel_displacement_patch_sample(
+    KernelGlobals kg, const int offset, const int grid, const int u, const int v)
+{
+  const float3 D = pixel_displacement_cache_sample(offset, grid, u, v);
+  if constexpr (raw) {
+    return pixel_displacement_apply_settings(kg, D);
+  }
+  return D;
+}
+
+template<bool raw = false>
 ccl_device_inline bool pixel_displacement_intersect_cached_cell(KernelGlobals kg,
                                                                 const int offset,
                                                                 const int grid,
@@ -977,9 +1138,9 @@ ccl_device_inline bool pixel_displacement_intersect_cached_cell(KernelGlobals kg
   const float2 b10 = make_float2(float(iu + 1), float(iv)) * inv_grid;
   const float2 b01 = make_float2(float(iu), float(iv + 1)) * inv_grid;
   const float3 P10 = pixel_displacement_base_position(verts, b10.x, b10.y) +
-                     pixel_displacement_cache_sample(offset, grid, iu + 1, iv);
+                     pixel_displacement_patch_sample<raw>(kg, offset, grid, iu + 1, iv);
   const float3 P01 = pixel_displacement_base_position(verts, b01.x, b01.y) +
-                     pixel_displacement_cache_sample(offset, grid, iu, iv + 1);
+                     pixel_displacement_patch_sample<raw>(kg, offset, grid, iu, iv + 1);
 
   float t;
   float2 bary;
@@ -987,14 +1148,14 @@ ccl_device_inline bool pixel_displacement_intersect_cached_cell(KernelGlobals kg
   if (upper && iu + iv + 2 <= grid) {
     const float2 b11 = make_float2(float(iu + 1), float(iv + 1)) * inv_grid;
     const float3 P11 = pixel_displacement_base_position(verts, b11.x, b11.y) +
-                       pixel_displacement_cache_sample(offset, grid, iu + 1, iv + 1);
+                       pixel_displacement_patch_sample<raw>(kg, offset, grid, iu + 1, iv + 1);
     hit = pixel_displacement_intersect_micro_triangle(
         ray_P, ray_D, ray_tmin, *r_best_t, P10, P11, P01, b10, b11, b01, &t, &bary);
   }
   else {
     const float2 b00 = make_float2(float(iu), float(iv)) * inv_grid;
     const float3 P00 = pixel_displacement_base_position(verts, b00.x, b00.y) +
-                       pixel_displacement_cache_sample(offset, grid, iu, iv);
+                       pixel_displacement_patch_sample<raw>(kg, offset, grid, iu, iv);
     hit = pixel_displacement_intersect_micro_triangle(
         ray_P, ray_D, ray_tmin, *r_best_t, P00, P10, P01, b00, b10, b01, &t, &bary);
   }
@@ -1008,6 +1169,7 @@ ccl_device_inline bool pixel_displacement_intersect_cached_cell(KernelGlobals kg
 /* Traverse exact object-space bounds for displaced micro-blocks. This path is used whenever the
  * sampled displacement has a component tangent to the base triangle, for which barycentric grid
  * DDA is not geometrically valid. Leaves contain at most 2x2 cells. */
+template<bool raw = false>
 ccl_device_noinline bool pixel_displacement_intersect_cached_bvh(KernelGlobals kg,
                                                                  const int prim,
                                                                  const int offset,
@@ -1018,14 +1180,15 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_bvh(KernelGlobals k
                                                                  const float ray_tmin,
                                                                  const float ray_tmax,
                                                                  ccl_private float *r_t,
-                                                                 ccl_private float2 *r_bary)
+                                                                 ccl_private float2 *r_bary,
+                                                                 const int root_override = -1)
 {
-  const int root = kernel_data_fetch(pixel_displacement_bvh_offset, prim);
+  const int root = raw ? root_override : kernel_data_fetch(pixel_displacement_bvh_offset, prim);
   if (root < 0) {
     return false;
   }
 
-  int stack[64];
+  int stack[raw ? 16 : 64];
   int stack_size = 0;
   stack[stack_size++] = root;
   bool hit = false;
@@ -1059,10 +1222,10 @@ ccl_device_noinline bool pixel_displacement_intersect_cached_bvh(KernelGlobals k
     for (int u = block_u; u < end_u; u++) {
       const int end_v = min(block_v + 2, grid - u);
       for (int v = block_v; v < end_v; v++) {
-        hit |= pixel_displacement_intersect_cached_cell(
+        hit |= pixel_displacement_intersect_cached_cell<raw>(
             kg, offset, grid, u, v, false, verts, ray_P, ray_D, ray_tmin, &best_t, &best_bary);
         if (u + v + 2 <= grid) {
-          hit |= pixel_displacement_intersect_cached_cell(
+          hit |= pixel_displacement_intersect_cached_cell<raw>(
               kg, offset, grid, u, v, true, verts, ray_P, ray_D, ray_tmin, &best_t, &best_bary);
         }
       }
@@ -1440,6 +1603,29 @@ ccl_device_noinline bool pixel_displacement_intersect_micro_patch(KernelGlobals 
   const int grid = clamp(int(ceilf(sqrtf(float(max(steps, 1)))) + 2), 6, 14);
   const float inv_grid = 1.0f / float(grid);
   const int patch_offset = pixel_displacement_micro_patch_offset(kg, prim, grid, motion);
+  if (patch_offset >= 0) {
+    const int header = kernel_data_fetch(pixel_displacement_bvh_offset, prim);
+    if (header >= 0) {
+      const uint info = kernel_data_fetch(pixel_displacement_info, prim);
+      const float4 roots = kernel_data_fetch(pixel_displacement_bvh_nodes, header * 2);
+      for (int slot = 0; slot < 3; slot++) {
+        if (int((info >> (slot * 4)) & 15u) == grid) {
+          return pixel_displacement_intersect_cached_bvh<true>(kg,
+                                                               prim,
+                                                               patch_offset,
+                                                               grid,
+                                                               verts,
+                                                               ray_P,
+                                                               ray_D,
+                                                               ray_tmin,
+                                                               ray_tmax,
+                                                               r_t,
+                                                               r_bary,
+                                                               int(roots[slot]));
+        }
+      }
+    }
+  }
 
   /* Adjacent microtriangles share vertices. Keep one row and evaluate each shader position
    * once, without storing a complete patch or changing its sampling locations. */
@@ -1725,6 +1911,8 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
     }
   }
 
+  const PixelDisplacementImageContext image_ctx = pixel_displacement_image_context(
+      kg, object, prim, motion, verts);
   bool have_prev = false;
   float prev_t = t0;
   float prev_f = 0.0f;
@@ -1746,7 +1934,8 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                           dir_plane,
                                           t,
                                           bary_eps,
-                                          &sample))
+                                          &sample,
+                                          &image_ctx))
     {
       continue;
     }
@@ -1787,7 +1976,8 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                               dir_plane,
                                               tm,
                                               bary_eps,
-                                              &sample_m))
+                                              &sample_m,
+                                              &image_ctx))
         {
           break;
         }
@@ -1844,8 +2034,13 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                                           &surface_dPdu,
                                                                           &surface_dPdv);
           if (!cached_geometry) {
-            surface_P = pixel_displacement_position(
-                kg, object, prim, refined_bary.x, refined_bary.y, time, motion, verts);
+            surface_P =
+                image_ctx.program_offset >= 0 ?
+                    pixel_displacement_base_position(verts, refined_bary.x, refined_bary.y) +
+                        pixel_displacement_context_eval(
+                            kg, &image_ctx, object, refined_bary.x, refined_bary.y, verts, Ng) :
+                    pixel_displacement_position(
+                        kg, object, prim, refined_bary.x, refined_bary.y, time, motion, verts);
           }
           const float3 residual = ray_P + ray_D * refined_t - surface_P;
           if (dot(residual, residual) <= residual_limit * residual_limit) {
@@ -1929,8 +2124,13 @@ ccl_device_noinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                   &unused_dPdu,
                                                   &unused_dPdv))
           {
-            surface_P = pixel_displacement_position(
-                kg, object, prim, refined_bary.x, refined_bary.y, time, motion, verts);
+            surface_P =
+                image_ctx.program_offset >= 0 ?
+                    pixel_displacement_base_position(verts, refined_bary.x, refined_bary.y) +
+                        pixel_displacement_context_eval(
+                            kg, &image_ctx, object, refined_bary.x, refined_bary.y, verts, Ng) :
+                    pixel_displacement_position(
+                        kg, object, prim, refined_bary.x, refined_bary.y, time, motion, verts);
           }
           const float3 residual = ray_P + ray_D * refined_t - surface_P;
           use_refined = dot(residual, residual) <= residual_limit * residual_limit;
