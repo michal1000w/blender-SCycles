@@ -52,6 +52,76 @@ ccl_device_inline float bdpt_safe_pdf(const float pdf)
   return max(pdf, 1.0e-20f);
 }
 
+/* Selection probabilities have two distinct contexts: emitted paths use the global CDF,
+ * whereas NEE uses the receiver's tree. Never replace an emission density by a tree density. */
+ccl_device_inline uint bdpt_tree_emitter(KernelGlobals kg, const int object, const int prim)
+{
+  if (prim < 0) {
+    return kernel_data_fetch(light_to_tree, object);
+  }
+  const uint lookup = kernel_data_fetch(object_lookup_offset, object);
+  const uint offset = kernel_data_fetch(object_prim_offset, object);
+  return kernel_data_fetch(triangle_to_tree, prim - offset + lookup);
+}
+
+ccl_device_inline float bdpt_forward_selection_pdf(KernelGlobals kg,
+                                                   IntegratorState state,
+                                                   const int object,
+                                                   const int prim,
+                                                   const float flat_pdf)
+{
+#ifdef __LIGHT_TREE__
+  if (kernel_data.integrator.use_light_tree &&
+      INTEGRATOR_STATE(state, path, bounce) != 0 &&
+      !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_MIS_SKIP))
+  {
+    return light_tree_pdf(kg,
+                          INTEGRATOR_STATE(state, ray, P),
+                          INTEGRATOR_STATE(state, path, mis_origin_n),
+                          INTEGRATOR_STATE(state, ray, previous_dt),
+                          INTEGRATOR_STATE(state, path, visibility),
+                          INTEGRATOR_STATE(state, path, flag),
+                          object,
+                          bdpt_tree_emitter(kg, object, prim),
+                          light_link_receiver_forward(kg, state));
+  }
+#endif
+  return flat_pdf;
+}
+
+/* Evaluate the NEE/emission selection ratio at the first scattering vertex. The caller supplies
+ * the reciprocal shading normal (toward the camera-side predecessor), not the emission-facing
+ * normal. Subsequent light vertices already contain this ratio in their recursive d_vc term. */
+ccl_device_inline float bdpt_light_selection_ratio(KernelGlobals kg,
+                                                   const int distribution_index,
+                                                   const float3 P,
+                                                   const float3 N,
+                                                   const int runtime_flags,
+                                                   const int receiver,
+                                                   const bool volume = false,
+                                                   const float dt = 0.0f)
+{
+#ifdef __LIGHT_TREE__
+  if (kernel_data.integrator.use_light_tree) {
+    const ccl_global KernelLightDistribution *emitter =
+        &kernel_data_fetch(light_distribution, distribution_index);
+    const float flat_pdf = kernel_data_fetch(light_distribution, distribution_index + 1).totarea -
+                           emitter->totarea;
+    if (!(flat_pdf > 0.0f)) {
+      return 0.0f;
+    }
+    const uint tree_id = bdpt_tree_emitter(kg, emitter->object_id, emitter->prim);
+    const uint flag = (runtime_flags & SR_BSDF_HAS_TRANSMISSION) ?
+                          PATH_RAY_MIS_HAD_TRANSMISSION : 0u;
+    const float tree_pdf = volume ?
+        light_tree_pdf<true>(kg, P, N, dt, flag, emitter->object_id, tree_id, receiver) :
+        light_tree_pdf<false>(kg, P, N, 0.0f, flag, emitter->object_id, tree_id, receiver);
+    return tree_pdf / flat_pdf;
+  }
+#endif
+  return 1.0f;
+}
+
 ccl_device_inline uint bdpt_pack_vertex_support(const uint path_length,
                                                 const uint selection_count)
 {
@@ -168,7 +238,8 @@ ccl_device_inline float bdpt_spot_emission_direction_pdf(
 
 ccl_device_inline float bdpt_emission_mis_weight_infinite(IntegratorState state,
                                                           const float direct_pdf_w,
-                                                          const float position_pdf)
+                                                          const float position_pdf,
+                                                          const float selection_ratio)
 {
   if (INTEGRATOR_STATE(state, path, bounce) == 0 ||
       (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_MIS_SKIP))
@@ -176,7 +247,8 @@ ccl_device_inline float bdpt_emission_mis_weight_infinite(IntegratorState state,
     return 1.0f;
   }
   const float emission_pdf_w = direct_pdf_w * position_pdf;
-  const float w_camera = direct_pdf_w * INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
+  const float w_camera = direct_pdf_w * selection_ratio *
+                             INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
                          emission_pdf_w * INTEGRATOR_STATE(state, path, bdpt_d_vc);
   return 1.0f / (1.0f + w_camera);
 }
@@ -204,7 +276,13 @@ ccl_device_inline float bdpt_emission_mis_weight_surface(KernelGlobals kg,
   const float direct_pdf_a = kernel_data.integrator.distribution_pdf_triangles;
   const float cos_at_light = max(fabsf(dot(sd->N, sd->wi)), 1.0e-8f);
   const float emission_pdf_w = direct_pdf_a * side_pdf * cos_at_light * M_1_PI_F;
-  const float w_camera = direct_pdf_a * INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
+  float3 V[3];
+  triangle_world_space_vertices(kg, sd->object, sd->prim, -1.0f, V);
+  const float flat_selection = triangle_area(V[0], V[1], V[2]) * direct_pdf_a;
+  const float selection_ratio = bdpt_forward_selection_pdf(
+      kg, state, sd->object, sd->prim, flat_selection) / bdpt_safe_pdf(flat_selection);
+  const float w_camera = direct_pdf_a * selection_ratio *
+                             INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
                          emission_pdf_w * INTEGRATOR_STATE(state, path, bdpt_d_vc);
   return 1.0f / (1.0f + w_camera);
 }
@@ -250,7 +328,10 @@ ccl_device_inline float bdpt_emission_mis_weight_lamp(KernelGlobals kg,
   const float emission_pdf_w = direct_pdf_a * cos_at_light * M_1_PI_F;
   const float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm) * sqr(distance) / cos_at_light;
   const float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc) / cos_at_light;
-  return 1.0f / (1.0f + direct_pdf_a * d_vcm + emission_pdf_w * d_vc);
+  const float selection_ratio = bdpt_forward_selection_pdf(
+      kg, state, klight->object_id, -1, kernel_data.integrator.distribution_pdf_lights) /
+      bdpt_safe_pdf(kernel_data.integrator.distribution_pdf_lights);
+  return 1.0f / (1.0f + direct_pdf_a * selection_ratio * d_vcm + emission_pdf_w * d_vc);
 }
 
 /* Evaluate the compact reverse density used by recursive MIS. Actual endpoint contributions do a
@@ -315,7 +396,9 @@ ccl_device_inline float bdpt_nee_mis_weight(KernelGlobals kg,
     const float position_pdf = bdpt_infinite_position_pdf(sd->P, -ls->D);
     const float reverse_pdf = bdpt_reverse_pdf(kg, state, sd, ls->D);
     const float cos_camera = max(fabsf(dot(sd->N, ls->D)), 1.0e-8f);
-    w_camera = position_pdf * cos_camera *
+    const float emission_selection_ratio = kernel_data.integrator.distribution_pdf_lights /
+                                           bdpt_safe_pdf(ls->pdf_selection);
+    w_camera = emission_selection_ratio * position_pdf * cos_camera *
                (INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
                 INTEGRATOR_STATE(state, path, bdpt_d_vc) * reverse_pdf);
   }
@@ -492,7 +575,9 @@ ccl_device_inline float bdpt_volume_nee_mis_weight(
         w_light = 0.0f;
       }
     }
-    w_camera = bdpt_infinite_position_pdf(P, -ls->D) *
+    const float emission_selection_ratio = kernel_data.integrator.distribution_pdf_lights /
+                                           bdpt_safe_pdf(ls->pdf_selection);
+    w_camera = emission_selection_ratio * bdpt_infinite_position_pdf(P, -ls->D) *
                (d_vcm + d_vc * reverse_pdf);
   }
   else if (ls->type == LIGHT_POINT || ls->type == LIGHT_SPOT) {
@@ -567,6 +652,7 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
                                               const ccl_private Ray *ray,
                                               const Spectrum throughput,
                                               const int emitter_object,
+                                              const int emitter_distribution,
                                               const int light_group,
                                               const float d_vcm,
                                               const float d_vc,
@@ -587,6 +673,7 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
   stored_vertex->object = sd->object;
   stored_vertex->type = sd->type;
   stored_vertex->emitter_object = emitter_object;
+  stored_vertex->emitter_distribution = emitter_distribution;
   stored_vertex->light_group = light_group;
   stored_vertex->d_vcm = d_vcm;
   stored_vertex->d_vc = d_vc;
@@ -601,6 +688,7 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(
     const ccl_private Ray *ray,
     const Spectrum throughput,
     const int emitter_object,
+    const int emitter_distribution,
     const int light_group,
     const float d_vcm,
     const float d_vc,
@@ -632,6 +720,7 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(
                            ray,
                            throughput,
                            emitter_object,
+                           emitter_distribution,
                            light_group,
                            d_vcm,
                            d_vc,
@@ -1206,8 +1295,62 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   const float light_path_count = float(kernel_integrator_state.bdpt_light_path_count);
   const float light_path_sample_ratio = max(
       kernel_integrator_state.bdpt_light_path_sample_ratio, 1.0e-20f);
+  float3 selection_P = light_sd->P;
+  float3 selection_N = volume_vertex ? zero_float3() : light_sd->N;
+  float selection_dt = 0.0f;
+#ifdef __VOLUME__
+  if (volume_vertex && bdpt_vertex_path_length(light_vertex) == 2u &&
+      kernel_data.integrator.use_light_tree)
+  {
+    /* Volume NEE selects an emitter over the entire camera ray segment, before drawing a
+     * collision distance. Stopping that segment at the cached collision gives a different tree
+     * PDF. Recover both boundaries, including transparent interfaces before this vertex. An
+     * opaque interface makes the eventual shadow contribution zero, so it need not be shaded
+     * here. The visibility pass still performs all material/transmittance evaluations. */
+    Ray segment_ray ccl_optional_struct_init;
+    segment_ray.P = sensor_P;
+    segment_ray.D = -direction;
+    segment_ray.tmin = 0.0f;
+    segment_ray.tmax = FLT_MAX;
+    segment_ray.time = photon_unpack_time(light_vertex->time_wavelength);
+#  ifdef __RAY_DIFFERENTIALS__
+    segment_ray.dP = differential_zero_compact();
+    segment_ray.dD = differential_zero_compact();
+#  endif
+    segment_ray.self.object = OBJECT_NONE;
+    segment_ray.self.prim = PRIM_NONE;
+    segment_ray.self.light_object = OBJECT_NONE;
+    segment_ray.self.light_prim = PRIM_NONE;
+    float segment_start = 0.0f;
+    float segment_end = FLT_MAX;
+    for (int boundary = 0; boundary <= kernel_data.integrator.transparent_max_bounce; boundary++) {
+      Intersection segment_isect;
+      if (!scene_intersect(kg, &segment_ray, PATH_RAY_VISIBILITY_CAMERA, &segment_isect)) {
+        break;
+      }
+      if (segment_isect.t >= distance) {
+        segment_end = segment_isect.t;
+        break;
+      }
+      segment_start = segment_isect.t;
+      segment_ray.tmin = intersection_t_offset(segment_isect.t);
+    }
+    selection_P = sensor_P + segment_start * segment_ray.D;
+    selection_N = segment_ray.D;
+    selection_dt = segment_end - segment_start;
+  }
+#endif
+  const float selection_ratio = bdpt_vertex_path_length(light_vertex) == 2u ?
+      bdpt_light_selection_ratio(kg,
+                                 light_vertex->emitter_distribution,
+                                 selection_P,
+                                 selection_N,
+                                 volume_vertex ? SR_BSDF_HAS_TRANSMISSION : light_sd->runtime_flag,
+                                 light_sd->object,
+                                 volume_vertex,
+                                 selection_dt) : 1.0f;
   const float w_light = (camera_pdf_area / light_path_sample_ratio) *
-                        (light_vertex->d_vcm + light_vertex->d_vc * reverse_pdf);
+                        (light_vertex->d_vcm * selection_ratio + light_vertex->d_vc * reverse_pdf);
   const float mis_weight = 1.0f / (1.0f + w_light);
 
   /* BsdfEval is f*cos(outgoing). The reciprocal evaluation above points toward the previous light
@@ -1315,6 +1458,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   Ray ray ccl_optional_struct_init;
   Spectrum throughput;
   int emitter_object = OBJECT_NONE;
+  int emitter_distribution = -1;
   int light_group = LIGHTGROUP_NONE;
   float emission_pdf = 0.0f;
   float direct_pdf = 0.0f;
@@ -1338,7 +1482,8 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                              &is_delta_emitter,
                              &is_finite_emitter,
                              &emitter_shader_flags,
-                             &emitter_max_bounces))
+                             &emitter_max_bounces,
+                             &emitter_distribution))
   {
     return;
   }
@@ -1418,6 +1563,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                           &ray,
                                           throughput,
                                           emitter_object,
+                                          emitter_distribution,
                                           light_group,
                                           d_vcm,
                                           d_vc,
@@ -1504,6 +1650,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                         &ray,
                                         throughput,
                                         emitter_object,
+                                        emitter_distribution,
                                         light_group,
                                         d_vcm,
                                         d_vc,
@@ -1616,7 +1763,15 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       d_vc *= cos_out;
     }
     else {
-      d_vc = cos_out / bdpt_safe_pdf(pdf) * (d_vc * reverse_pdf + d_vcm);
+      const float selection_ratio = bounce == 0 ?
+          bdpt_light_selection_ratio(kg,
+                                     emitter_distribution,
+                                     sd.P,
+                                     dot(sd.N, wo) >= 0.0f ? sd.N : -sd.N,
+                                     sd.runtime_flag,
+                                     sd.object) : 1.0f;
+      d_vc = cos_out / bdpt_safe_pdf(pdf) *
+             (d_vc * reverse_pdf + d_vcm * selection_ratio);
       d_vcm = 1.0f / bdpt_safe_pdf(pdf);
     }
 
