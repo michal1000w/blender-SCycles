@@ -121,6 +121,7 @@ def build_scene(options):
     scene.render.engine = "CYCLES"
     scene.cycles.device = options.device
     scene.cycles.samples = options.samples
+    scene.cycles.seed = options.seed
     scene.cycles.use_denoising = False
     scene.cycles.use_adaptive_sampling = options.adaptive
     if options.adaptive:
@@ -168,7 +169,7 @@ def build_scene(options):
     world = bpy.data.worlds.new("Black World")
     world.use_nodes = True
     world.node_tree.nodes["Background"].inputs["Strength"].default_value = (
-        0.8 if options.light_type == "WORLD" else 0.0
+        0.8 if options.light_type == "WORLD" else options.world_strength
     )
     if options.world_absorption > 0.0:
         absorption = world.node_tree.nodes.new("ShaderNodeVolumeAbsorption")
@@ -186,6 +187,21 @@ def build_scene(options):
             scatter.outputs["Volume"], world.node_tree.nodes["World Output"].inputs["Volume"]
         )
     scene.world = world
+    if options.bounded_volume:
+        if options.world_scatter <= 0.0:
+            raise ValueError("--bounded-volume requires --world-scatter")
+        world.node_tree.nodes.remove(scatter)
+        material = bpy.data.materials.new("Bounded Test Medium")
+        material.use_nodes = True
+        material.node_tree.nodes.clear()
+        output = material.node_tree.nodes.new("ShaderNodeOutputMaterial")
+        medium = material.node_tree.nodes.new("ShaderNodeVolumeScatter")
+        medium.inputs["Color"].default_value = (0.72, 0.82, 0.95, 1.0)
+        medium.inputs["Density"].default_value = options.world_scatter
+        medium.inputs["Anisotropy"].default_value = 0.35
+        material.node_tree.links.new(medium.outputs["Volume"], output.inputs["Volume"])
+        bpy.ops.mesh.primitive_cube_add(size=6.0)
+        bpy.context.object.data.materials.append(material)
 
     floor = None
     if not options.volume_only and not options.no_floor:
@@ -309,6 +325,29 @@ def build_scene(options):
             scene.collection.children.link(blockers)
             blockers.objects.link(blocker)
             light.light_linking.blocker_collection = blockers
+
+    # Unequal powers and distances exercise receiver-dependent emitter selection. Keep the
+    # original key light and add mostly weak lights far from the receiver; a flat emitter CDF
+    # wastes NEE samples on them. Works for analytic and instanced mesh emitters.
+    if options.extra_lights:
+        if light is None or light_type in {"WORLD", "SUN"}:
+            raise ValueError("--extra-lights requires a finite emitter")
+        for index in range(options.extra_lights):
+            extra = light.copy()
+            extra.data = light.data if options.mesh_light else light.data.copy()
+            scene.collection.objects.link(extra)
+            angle = math.tau * index / options.extra_lights
+            extra.location = (18.0 * math.cos(angle), 18.0 * math.sin(angle), 5.0)
+            if not options.mesh_light:
+                extra.data.energy = light.data.energy * 0.02
+            look_at(extra, (extra.location.x, extra.location.y, 0.0))
+
+    if options.sun_fill > 0.0:
+        bpy.ops.object.light_add(type="SUN", location=(2.0, 1.0, 5.0))
+        sun = bpy.context.object
+        sun.data.energy = options.sun_fill
+        sun.data.angle = math.radians(3.0)
+        look_at(sun, (0.0, 0.0, 0.0))
 
     camera_location = (0.0, 0.0, 6.0) if options.top_camera else (5.8, -6.2, 4.3)
     bpy.ops.object.camera_add(location=camera_location)
@@ -463,7 +502,7 @@ def build_scene(options):
             )
     print(
         "BDPT_SMOKE "
-        f"bdpt={int(options.bdpt)} camera={options.camera_type} light={light_type} "
+        f"bdpt={int(options.bdpt)} light_tree={int(not options.no_light_tree)} seed={options.seed} camera={options.camera_type} light={light_type} "
         f"seconds={elapsed:.9g} "
         f"samples={options.samples} "
         f"light_paths={options.light_paths} mean={sum(rgb) / len(rgb):.9g} "
@@ -475,6 +514,11 @@ def build_scene(options):
 def main():
     arguments = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
+    parser.add_argument("--bounded-volume", action="store_true")
+    parser.add_argument("--world-strength", type=float, default=0.0)
+    parser.add_argument("--sun-fill", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--extra-lights", type=int, default=0)
     parser.add_argument("--bdpt", action="store_true")
     parser.add_argument("--device", choices=("GPU", "CPU"), default="GPU")
     parser.add_argument("--samples", type=int, default=8)

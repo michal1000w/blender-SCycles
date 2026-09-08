@@ -651,8 +651,16 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   const float cache_scale = float(vertex_count) * float(light_selection_count) /
                             float(kernel_integrator_state.bdpt_light_path_count);
 
+  const float selection_ratio = light_path_length == 2u ?
+      bdpt_light_selection_ratio(kg,
+                                 light_vertex->emitter_distribution,
+                                 light_sd.P,
+                                 light_sd.N,
+                                 light_sd.runtime_flag,
+                                 light_sd.object) : 1.0f;
   const float w_light = camera_pdf_area *
-                        (light_vertex->d_vcm + light_vertex->d_vc * light_reverse_pdf);
+                        (light_vertex->d_vcm * selection_ratio +
+                         light_vertex->d_vc * light_reverse_pdf);
   const float w_camera = light_pdf_area *
                          (INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
                           INTEGRATOR_STATE(state, path, bdpt_d_vc) * camera_reverse_pdf);

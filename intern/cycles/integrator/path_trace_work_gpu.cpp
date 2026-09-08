@@ -364,6 +364,8 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
    * estimator carries the selection support explicitly, keeping memory linear in path count. */
   const uint capacity = light_paths;
 
+  LOG_INFO << "BDPT light cache: " << capacity << " vertices, light tree "
+           << (device_scene_->data.integrator.use_light_tree ? "enabled" : "disabled");
   bdpt_vertices_.alloc_to_device(capacity, false);
   if (bdpt_vertex_count_.size() != 1) {
     bdpt_vertex_count_.free();

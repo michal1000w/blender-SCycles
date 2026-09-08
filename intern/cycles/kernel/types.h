@@ -1622,10 +1622,12 @@ struct ccl_align(16) KernelBDPTVertex {
   uint path_length;
   uint flag;
   uint emitter_shader_flags;
+  /* Emission CDF entry, retained for the receiver-dependent NEE alternative at the first vertex. */
+  int emitter_distribution;
 };
 static_assert_align(KernelBDPTVertex, 16);
-static_assert(sizeof(KernelBDPTVertex) == 80,
-              "KernelBDPTVertex must remain a compact 80-byte record");
+static_assert(sizeof(KernelBDPTVertex) == 96,
+              "KernelBDPTVertex must remain a compact 96-byte record");
 
 /* Bounding box. */
 struct KernelBoundingBox {

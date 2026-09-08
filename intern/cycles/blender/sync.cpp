@@ -489,7 +489,12 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_use_light_tree(use_light_tree);
   integrator->set_light_sampling_threshold(get_float(cscene, "light_sampling_threshold"));
 
-  if (integrator->use_light_tree_is_modified()) {
+  /* Switching emitted-path integrators changes whether a CDF is needed alongside the tree,
+   * even when the light-tree checkbox itself has not changed (e.g. viewport toggles). */
+  if (integrator->use_light_tree_is_modified() ||
+      integrator->use_bidirectional_path_tracing_is_modified() ||
+      integrator->use_photon_mapping_is_modified())
+  {
     scene->light_manager->tag_update(scene, LightManager::UPDATE_ALL);
   }
 

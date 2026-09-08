@@ -246,7 +246,8 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                              ccl_private bool *is_delta = nullptr,
                                              ccl_private bool *is_finite = nullptr,
                                              ccl_private uint *emitter_shader_flags = nullptr,
-                                             ccl_private float *emitter_max_bounces = nullptr)
+                                             ccl_private float *emitter_max_bounces = nullptr,
+                                             ccl_private int *emitter_distribution = nullptr)
 {
   /* MetalRT consumes the self-intersection payload unconditionally. Keep it initialized for
    * analytic emitters, and replace it below for emissive geometry. */
@@ -262,6 +263,9 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
   const int emitter = light_distribution_sample(kg, lcg_step_float(rng));
   const ccl_global KernelLightDistribution *distribution = &kernel_data_fetch(light_distribution,
                                                                               emitter);
+  if (emitter_distribution) {
+    *emitter_distribution = emitter;
+  }
   const int prim_or_lamp = distribution->prim;
   *emitter_object = distribution->object_id;
   if (light_group) {
