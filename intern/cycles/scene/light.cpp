@@ -1427,13 +1427,9 @@ void LightManager::count_lights(KernelIntegrator *kintegrator, const Scene *scen
 void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  /* BDPT's emitted subpaths use the flat, emitter-independent distribution. Keep NEE on the same
-   * distribution so recursive MIS compares densities in the same sampling measure. Supporting a
-   * camera-dependent light-tree selection density on one endpoint requires carrying that density
-   * per connection and is intentionally not approximated. */
-  kintegrator->use_light_tree = scene->integrator->get_use_light_tree() &&
-                                !scene->integrator->use_bidirectional_path_tracing_on_device(
-                                    scene->device);
+  /* BDPT retains an independent emission CDF; its endpoint MIS evaluates the receiver-dependent
+   * tree probability separately from the probability used to launch a light subpath. */
+  kintegrator->use_light_tree = scene->integrator->get_use_light_tree();
   kintegrator->use_light_mis = scene->use_light_mis();
 
   /* Create KernelLight for every portal and enabled light in the scene. */
