@@ -84,6 +84,7 @@ CCL_NAMESPACE_BEGIN
 
 /* Metal bidirectional path tracing state. */
 #define KERNEL_FEATURE_BDPT (1ULL << 32ULL)
+#define KERNEL_FEATURE_PHOTON_MAPPING (1ULL << 33ULL)
 
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
