@@ -7,6 +7,7 @@
 
 import argparse
 import math
+import pathlib
 import sys
 import time
 
@@ -123,6 +124,10 @@ def build_scene(options):
     scene.cycles.samples = options.samples
     scene.cycles.seed = options.seed
     scene.cycles.use_denoising = False
+    scene.cycles.use_guiding = options.guiding
+    scene.cycles.guiding_directional_sampling_type = options.guiding_mode
+    scene.cycles.guiding_training_samples = options.guiding_training
+    scene.cycles.guiding_gpu_memory_mb = options.guiding_memory
     scene.cycles.use_adaptive_sampling = options.adaptive
     if options.adaptive:
         scene.cycles.adaptive_threshold = 0.01
@@ -326,6 +331,17 @@ def build_scene(options):
             blockers.objects.link(blocker)
             light.light_linking.blocker_collection = blockers
 
+    if options.emitter_motion:
+        if light_type != "MESH":
+            raise ValueError("--emitter-motion requires a mesh emitter")
+        scene.render.use_motion_blur = True
+        scene.render.motion_blur_shutter = 1.0
+        light.scale = (1.0, 1.0, 1.0)
+        light.keyframe_insert("scale", frame=0)
+        light.scale = (2.0, 2.0, 1.0)
+        light.keyframe_insert("scale", frame=2)
+        scene.frame_set(1)
+
     # Unequal powers and distances exercise receiver-dependent emitter selection. Keep the
     # original key light and add mostly weak lights far from the receiver; a flat emitter CDF
     # wastes NEE samples on them. Works for analytic and instanced mesh emitters.
@@ -417,6 +433,10 @@ def build_scene(options):
         camera.data.keyframe_insert("lens")
         scene.frame_set(1)
     scene.camera = camera
+
+    if options.save_scene:
+        pathlib.Path(options.save_scene).resolve().parent.mkdir(parents=True, exist_ok=True)
+        bpy.ops.wm.save_as_mainfile(filepath=options.save_scene)
 
     start = time.perf_counter()
     bpy.ops.render.render(write_still=True)
@@ -518,6 +538,11 @@ def main():
     parser.add_argument("--world-strength", type=float, default=0.0)
     parser.add_argument("--sun-fill", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--guiding", action="store_true")
+    parser.add_argument("--guiding-mode", choices=("RIS", "MIS", "ROUGHNESS"), default="RIS")
+    parser.add_argument("--guiding-training", type=int, default=128)
+    parser.add_argument("--guiding-memory", type=int, default=64)
+    parser.add_argument("--save-scene")
     parser.add_argument("--extra-lights", type=int, default=0)
     parser.add_argument("--bdpt", action="store_true")
     parser.add_argument("--device", choices=("GPU", "CPU"), default="GPU")
@@ -536,6 +561,8 @@ def main():
     parser.add_argument("--no-light-tree", action="store_true")
     parser.add_argument("--aperture", type=float, default=0.0)
     parser.add_argument("--mesh-light", action="store_true")
+    parser.add_argument("--emitter-motion", action="store_true",
+                        help="Animate mesh-emitter area across the shutter interval")
     parser.add_argument(
         "--light-type", choices=("AREA", "POINT", "SPOT", "SUN", "MESH", "WORLD"), default="AREA"
     )

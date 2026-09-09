@@ -218,17 +218,90 @@ ccl_device_inline float _volume_shader_phase_eval_mis(
   return (sum_sample_weight > 0.0f) ? sum_pdf / sum_sample_weight : 0.0f;
 }
 
-ccl_device float volume_shader_phase_eval(ccl_attr_maybe_unused KernelGlobals kg,
-                                          ccl_attr_maybe_unused IntegratorState state,
-                                          const ccl_private ShaderData *sd,
-                                          const ccl_private ShaderVolumePhases *phases,
-                                          const float3 wo,
-                                          ccl_private BsdfEval *phase_eval,
-                                          const uint light_shader_flags)
+#  ifdef __KERNEL_METAL__
+ccl_device_inline float volume_shader_gpu_guiding_probability(const float3 P,
+                                                              const bool light_path)
+{
+  if (!kernel_data.integrator.use_volume_guiding || kernel_integrator_state.guiding_capacity == 0)
+  {
+    return 0.0f;
+  }
+  const GuidingField field = guiding_gpu_field();
+  const GuidingFieldType type = light_path ? GUIDING_FIELD_VOLUME_IMPORTANCE :
+                                             GUIDING_FIELD_VOLUME_RADIANCE;
+  return field.distribution(field.find_leaf(P), type)[0] > 0.0f ?
+             clamp(kernel_data.integrator.volume_guiding_probability, 0.0f, 1.0f) :
+             0.0f;
+}
+
+ccl_device_inline GuidingDirectionalProduct volume_shader_gpu_guiding_product(
+    const ccl_private ShaderData *sd, const ccl_private ShaderVolumePhases *phases)
+{
+  float sum_weight = 0.0f;
+  float sum_g = 0.0f;
+  for (int i = 0; i < phases->num_closure; ++i) {
+    const ccl_private ShaderVolumeClosure *svc = &phases->closure[i];
+    sum_weight += svc->sample_weight;
+    sum_g += svc->sample_weight * volume_phase_get_g(svc);
+  }
+  return {
+      -sd->wi, sum_weight > 0.0f ? sum_g / sum_weight : 0.0f, GuidingDirectionalProduct::PHASE};
+}
+
+ccl_device_inline GuidingGaussianProduct volume_shader_gpu_guiding_smooth_product(
+    const ccl_private ShaderData *sd, const ccl_private ShaderVolumePhases *phases)
+{
+  const GuidingDirectionalProduct phase = volume_shader_gpu_guiding_product(sd, phases);
+  const float r = min(fabsf(phase.anisotropy), 0.9999f);
+  const float concentration = min(r * (3.0f - r * r) / (1.0f - r * r), 16384.0f);
+  const float3 axis = phase.anisotropy >= 0.0f ? phase.axis : -phase.axis;
+  /* Match the phase's first angular moment. The true phase function still supplies both
+   * scattering values and the ordinary component of the sampling density. */
+  return {{{axis, concentration}, {axis, 0.0f}}, {1.0f, 0.0f}};
+}
+
+ccl_device_inline float volume_shader_gpu_guiding_pdf(const ccl_private ShaderData *sd,
+                                                      const ccl_private ShaderVolumePhases *phases,
+                                                      const float3 P,
+                                                      const float3 direction,
+                                                      const float phase_pdf,
+                                                      const bool light_path)
+{
+  const float probability = volume_shader_gpu_guiding_probability(P, light_path);
+  if (probability == 0.0f) {
+    return phase_pdf;
+  }
+  const GuidingField field = guiding_gpu_field();
+  const GuidingFieldType type = light_path ? GUIDING_FIELD_VOLUME_IMPORTANCE :
+                                             GUIDING_FIELD_VOLUME_RADIANCE;
+  GuidingGaussianMixture smooth;
+  const float guide_pdf = smooth.pdf_product(field.distribution(field.find_leaf(P), type) +
+                                                 GuidingField::tree_size,
+                                             volume_shader_gpu_guiding_smooth_product(sd, phases),
+                                             direction,
+                                             field.normalized_position(P));
+  return (1.0f - probability) * phase_pdf + probability * guide_pdf;
+}
+#  endif
+
+ccl_device float volume_shader_phase_eval(
+    ccl_attr_maybe_unused KernelGlobals kg,
+    ccl_attr_maybe_unused IntegratorState state,
+    const ccl_private ShaderData *sd,
+    const ccl_private ShaderVolumePhases *phases,
+    const float3 wo,
+    ccl_private BsdfEval *phase_eval,
+    const uint light_shader_flags,
+    ccl_attr_maybe_unused const bool guiding_light_path = false,
+    ccl_attr_maybe_unused const ccl_private float3 *guiding_P = nullptr)
 {
   bsdf_eval_init(phase_eval, zero_spectrum());
 
   float pdf = _volume_shader_phase_eval_mis(sd, phases, wo, nullptr, phase_eval, 0.0f, 0.0f);
+#  ifdef __KERNEL_METAL__
+  pdf = volume_shader_gpu_guiding_pdf(
+      sd, phases, guiding_P ? *guiding_P : sd->P, wo, pdf, guiding_light_path);
+#  endif
 
 #  if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
@@ -281,6 +354,48 @@ ccl_device int volume_shader_phase_sample(const ccl_private ShaderData *sd,
 
   return label;
 }
+
+#  ifdef __KERNEL_METAL__
+ccl_device int volume_shader_phase_gpu_guided_sample(const ccl_private ShaderData *sd,
+                                                     const ccl_private ShaderVolumePhases *phases,
+                                                     const ccl_private ShaderVolumeClosure *svc,
+                                                     const float2 rand_phase,
+                                                     const float rand_guiding,
+                                                     ccl_private BsdfEval *phase_eval,
+                                                     ccl_private float3 *wo,
+                                                     ccl_private float *pdf,
+                                                     ccl_private float *unguided_pdf,
+                                                     ccl_private float *sampled_roughness,
+                                                     const bool light_path = false)
+{
+  const float probability = volume_shader_gpu_guiding_probability(sd->P, light_path);
+  if (probability > 0.0f && rand_guiding < probability) {
+    const GuidingField field = guiding_gpu_field();
+    const GuidingFieldType type = light_path ? GUIDING_FIELD_VOLUME_IMPORTANCE :
+                                               GUIDING_FIELD_VOLUME_RADIANCE;
+    GuidingGaussianMixture smooth;
+    float guide_pdf;
+    *wo = smooth.sample_product(field.distribution(field.find_leaf(sd->P), type) +
+                                    GuidingField::tree_size,
+                                volume_shader_gpu_guiding_smooth_product(sd, phases),
+                                rand_phase,
+                                &guide_pdf,
+                                field.normalized_position(sd->P));
+    bsdf_eval_init(phase_eval, zero_spectrum());
+    *unguided_pdf = _volume_shader_phase_eval_mis(
+        sd, phases, *wo, nullptr, phase_eval, 0.0f, 0.0f);
+    *pdf = (1.0f - probability) * *unguided_pdf + probability * guide_pdf;
+    *sampled_roughness = 1.0f - fabsf(volume_phase_get_g(svc));
+    return LABEL_VOLUME_SCATTER;
+  }
+  const int label = volume_shader_phase_sample(
+      sd, phases, svc, rand_phase, phase_eval, wo, unguided_pdf, sampled_roughness);
+  *pdf = *unguided_pdf > 0.0f ?
+             volume_shader_gpu_guiding_pdf(sd, phases, sd->P, *wo, *unguided_pdf, light_path) :
+             0.0f;
+  return label;
+}
+#  endif
 
 #  if defined(__PATH_GUIDING__)
 ccl_device int volume_shader_phase_guided_sample(KernelGlobals kg,

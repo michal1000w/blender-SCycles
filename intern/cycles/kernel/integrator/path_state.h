@@ -62,13 +62,23 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, flag) = PATH_RAY_MIS_SKIP | PATH_RAY_TRANSPARENT_BACKGROUND;
   INTEGRATOR_STATE_WRITE(state, path, mis_ray_pdf) = 0.0f;
   if (kernel_data.integrator.use_bidirectional_path_tracing) {
-    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 0.0f;
-    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 0;
   }
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
   INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
   INTEGRATOR_STATE_WRITE(state, path, optical_depth) = 0.0f;
+#ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_guiding) {
+    INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
+    if (kernel_integrator_state.guiding_training) {
+      /* The weight becomes live only when a selected scattering vertex writes a valid index. */
+      INTEGRATOR_STATE_WRITE(state, gpu_guiding, history_head) = ~0u;
+    }
+  }
+#endif
 #if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
@@ -118,6 +128,11 @@ ccl_device_inline void path_state_next(KernelGlobals kg,
                                        const int label,
                                        const int runtime_flag)
 {
+#ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_bidirectional_path_tracing) {
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 0;
+  }
+#endif
   PathRayVisibility visibility = INTEGRATOR_STATE(state, path, visibility);
   uint32_t flag = INTEGRATOR_STATE(state, path, flag);
 
@@ -303,7 +318,7 @@ ccl_device_inline float path_state_continuation_probability(KernelGlobals kg,
   /* Probabilistic termination: use `sqrt()` to roughly match typical view
    * transform and do path termination a bit later on average. */
   Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
-#if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
+#if (defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4) || defined(__KERNEL_METAL__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
     throughput *= INTEGRATOR_STATE(state, path, unguided_throughput);
   }
