@@ -9,6 +9,7 @@
 #  include "device/kernel.h"
 
 #  include <Metal/Metal.h>
+#  include <memory>
 
 CCL_NAMESPACE_BEGIN
 
@@ -47,17 +48,27 @@ enum MetalPipelineType {
    */
   PSO_SPECIALIZED_SHADE,
 
+  /* Scene-specialized light-cache kernels keep cold compilation bounded on small-memory GPUs. */
+  PSO_SPECIALIZED_LIGHT_CACHE,
+
+  /* Specialize only node usage; preparation runs before final KernelData is uploaded. */
+  PSO_SPECIALIZED_EVAL,
+
   PSO_NUM
 };
 
 #  define METALRT_FEATURE_MASK \
     (KERNEL_FEATURE_HAIR | KERNEL_FEATURE_HAIR_THICK | KERNEL_FEATURE_POINTCLOUD)
 
+#  define METAL_TRANSPORT_FEATURE_MASK \
+    (KERNEL_FEATURE_BDPT | KERNEL_FEATURE_PHOTON_MAPPING | KERNEL_FEATURE_PATH_GUIDING)
+
 const char *kernel_type_as_string(MetalPipelineType pso_type);
 
 /* A pipeline object that can be shared between multiple instances of MetalDeviceQueue. */
 class MetalKernelPipeline {
  public:
+  ~MetalKernelPipeline();
   void compile();
 
   int pipeline_id;
@@ -121,7 +132,8 @@ int num_incomplete_specialization_requests();
 int get_loaded_kernel_count(const MetalDevice *device, MetalPipelineType pso_type);
 bool should_load_kernels(const MetalDevice *device, MetalPipelineType pso_type);
 bool load(MetalDevice *device, MetalPipelineType pso_type);
-const MetalKernelPipeline *get_best_pipeline(const MetalDevice *device, DeviceKernel kernel);
+std::shared_ptr<const MetalKernelPipeline> get_best_pipeline(const MetalDevice *device,
+                                                           DeviceKernel kernel);
 void wait_for_all();
 bool is_benchmark_warmup();
 
