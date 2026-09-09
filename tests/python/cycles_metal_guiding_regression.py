@@ -23,11 +23,15 @@ import OpenImageIO as oiio
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--scene", choices=("indirect", "volume"), default="indirect")
+    parser.add_argument("--bdpt", action="store_true")
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
     args.output.mkdir(parents=True, exist_ok=True)
     scene_script = pathlib.Path(__file__).with_name("cycles_metal_guiding_scene.py")
     sys.argv = [str(scene_script), "--", "--build-only", "--resolution", "32", "--samples", "32",
-                "--output", str(args.output / "scene")]
+                "--scene", args.scene, "--output", str(args.output / "scene")]
+    if args.bdpt:
+        sys.argv.append("--bdpt")
     runpy.run_path(str(scene_script), run_name="__main__")
     scene = bpy.context.scene
     scene.render.use_persistent_data = True

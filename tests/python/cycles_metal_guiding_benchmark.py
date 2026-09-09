@@ -36,10 +36,17 @@ def scene_digest(path):
     return hashlib.sha256((digest(path) + digest(base)).encode()).hexdigest()
 
 
-def kernel_source_digest(blender):
+def kernel_source_digest(blender, source_override=None):
     # Metal kernels are compiled from installed source, independently of the executable.
     # Preserve that provenance as well as the binary hash when testing an installed macOS app.
-    roots = sorted((blender.parents[1] / 'Resources').glob('*/scripts/addons_core/cycles/source'))
+    override = source_override or os.environ.get("CYCLES_KERNEL_PATH")
+    if override:
+        root = pathlib.Path(override).resolve()
+        if not (root / "kernel" / "types.h").is_file():
+            raise ValueError("Invalid Cycles kernel source override: " + str(root))
+        roots = [root]
+    else:
+        roots = sorted((blender.parents[1] / 'Resources').glob('*/scripts/addons_core/cycles/source'))
     if not roots:
         return None
     result = hashlib.sha256()
@@ -77,11 +84,14 @@ def run_render(args, scene, integrator, guiding, samples, seed, name, time_limit
     prefix = args.output / name
     warmup = device == "GPU" and not getattr(args, "quality_only", False) if warmup is None else warmup
     if not hasattr(args, 'kernel_digest'):
-        args.kernel_digest = kernel_source_digest(args.blender)
+        args.kernel_digest = kernel_source_digest(args.blender, getattr(args, "kernel_source", None))
     config = dict(scene=scene, integrator=integrator, guiding=guiding, samples=samples, device=device,
                   seed=seed, resolution=args.resolution, training_samples=args.training_samples,
                   memory_mb=args.memory_mb, time_limit=time_limit, binary_sha256=args.binary_digest,
                   script_sha256=args.script_digest, kernel_sources_sha256=args.kernel_digest, warmup=warmup)
+    domain = getattr(args, "metal_guiding_domain", "all") if device == "GPU" else "all"
+    if domain != "all":
+        config["metal_guiding_domain"] = domain
     stamp = prefix.with_suffix(".config.json")
     if args.resume and stamp.exists() and prefix.with_suffix(".npy").exists():
         if json.loads(stamp.read_text()) == config:
@@ -102,9 +112,13 @@ def run_render(args, scene, integrator, guiding, samples, seed, name, time_limit
         command.append("--bdpt")
     if guiding:
         command.append("--guiding")
+    if domain != "all":
+        command.append("--" + domain + "-only")
     if seed == args.seeds[0]:
         command.append("--save-scene")
     env = dict(os.environ)
+    if getattr(args, "kernel_source", None):
+        env["CYCLES_KERNEL_PATH"] = str(args.kernel_source)
     env["BLENDER_USER_RESOURCES"] = str(args.output / "blender-user")
     if integrator == "bdpt":
         command[1:1] = ["--log-level", "debug"]
@@ -125,9 +139,26 @@ def run_render(args, scene, integrator, guiding, samples, seed, name, time_limit
         metrics["bdpt_cache_capacities"] = [int(value) for value in
             re.findall(r"BDPT light cache: (\d+) vertices", render_log)]
         metrics["bdpt_light_batches"] = [dict(sample=int(sample), emitted=int(emitted),
-            cached=int(cached), sensor_shadows=int(shadows)) for sample, emitted, cached, shadows in
-            re.findall(r"BDPT diagnostics: sample=(\d+) emitted=(\d+) cached=(\d+) sensor_shadows=(\d+)",
-                       render_log)]
+            camera_samples=int(camera_samples) if camera_samples else None,
+            cached=int(cached), sensor_shadows=int(shadows))
+            for sample, emitted, camera_samples, cached, shadows in
+            re.findall(r"BDPT diagnostics: sample=(\d+) emitted=(\d+) "
+                       r"(?:camera_samples=(\d+) )?cached=(\d+) sensor_shadows=(\d+)", render_log)]
+        batches = metrics["bdpt_light_batches"]
+        # Warmup and measured renders both start at sample zero. Only account for
+        # the final render, retaining all raw batches above for provenance.
+        starts = [i for i, batch in enumerate(batches) if batch["sample"] == 0]
+        measured = batches[starts[-1]:] if starts else []
+        if measured and all(batch["camera_samples"] is not None for batch in measured):
+            expected = 0
+            for batch in measured:
+                if batch["sample"] != expected or batch["camera_samples"] <= 0:
+                    raise RuntimeError(f"{name}: noncontiguous BDPT camera-sample coverage")
+                expected += batch["camera_samples"]
+            if expected != metrics["rendered_samples"]:
+                raise RuntimeError(f"{name}: BDPT batch coverage differs from rendered samples")
+            metrics["bdpt_camera_samples_verified"] = expected
+            metrics["bdpt_emitted_light_paths"] = sum(batch["emitted"] for batch in measured)
     prefix.with_suffix(".json").write_text(json.dumps(metrics, indent=2) + "\n")
     if time_limit == 0 and metrics["rendered_samples"] != samples:
         raise RuntimeError(f"{name}: requested {samples} samples, observed {metrics['rendered_samples']}")
@@ -235,9 +266,13 @@ def summarize(images, times, reference, regions=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--blender", type=pathlib.Path, required=True)
+    parser.add_argument("--kernel-source", type=pathlib.Path,
+                        help="Explicit Metal kernel source override; hash the actual tested source")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--scenes", nargs="+", choices=("indirect", "glossy", "mixed", "volume", "aperture",
-                                                               "rough_glass", "coated", "transmission", "subsurface"),
+                                                               "rough_glass", "coated", "transmission", "subsurface",
+                                                               "volume_dense", "volume_heterogeneous", "volume_backward",
+                                                               "volume_mesh", "volume_null_mesh", "volume_world"),
                         default=["indirect", "glossy", "mixed", "volume"])
     parser.add_argument("--scene-script", type=pathlib.Path,
                         default=pathlib.Path(__file__).with_name("cycles_metal_guiding_scene.py"))
@@ -260,6 +295,8 @@ def main():
     parser.add_argument("--resolution", type=int, default=96)
     parser.add_argument("--training-samples", type=int, default=128)
     parser.add_argument("--memory-mb", type=int, default=64)
+    parser.add_argument("--metal-guiding-domain", choices=("all", "surface", "volume"), default="all",
+                        help="Isolate Metal surface/volume guiding; CPU controls retain full guiding")
     parser.add_argument("--time-budget", type=float, default=0.0,
                         help="Also compare images at this equal Cycles render-time budget")
     parser.add_argument("--timeout", type=int, default=1800)
@@ -268,6 +305,8 @@ def main():
     if args.quality_only and args.time_budget:
         parser.error("--quality-only cannot be combined with a render-time budget")
     args.blender = args.blender.resolve()
+    if args.kernel_source:
+        args.kernel_source = args.kernel_source.resolve()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     args.scene_script = args.scene_script.resolve()
@@ -277,6 +316,7 @@ def main():
                   comparison_protocol="equal_camera_samples",
                   samples_per_pixel=args.samples, seeds=args.seeds,
                   training_samples=args.training_samples,
+                  metal_guiding_domain=args.metal_guiding_domain,
                   timing_comparisons_valid=not args.quality_only,
                   work_accounting="BDPT also traces light subpaths; equal SPP is not equal ray count.",
                   cases={})
