@@ -962,6 +962,11 @@ void MetalKernelPipeline::compile()
       while (ShaderCache::running && !compilation_finished) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
+      /* Shutdown can stop this wait before the callback provides a result. Do not
+       * read its unfinished error string or report cancellation as compilation failure. */
+      if (!ShaderCache::running) {
+        return;
+      }
     }
 
     compilation_error = error_str;
@@ -991,6 +996,9 @@ void MetalKernelPipeline::compile()
   double starttime = time_dt();
 
   do_compilation();
+  if (!ShaderCache::running) {
+    return;
+  }
 
   /* An archive might have a corrupt entry and fail to materialize the pipeline. This shouldn't
    * happen, but if it does we recreate it. */
@@ -1000,6 +1008,9 @@ void MetalKernelPipeline::compile()
     path_remove(metalbin_path);
 
     do_compilation();
+    if (!ShaderCache::running) {
+      return;
+    }
   }
 
   double duration = time_dt() - starttime;
