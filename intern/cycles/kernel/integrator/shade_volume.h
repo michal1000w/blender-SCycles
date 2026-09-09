@@ -3006,6 +3006,26 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
     unguided_phase_pdf = phase_pdf;
   }
 
+  /* Preserve the direct-volume MIS partition before replacing the camera ray.
+   * The emitter-hit continuation is a third strategy alongside volume NEE and
+   * light tracing. Its recursive terms must use the actual scattering point,
+   * not the end of the integrated volume segment. */
+#  ifdef __KERNEL_METAL__
+  if (bdpt_enabled_for_surface_path(state) && INTEGRATOR_STATE(state, path, bounce) == 0) {
+    const float previous_length = sd->ray_length;
+    sd->ray_length = len(sd->P - ray->P);
+    BDPTMISWeight d_vcm;
+    BDPTMISWeight d_vc;
+    bdpt_recursive_mis_before_measure_conversion(kg, state, sd, &d_vcm, &d_vc);
+    d_vcm *= sqr(max(sd->ray_length, 1.0e-10f));
+    sd->ray_length = previous_length;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
+    /* The primary camera has no preceding scattering strategy. */
+    bdpt_recursive_mis_after_scatter(state, label, 1.0f, phase_pdf, 0.0f);
+  }
+#  endif
+
   /* Setup ray. */
   INTEGRATOR_STATE_WRITE(state, ray, P) = sd->P;
   INTEGRATOR_STATE_WRITE(state, ray, D) = normalize(phase_wo);

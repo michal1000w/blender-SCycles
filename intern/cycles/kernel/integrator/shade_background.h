@@ -150,7 +150,7 @@ ccl_device_inline ShaderEvalResult integrate_background(
     /* Background MIS weights. */
     float mis_weight;
 #ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_surface_path(state) && kernel_data.background.use_mis) {
+    if (bdpt_enabled_for_emission(state) && kernel_data.background.use_mis) {
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float3 ray_D = INTEGRATOR_STATE(state, ray, D);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights *
@@ -254,7 +254,7 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
     /* MIS weighting. */
     float mis_weight;
 #ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_surface_path(state)) {
+    if (bdpt_enabled_for_emission(state)) {
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights * light_eval.pdf;
       mis_weight = bdpt_emission_mis_weight_infinite(

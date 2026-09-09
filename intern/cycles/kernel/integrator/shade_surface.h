@@ -153,7 +153,7 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
 
   float mis_weight;
 #ifdef __KERNEL_METAL__
-  mis_weight = bdpt_enabled_for_surface_path(state) ?
+  mis_weight = bdpt_enabled_for_emission(state) ?
                    bdpt_emission_mis_weight_surface(kg, state, sd) :
                    light_sample_mis_weight_forward_surface(
                        kg, state, path_visibility, path_flag, sd);
@@ -921,7 +921,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   if (label & LABEL_TRANSPARENT) {
 #ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_surface_path(state)) {
+    if (bdpt_enabled_for_emission(state)) {
       bdpt_recursive_mis_undo_transparent_hit(state, sd);
     }
 #endif
@@ -1166,7 +1166,10 @@ ccl_device int integrate_surface(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
 #ifdef __KERNEL_METAL__
-  const bool staged_bdpt = bdpt_enabled_for_surface_path(state);
+  /* Primary-volume emitter MIS also mutates the recurrence at a surface hit.
+   * Include that continuation in the retry stages so a later shader cache miss
+   * cannot repeat its measure conversion or film writes. */
+  const bool staged_bdpt = bdpt_enabled_for_emission(state);
   const uint surface_stage = staged_bdpt ? INTEGRATOR_STATE(state, path, bdpt_surface_stage) : 0;
 #else
   const uint surface_stage = 0;
@@ -1233,7 +1236,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
 
       if (surface_stage == 0) {
 #ifdef __KERNEL_METAL__
-      if (bdpt_enabled_for_surface_path(state)) {
+      if (bdpt_enabled_for_emission(state)) {
         bdpt_recursive_mis_after_hit(kg, state, &sd);
       }
 #endif

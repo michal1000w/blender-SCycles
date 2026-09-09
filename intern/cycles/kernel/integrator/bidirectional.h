@@ -49,6 +49,23 @@ ccl_device_inline bool bdpt_enabled_for_surface_path(ConstIntegratorState state)
                         PATH_RAY_BDPT_UNSUPPORTED));
 }
 
+/* The first camera-volume scatter competes with NEE and a light-to-sensor
+ * connection even though later camera connections use the unsupported-path
+ * fallback. Preserve that partition when its continuation hits an emitter.
+ * Additional real events are deliberately not covered by this predicate. */
+ccl_device_inline bool bdpt_enabled_for_emission(ConstIntegratorState state)
+{
+  if (bdpt_enabled_for_surface_path(state)) {
+    return true;
+  }
+  const uint32_t flag = INTEGRATOR_STATE(state, path, flag);
+  return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_camera_supported() &&
+         !(flag & (PATH_RAY_SHADOW_CATCHER_HIT | PATH_RAY_SHADOW_CATCHER_PASS)) &&
+         (flag & PATH_RAY_BDPT_UNSUPPORTED) &&
+         INTEGRATOR_STATE(state, path, bounce) == 1 &&
+         INTEGRATOR_STATE(state, path, volume_bounce) == 1;
+}
+
 ccl_device_inline float bdpt_safe_pdf(const float pdf)
 {
   return max(pdf, 1.0e-20f);
@@ -1604,6 +1621,17 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
 #ifdef __RAY_DIFFERENTIALS__
   shadow_ray.dP = differential_zero_compact();
   shadow_ray.dD = differential_zero_compact();
+#endif
+
+#ifdef __VOLUME__
+  if (!volume_vertex && kernel_data.integrator.use_volumes) {
+    /* Dedicated sensor work reuses path storage and does not inherit the cached
+     * light path's medium stack. A surface can itself lie inside another object's
+     * volume. Reconstruct at the outgoing, offset shadow origin so interfaces
+     * select the correct side as well; never copy an unrelated path's stack. */
+    integrator_state_write_ray(state, &shadow_ray);
+    integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_CAMERA);
+  }
 #endif
 
   IntegratorShadowState shadow_state = integrator_shadow_path_init(
