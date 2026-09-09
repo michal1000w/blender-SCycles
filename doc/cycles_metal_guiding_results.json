@@ -1,295 +1,696 @@
 {
-  "scope": "Equal4096SPP, CPUguided high-SPP primary references. BDPT16777216 auxiliary light paths. No warmed runtime acceptance.",
-  "scenes": {
-    "rough_glass": {
-      "records": {
-        "candidate_pt_101": {
-          "mse": 0.0018452214823403113,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0005353337609198125,
-              "relative_mean_error": -0.0018807376610102677
-            },
-            "Tall block": {
-              "mse": 0.00027082009330276884,
-              "relative_mean_error": 0.00012981717541937776
-            }
-          }
-        },
-        "candidate_bdpt_101": {
-          "mse": 0.001422260483596717,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0002989653861205912,
-              "relative_mean_error": 0.0020959861043938766
-            },
-            "Tall block": {
-              "mse": 0.0001430375101151134,
-              "relative_mean_error": 0.00798499369710548
-            }
-          }
-        },
-        "baseline_pt_101": {
-          "mse": 0.002038929684770338,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.000614469185667492,
-              "relative_mean_error": -0.0006702168146314191
-            },
-            "Tall block": {
-              "mse": 0.00026139547214931475,
-              "relative_mean_error": -0.003901398331221384
-            }
-          }
-        },
-        "baseline_bdpt_101": {
-          "mse": 0.0015455919379385626,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.00035017978860970824,
-              "relative_mean_error": 0.0005287280095775948
-            },
-            "Tall block": {
-              "mse": 0.00013207514381485886,
-              "relative_mean_error": 0.004757843424127772
-            }
-          }
-        },
-        "cpu_guided_101": {
-          "mse": 0.0015098150971995013,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0004154561147887161,
-              "relative_mean_error": 0.0004926848985498111
-            },
-            "Tall block": {
-              "mse": 0.00019436177978163062,
-              "relative_mean_error": 0.0015492026423638006
-            }
-          }
-        },
-        "candidate_pt_211": {
-          "mse": 0.0019863278854647336,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0006396265436815409,
-              "relative_mean_error": 0.0018876570186390218
-            },
-            "Tall block": {
-              "mse": 0.00030189018832314985,
-              "relative_mean_error": -0.0002939786906070996
-            }
-          }
-        },
-        "candidate_bdpt_211": {
-          "mse": 0.0014047958634251041,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.00030934429568455933,
-              "relative_mean_error": 0.0017641416438021196
-            },
-            "Tall block": {
-              "mse": 0.00013413186048274263,
-              "relative_mean_error": 0.00787324365960651
-            }
-          }
-        },
-        "baseline_pt_211": {
-          "mse": 0.0021975182255514797,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0006193927413109634,
-              "relative_mean_error": -0.00130041921357138
-            },
-            "Tall block": {
-              "mse": 0.00028794851247519753,
-              "relative_mean_error": -0.0018690750428178582
-            }
-          }
-        },
-        "baseline_bdpt_211": {
-          "mse": 0.0014920707966947818,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.00032064864327306474,
-              "relative_mean_error": 0.0018973367065902025
-            },
-            "Tall block": {
-              "mse": 0.00015682219262000278,
-              "relative_mean_error": 0.006856040887213588
-            }
-          }
-        },
-        "cpu_guided_211": {
-          "mse": 0.0014487208640366772,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.00038679768453765646,
-              "relative_mean_error": 0.0002066629402093234
-            },
-            "Tall block": {
-              "mse": 0.00018262143725903855,
-              "relative_mean_error": -0.001727396233899836
-            }
-          }
-        }
-      },
-      "mean_mse": {
-        "candidate_pt": 0.0019157746839025226,
-        "candidate_bdpt": 0.0014135281735109106,
-        "baseline_pt": 0.002118223955160909,
-        "baseline_bdpt": 0.0015188313673166723,
-        "cpu_guided": 0.0014792679806180892
-      },
-      "pt_ratio_to_metal": 0.90442499209532,
-      "pt_ratio_to_cpu": 1.2950829119562541,
-      "bdpt_ratio_to_metal": 0.9306682782093173,
-      "bdpt_ratio_to_cpu": 0.9555592306677859
+  "acceptance": "User accepted current best results on2026-09-09; CPU parity is not claimed.",
+  "refinement_rounds": 4,
+  "heldout_512": {
+    "scope": "Equal camera samples, CPU-guided high-SPP primary reference. Instrumented runtime is separate. Multiple seeds do not prove unbiasedness.",
+    "manifest": {
+      "samples": 512,
+      "seeds": [
+        401,
+        503
+      ],
+      "mis_exponent": 2,
+      "references": "/Users/michal/Documents/CppApps/blender-SCycles/build/metal-guiding-tests/cache-order-material-bdpt",
+      "blender": "/Users/michal/Documents/CppApps/blender-SCycles/install/Blender.app/Contents/MacOS/Blender",
+      "installed_mis_header_sha256": "2defc4f8abd6a68f6c13b1d32406ac52afcbbad0dd0a2b2c44d8cec501b3eb59",
+      "light_paths_per_four_camera_samples": 16384,
+      "training_samples": 128,
+      "resolution": 256,
+      "memory_mb": 256,
+      "cpu_training_limit_unit": "field updates",
+      "metal_training_limit_unit": "camera samples"
     },
-    "transmission": {
-      "records": {
-        "candidate_pt_101": {
-          "mse": 0.002118410207984095,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.001692730560090153,
-              "relative_mean_error": 0.00018423470669604036
+    "scenes": {
+      "rough_glass": {
+        "reference_metadata": {
+          "device": "CPU",
+          "guiding": true,
+          "samples_per_seed": 8192,
+          "seeds": [
+            991,
+            1993
+          ],
+          "signal_standard_error": 3.4138808325256953e-06
+        },
+        "images": {
+          "rough_glass_cpu_guided_401": {
+            "mse": 0.011795100610000464,
+            "relative_mean_error": 7.936370666605796e-05,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.003244654626095742,
+                "relative_mean_error": 0.0006201927903242144
+              },
+              "Tall block": {
+                "mse": 0.0014163934836674919,
+                "relative_mean_error": -0.004000797620812957
+              }
             },
-            "Tall block": {
-              "mse": 0.0006869890972117949,
-              "relative_mean_error": -0.0017412520266448794
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "rough_glass_cpu_guided_503": {
+            "mse": 0.011978380144429458,
+            "relative_mean_error": -0.0007840983848231842,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0030728114599310337,
+                "relative_mean_error": -0.005458414415539958
+              },
+              "Tall block": {
+                "mse": 0.00147234817534712,
+                "relative_mean_error": 0.000923434214024077
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "rough_glass_metal_pt_401": {
+            "mse": 0.01130047040391387,
+            "relative_mean_error": -0.0006156630806535279,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0034224502684251893,
+                "relative_mean_error": -0.0017641623407270712
+              },
+              "Tall block": {
+                "mse": 0.0015231315952240376,
+                "relative_mean_error": 0.003728681455362315
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "rough_glass_metal_pt_503": {
+            "mse": 0.012032820064078,
+            "relative_mean_error": -0.000247859150605545,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.003305444113023765,
+                "relative_mean_error": -0.002825707144963996
+              },
+              "Tall block": {
+                "mse": 0.0012741671401906441,
+                "relative_mean_error": -0.007097808403988992
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "rough_glass_metal_bdpt_401": {
+            "mse": 0.009404882511473627,
+            "relative_mean_error": 0.0009657159893352585,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0017408811723010674,
+                "relative_mean_error": -0.00031435820905811873
+              },
+              "Tall block": {
+                "mse": 0.0007917236071128132,
+                "relative_mean_error": 0.013660615416244637
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 2097152
+            }
+          },
+          "rough_glass_metal_bdpt_503": {
+            "mse": 0.00865208871509863,
+            "relative_mean_error": -0.0003385045413192289,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0016943062062072527,
+                "relative_mean_error": 0.0017276145052183
+              },
+              "Tall block": {
+                "mse": 0.0008092926056867196,
+                "relative_mean_error": 0.007768889897563636
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 2097152
             }
           }
         },
-        "candidate_bdpt_101": {
-          "mse": 0.0015044296160201854,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0013255450621080366,
-              "relative_mean_error": 0.000870587589118843
-            },
-            "Tall block": {
-              "mse": 0.0005142767610044487,
-              "relative_mean_error": 0.009991741555970046
-            }
-          }
-        },
-        "baseline_pt_101": {
-          "mse": 0.002191219207662546,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0015761905740324007,
-              "relative_mean_error": -0.0027358374059216484
-            },
-            "Tall block": {
-              "mse": 0.0006525480636850019,
-              "relative_mean_error": -0.002411061001272863
-            }
-          }
-        },
-        "baseline_bdpt_101": {
-          "mse": 0.001689149051957623,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0013160447008228326,
-              "relative_mean_error": 0.0018103331836918368
-            },
-            "Tall block": {
-              "mse": 0.0005549261464149049,
-              "relative_mean_error": 0.008637760215433943
-            }
-          }
-        },
-        "cpu_guided_101": {
-          "mse": 0.001573216773348576,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.00111556783854345,
-              "relative_mean_error": -0.0033506092831182555
-            },
-            "Tall block": {
-              "mse": 0.0004575091413664004,
-              "relative_mean_error": -0.00036123026428702687
-            }
-          }
-        },
-        "candidate_pt_211": {
-          "mse": 0.0021069011170509605,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.001647771964452433,
-              "relative_mean_error": -0.0026750801493947707
-            },
-            "Tall block": {
-              "mse": 0.0006048764024615442,
-              "relative_mean_error": -0.001987920679605737
-            }
-          }
-        },
-        "candidate_bdpt_211": {
-          "mse": 0.0016154613392595411,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0015577120064310633,
-              "relative_mean_error": 0.0024085678487499873
-            },
-            "Tall block": {
-              "mse": 0.000487059839526718,
-              "relative_mean_error": 0.007920872368537779
-            }
-          }
-        },
-        "baseline_pt_211": {
-          "mse": 0.0022396327547072104,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0017853025048690182,
-              "relative_mean_error": -0.00051617168784035
-            },
-            "Tall block": {
-              "mse": 0.0007484937388908852,
-              "relative_mean_error": -0.003346930374948265
-            }
-          }
-        },
-        "baseline_bdpt_211": {
-          "mse": 0.0016511425835046064,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.0013272000826774885,
-              "relative_mean_error": 0.0011781076901191678
-            },
-            "Tall block": {
-              "mse": 0.0005202223761543721,
-              "relative_mean_error": 0.006657823111967387
-            }
-          }
-        },
-        "cpu_guided_211": {
-          "mse": 0.001497978071238264,
-          "regions": {
-            "Guiding test sphere": {
-              "mse": 0.001161984269080367,
-              "relative_mean_error": -0.001438791461663702
-            },
-            "Tall block": {
-              "mse": 0.00046123854658322117,
-              "relative_mean_error": 0.0017579140492485212
-            }
+        "summary": {
+          "cpu_guided": {
+            "mean_mse": 0.01188674037721496,
+            "mse_sample_stddev": 0.00012959820164745487,
+            "per_seed_mse": [
+              0.011795100610000464,
+              0.011978380144429458
+            ],
+            "ratio_to_cpu_guided": 1.0
+          },
+          "metal_pt": {
+            "mean_mse": 0.011666645233995934,
+            "mse_sample_stddev": 0.00051784941090172,
+            "per_seed_mse": [
+              0.01130047040391387,
+              0.012032820064078
+            ],
+            "ratio_to_cpu_guided": 0.9814839782619535
+          },
+          "metal_bdpt": {
+            "mean_mse": 0.00902848561328613,
+            "mse_sample_stddev": 0.0005323055982519255,
+            "per_seed_mse": [
+              0.009404882511473627,
+              0.00865208871509863
+            ],
+            "ratio_to_cpu_guided": 0.7595425934087311
           }
         }
       },
-      "mean_mse": {
-        "candidate_pt": 0.0021126556625175276,
-        "candidate_bdpt": 0.0015599454776398633,
-        "baseline_pt": 0.002215425981184878,
-        "baseline_bdpt": 0.0016701458177311146,
-        "cpu_guided": 0.00153559742229342
+      "transmission": {
+        "reference_metadata": {
+          "device": "CPU",
+          "guiding": true,
+          "samples_per_seed": 8192,
+          "seeds": [
+            991,
+            1993
+          ],
+          "signal_standard_error": 0.00011327259769328134
+        },
+        "images": {
+          "transmission_cpu_guided_401": {
+            "mse": 0.012560914868021543,
+            "relative_mean_error": 0.0010000876780549284,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.007777847861358158,
+                "relative_mean_error": -0.00038925526906785635
+              },
+              "Tall block": {
+                "mse": 0.0036719457020927926,
+                "relative_mean_error": 0.005249974617965281
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "transmission_cpu_guided_503": {
+            "mse": 0.011802500304932373,
+            "relative_mean_error": -0.0006937959080715039,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.008016503842928695,
+                "relative_mean_error": 8.927124295854405e-05
+              },
+              "Tall block": {
+                "mse": 0.003276556883304933,
+                "relative_mean_error": -0.0034764181185485965
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "transmission_metal_pt_401": {
+            "mse": 0.012301758053952274,
+            "relative_mean_error": 0.0004582245554840547,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.010556275491106954,
+                "relative_mean_error": 0.005581183951160584
+              },
+              "Tall block": {
+                "mse": 0.0035172203837764773,
+                "relative_mean_error": 0.004509431667003794
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "transmission_metal_pt_503": {
+            "mse": 0.013843125392487778,
+            "relative_mean_error": -0.0009518280890167263,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.011602064678022668,
+                "relative_mean_error": -0.004392554546793104
+              },
+              "Tall block": {
+                "mse": 0.003803110707631718,
+                "relative_mean_error": -0.00012483287088316253
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 0
+            }
+          },
+          "transmission_metal_bdpt_401": {
+            "mse": 0.01010744812443306,
+            "relative_mean_error": 0.0005700753890414134,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.007683777903311706,
+                "relative_mean_error": 0.000753946930402094
+              },
+              "Tall block": {
+                "mse": 0.0027185243408872845,
+                "relative_mean_error": 0.004291896059493316
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 2097152
+            }
+          },
+          "transmission_metal_bdpt_503": {
+            "mse": 0.009369596309932653,
+            "relative_mean_error": -4.217667175221429e-05,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.007268918125568176,
+                "relative_mean_error": 0.0035511842922968384
+              },
+              "Tall block": {
+                "mse": 0.002598962457890142,
+                "relative_mean_error": 0.009386231743855111
+              }
+            },
+            "work": {
+              "valid": true,
+              "returncode": 0,
+              "actual_spp": 512,
+              "emitted_light_paths": 2097152
+            }
+          }
+        },
+        "summary": {
+          "cpu_guided": {
+            "mean_mse": 0.012181707586476957,
+            "mse_sample_stddev": 0.0005362800805109846,
+            "per_seed_mse": [
+              0.012560914868021543,
+              0.011802500304932373
+            ],
+            "ratio_to_cpu_guided": 1.0
+          },
+          "metal_pt": {
+            "mean_mse": 0.013072441723220026,
+            "mse_sample_stddev": 0.0010899112973779153,
+            "per_seed_mse": [
+              0.012301758053952274,
+              0.013843125392487778
+            ],
+            "ratio_to_cpu_guided": 1.0731206302909357
+          },
+          "metal_bdpt": {
+            "mean_mse": 0.009738522217182858,
+            "mse_sample_stddev": 0.0005217400215440368,
+            "per_seed_mse": [
+              0.01010744812443306,
+              0.009369596309932653
+            ],
+            "ratio_to_cpu_guided": 0.7994381861532857
+          }
+        }
+      }
+    },
+    "raw_evidence": "build/metal-guiding-tests/refinement-four-heldout"
+  },
+  "materials_4096": {
+    "scope": "Equal4096SPP, CPUguided high-SPP primary references. BDPT16777216 auxiliary light paths. No warmed runtime acceptance.",
+    "scenes": {
+      "rough_glass": {
+        "records": {
+          "candidate_pt_101": {
+            "mse": 0.0017190628630399031,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0005072659122865893,
+                "relative_mean_error": -0.0008905193810591072
+              },
+              "Tall block": {
+                "mse": 0.000220599347849219,
+                "relative_mean_error": -0.00015485423782413132
+              }
+            }
+          },
+          "candidate_bdpt_101": {
+            "mse": 0.001436183932745301,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0003045816068857749,
+                "relative_mean_error": 0.0024226546552477135
+              },
+              "Tall block": {
+                "mse": 0.00013944953059337635,
+                "relative_mean_error": 0.007583945684691784
+              }
+            }
+          },
+          "baseline_pt_101": {
+            "mse": 0.0018452214823403113,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0005353337609198125,
+                "relative_mean_error": -0.0018807376610102677
+              },
+              "Tall block": {
+                "mse": 0.00027082009330276884,
+                "relative_mean_error": 0.00012981717541937776
+              }
+            }
+          },
+          "baseline_bdpt_101": {
+            "mse": 0.001422260483596717,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0002989653861205912,
+                "relative_mean_error": 0.0020959861043938766
+              },
+              "Tall block": {
+                "mse": 0.0001430375101151134,
+                "relative_mean_error": 0.00798499369710548
+              }
+            }
+          },
+          "cpu_guided_101": {
+            "mse": 0.0015098150971995013,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0004154561147887161,
+                "relative_mean_error": 0.0004926848985498111
+              },
+              "Tall block": {
+                "mse": 0.00019436177978163062,
+                "relative_mean_error": 0.0015492026423638006
+              }
+            }
+          },
+          "candidate_pt_211": {
+            "mse": 0.0017281966645784274,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.00047840747364245845,
+                "relative_mean_error": -0.0002859117055716842
+              },
+              "Tall block": {
+                "mse": 0.0002045920050292212,
+                "relative_mean_error": -0.001468417091179841
+              }
+            }
+          },
+          "candidate_bdpt_211": {
+            "mse": 0.001364243919853409,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0002941769176973163,
+                "relative_mean_error": 0.0022619616405998855
+              },
+              "Tall block": {
+                "mse": 0.00012744545750418182,
+                "relative_mean_error": 0.008471181214426915
+              }
+            }
+          },
+          "baseline_pt_211": {
+            "mse": 0.0019863278854647336,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0006396265436815409,
+                "relative_mean_error": 0.0018876570186390218
+              },
+              "Tall block": {
+                "mse": 0.00030189018832314985,
+                "relative_mean_error": -0.0002939786906070996
+              }
+            }
+          },
+          "baseline_bdpt_211": {
+            "mse": 0.0014047958634251041,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.00030934429568455933,
+                "relative_mean_error": 0.0017641416438021196
+              },
+              "Tall block": {
+                "mse": 0.00013413186048274263,
+                "relative_mean_error": 0.00787324365960651
+              }
+            }
+          },
+          "cpu_guided_211": {
+            "mse": 0.0014487208640366772,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.00038679768453765646,
+                "relative_mean_error": 0.0002066629402093234
+              },
+              "Tall block": {
+                "mse": 0.00018262143725903855,
+                "relative_mean_error": -0.001727396233899836
+              }
+            }
+          }
+        },
+        "mean_mse": {
+          "candidate_pt": 0.0017236297638091652,
+          "candidate_bdpt": 0.001400213926299355,
+          "baseline_pt": 0.0019157746839025226,
+          "baseline_bdpt": 0.0014135281735109106,
+          "cpu_guided": 0.0014792679806180892
+        },
+        "pt_ratio_to_metal": 0.8997038003958017,
+        "pt_ratio_to_cpu": 1.1651910177147031,
+        "bdpt_ratio_to_metal": 0.9905808405795791,
+        "bdpt_ratio_to_cpu": 0.9465586659384713
       },
-      "pt_ratio_to_metal": 0.9536114862152217,
-      "pt_ratio_to_cpu": 1.3757874504388456,
-      "bdpt_ratio_to_metal": 0.9340175337259127,
-      "bdpt_ratio_to_cpu": 1.0158557542445463
+      "transmission": {
+        "records": {
+          "candidate_pt_101": {
+            "mse": 0.0019055921494732016,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0014509501458745547,
+                "relative_mean_error": 0.0007966561795216265
+              },
+              "Tall block": {
+                "mse": 0.0005150715936327849,
+                "relative_mean_error": -0.0026051649540312916
+              }
+            }
+          },
+          "candidate_bdpt_101": {
+            "mse": 0.0015384619185530785,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.001982547445611839,
+                "relative_mean_error": 0.0025625677578244854
+              },
+              "Tall block": {
+                "mse": 0.0005110708122423569,
+                "relative_mean_error": 0.009508677994703785
+              }
+            }
+          },
+          "baseline_pt_101": {
+            "mse": 0.002118410207984095,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.001692730560090153,
+                "relative_mean_error": 0.00018423470669604036
+              },
+              "Tall block": {
+                "mse": 0.0006869890972117949,
+                "relative_mean_error": -0.0017412520266448794
+              }
+            }
+          },
+          "baseline_bdpt_101": {
+            "mse": 0.0015044296160201854,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0013255450621080366,
+                "relative_mean_error": 0.000870587589118843
+              },
+              "Tall block": {
+                "mse": 0.0005142767610044487,
+                "relative_mean_error": 0.009991741555970046
+              }
+            }
+          },
+          "cpu_guided_101": {
+            "mse": 0.001573216773348576,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.00111556783854345,
+                "relative_mean_error": -0.0033506092831182555
+              },
+              "Tall block": {
+                "mse": 0.0004575091413664004,
+                "relative_mean_error": -0.00036123026428702687
+              }
+            }
+          },
+          "candidate_pt_211": {
+            "mse": 0.0018391929034109876,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.001260600897244282,
+                "relative_mean_error": 4.764329636408604e-05
+              },
+              "Tall block": {
+                "mse": 0.0004920901099901569,
+                "relative_mean_error": 0.00025124733761083817
+              }
+            }
+          },
+          "candidate_bdpt_211": {
+            "mse": 0.0015488676698567985,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.001239786356336996,
+                "relative_mean_error": 0.002208039752992219
+              },
+              "Tall block": {
+                "mse": 0.0005442213356809373,
+                "relative_mean_error": 0.009931927636919191
+              }
+            }
+          },
+          "baseline_pt_211": {
+            "mse": 0.0021069011170509605,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.001647771964452433,
+                "relative_mean_error": -0.0026750801493947707
+              },
+              "Tall block": {
+                "mse": 0.0006048764024615442,
+                "relative_mean_error": -0.001987920679605737
+              }
+            }
+          },
+          "baseline_bdpt_211": {
+            "mse": 0.0016154613392595411,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.0015577120064310633,
+                "relative_mean_error": 0.0024085678487499873
+              },
+              "Tall block": {
+                "mse": 0.000487059839526718,
+                "relative_mean_error": 0.007920872368537779
+              }
+            }
+          },
+          "cpu_guided_211": {
+            "mse": 0.001497978071238264,
+            "regions": {
+              "Guiding test sphere": {
+                "mse": 0.001161984269080367,
+                "relative_mean_error": -0.001438791461663702
+              },
+              "Tall block": {
+                "mse": 0.00046123854658322117,
+                "relative_mean_error": 0.0017579140492485212
+              }
+            }
+          }
+        },
+        "mean_mse": {
+          "candidate_pt": 0.0018723925264420946,
+          "candidate_bdpt": 0.0015436647942049385,
+          "baseline_pt": 0.0021126556625175276,
+          "baseline_bdpt": 0.0015599454776398633,
+          "cpu_guided": 0.00153559742229342
+        },
+        "pt_ratio_to_metal": 0.8862743511220729,
+        "pt_ratio_to_cpu": 1.2193251299195789,
+        "bdpt_ratio_to_metal": 0.9895632996997069,
+        "bdpt_ratio_to_cpu": 1.0052535721891678
+      }
     }
+  },
+  "point_512": {
+    "scope": "Equal512SPP; equal2097152 auxiliary light paths for BDPT; original CPUguided8192 reference. Runtime excluded.",
+    "records": {
+      "candidate_101": {
+        "mse": 1.060294471526413e-06,
+        "relative_mean_error": 1.3179000335039603e-05
+      },
+      "metal_baseline_101": {
+        "mse": 1.1227358484460957e-06,
+        "relative_mean_error": -3.217049897052959e-05
+      },
+      "cpu_guided_101": {
+        "mse": 9.232944063459344e-07,
+        "relative_mean_error": -3.742860362665468e-05
+      },
+      "candidate_211": {
+        "mse": 1.090847925614324e-06,
+        "relative_mean_error": 0.00011759564111724075
+      },
+      "metal_baseline_211": {
+        "mse": 1.1825973311435152e-06,
+        "relative_mean_error": 3.466404336105455e-05
+      },
+      "cpu_guided_211": {
+        "mse": 9.983457891359094e-07,
+        "relative_mean_error": 2.308239960502334e-05
+      },
+      "candidate_307": {
+        "mse": 1.1344576555496049e-06,
+        "relative_mean_error": 8.104795683694377e-06
+      },
+      "metal_baseline_307": {
+        "mse": 1.1315820608162406e-06,
+        "relative_mean_error": -3.935551316025521e-05
+      },
+      "cpu_guided_307": {
+        "mse": 9.545369797613512e-07,
+        "relative_mean_error": -2.157682495462776e-05
+      }
+    },
+    "mean_mse": {
+      "candidate": 1.0952000175634475e-06,
+      "metal_baseline": 1.1456384134686174e-06,
+      "cpu_guided": 9.58725725081065e-07
+    },
+    "candidate_ratio_to_metal": 0.9559735468781472,
+    "candidate_ratio_to_cpu": 1.1423496719782322
   }
 }
