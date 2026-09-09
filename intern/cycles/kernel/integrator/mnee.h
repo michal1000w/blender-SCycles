@@ -4,11 +4,14 @@
 
 #pragma once
 
+#include "kernel/closure/bsdf_microfacet_manifold.h"
+
 #include "kernel/geom/motion_triangle.h"
 #include "kernel/geom/shader_data.h"
 #include "kernel/geom/triangle.h"
 
 #include "kernel/light/sample.h"
+#include "kernel/sample/manifold.h"
 
 /*
  * Manifold Next Event Estimation
@@ -180,20 +183,33 @@ ccl_device_inline void mnee_setup_manifold_vertex(KernelGlobals kg,
     vtx->ng = -vtx->ng;
   }
 
-  /* Shading normals: Interpolate normals between vertices. */
-  float n_len;
-  vtx->n = normalize_len(normals[0] * (1.0f - sd_vtx->u - sd_vtx->v) + normals[1] * sd_vtx->u +
-                             normals[2] * sd_vtx->v,
-                         &n_len);
+  float3 dn_du;
+  float3 dn_dv;
+  if (sd_vtx->shader & SHADER_SMOOTH_NORMAL) {
+    /* Shading normals: Interpolate normals between vertices. */
+    float n_len;
+    vtx->n = normalize_len(normals[0] * (1.0f - sd_vtx->u - sd_vtx->v) +
+                               normals[1] * sd_vtx->u + normals[2] * sd_vtx->v,
+                           &n_len);
 
-  /* Shading normal derivatives WRT barycentric (u, v)
-   * we calculate the derivative of n = |u*n0 + v*n1 + (1-u-v)*n2| using:
-   * d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)| - f(u)/|f(u)|^3 <f(u), d/du f(u)>. */
-  const float inv_n_len = 1.f / n_len;
-  float3 dn_du = inv_n_len * (normals[1] - normals[0]);
-  float3 dn_dv = inv_n_len * (normals[2] - normals[0]);
-  dn_du -= vtx->n * dot(vtx->n, dn_du);
-  dn_dv -= vtx->n * dot(vtx->n, dn_dv);
+    /* Shading normal derivatives WRT barycentric (u, v)
+     * we calculate the derivative of n = |u*n0 + v*n1 + (1-u-v)*n2| using:
+     * d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)| - f(u)/|f(u)|^3 <f(u), d/du f(u)>. */
+    const float inv_n_len = 1.f / n_len;
+    dn_du = inv_n_len * (normals[1] - normals[0]);
+    dn_dv = inv_n_len * (normals[2] - normals[0]);
+    dn_du -= vtx->n * dot(vtx->n, dn_du);
+    dn_dv -= vtx->n * dot(vtx->n, dn_dv);
+  }
+  else {
+    /* A flat triangle is still a differentiable planar manifold in its interior. Its shading
+     * normal is the geometric normal and its derivatives are exactly zero. This is essential for
+     * faceted optical elements such as prisms; requiring interpolated normals incorrectly removes
+     * all specular connections through them. Normal-mapped flat faces are rejected by the caller. */
+    vtx->n = vtx->ng;
+    dn_du = zero_float3();
+    dn_dv = zero_float3();
+  }
 
   /* Orthonormalize (dp_du,dp_dv) using a linear transformation, which
    * we use on (dn_du,dn_dv) as well so the new (u,v) are consistent. */
@@ -573,91 +589,6 @@ ccl_device_inline bool mnee_newton_solver(KernelGlobals kg,
   return false;
 }
 
-/* Sample bsdf in half-vector measure. */
-ccl_device_inline float2 mnee_sample_bsdf_dh(ClosureType type,
-                                             const float alpha_x,
-                                             const float alpha_y,
-                                             const float sample_u,
-                                             const float sample_v)
-{
-  float alpha2;
-  float cos_phi;
-  float sin_phi;
-
-  if (alpha_x == alpha_y) {
-    const float phi = sample_v * M_2PI_F;
-    fast_sincosf(phi, &sin_phi, &cos_phi);
-    alpha2 = alpha_x * alpha_x;
-  }
-  else {
-    float phi = atanf(alpha_y / alpha_x * tanf(M_2PI_F * sample_v + M_PI_2_F));
-    if (sample_v > .5f) {
-      phi += M_PI_F;
-    }
-    fast_sincosf(phi, &sin_phi, &cos_phi);
-    const float alpha_x2 = alpha_x * alpha_x;
-    const float alpha_y2 = alpha_y * alpha_y;
-    alpha2 = 1.f / (cos_phi * cos_phi / alpha_x2 + sin_phi * sin_phi / alpha_y2);
-  }
-
-  /* Map sampled angles to micro-normal direction h. */
-  float tan2_theta = alpha2;
-  if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID) {
-    tan2_theta *= -logf(1.0f - sample_u);
-  }
-  else { /* type == CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID assumed */
-    tan2_theta *= sample_u / (1.0f - sample_u);
-  }
-  const float cos2_theta = 1.0f / (1.0f + tan2_theta);
-  const float sin_theta = safe_sqrtf(1.0f - cos2_theta);
-  return make_float2(cos_phi * sin_theta, sin_phi * sin_theta);
-}
-
-/* Evaluate product term inside eq.6 at solution interface vi
- * divided by corresponding sampled pdf:
- * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h|
- * We assume here that the pdf (in half-vector measure) is the same as
- * the one calculation when sampling the microfacet normals from the
- * specular chain above: this allows us to simplify the bsdf weight */
-ccl_device_inline Spectrum mnee_eval_bsdf_contribution(KernelGlobals kg,
-                                                       ccl_private ShaderClosure *closure,
-                                                       const float3 wi,
-                                                       const float3 wo)
-{
-  ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)closure;
-
-  const float cosNI = dot(bsdf->N, wi);
-  const float cosNO = dot(bsdf->N, wo);
-
-  const float3 Ht = normalize(-(bsdf->ior * wo + wi));
-  const float cosHI = dot(Ht, wi);
-
-  const float alpha2 = bsdf->alpha_x * bsdf->alpha_y;
-  const float cosThetaM = dot(bsdf->N, Ht);
-
-  /* Now calculate G1(i, m) and G1(o, m). */
-  float G;
-  if (bsdf->type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID) {
-    G = bsdf_G<MicrofacetType::BECKMANN>(alpha2, cosNI, cosNO);
-  }
-  else { /* bsdf->type == CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID assumed */
-    G = bsdf_G<MicrofacetType::GGX>(alpha2, cosNI, cosNO);
-  }
-
-  const FresnelCoeff fresnel = microfacet_fresnel(kg, bsdf, cosHI, nullptr);
-
-  /*
-   * bsdf_do = (1 - F) * D_do * G * |h.wi| / (n.wi * n.wo)
-   *  pdf_dh = D_dh * cosThetaM
-   *    D_do = D_dh * |dh/do|
-   *
-   * contribution = bsdf_do * |do/dh| * |n.wo / n.h| / pdf_dh
-   *              = (1 - F) * G * |h.wi / (n.wi * n.h^2)|
-   */
-  /* TODO: energy compensation for multi-GGX. */
-  return bsdf->weight * fresnel.transmittance * G * fabsf(cosHI / (cosNI * sqr(cosThetaM)));
-}
-
 /* Compute transfer matrix determinant |T1| = |dx1/dxn| (and |dh/dx| in the process) */
 ccl_device_inline bool mnee_compute_transfer_matrix(const ccl_private ShaderData *sd,
                                                     const ccl_private LightSample *ls,
@@ -796,7 +727,9 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
                                                           const int vertex_count,
                                                           ccl_private ManifoldVertex *vertices,
                                                           ccl_private Spectrum *throughput,
-                                                          ccl_private float3 *r_receiver_wo)
+                                                          ccl_private float3 *r_receiver_wo,
+                                                          ccl_private float3 *r_light_wo,
+                                                          ccl_private float *r_light_distance)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -933,6 +866,13 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
     const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo);
     *throughput *= bsdf_contribution;
   }
+  if (r_light_wo != nullptr) {
+    /* Direction from the finite endpoint back toward the last manifold vertex. */
+    *r_light_wo = -wo;
+  }
+  if (r_light_distance != nullptr) {
+    *r_light_distance = wo_len;
+  }
 
   /* Restore original state path bounce info. */
   INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
@@ -951,7 +891,11 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                            ccl_private LightSample *ls,
                                                            ccl_private Spectrum *throughput,
                                                            ccl_private float3 *r_receiver_wo,
-                                                           ccl_private int &r_vertex_count)
+                                                           ccl_private int &r_vertex_count,
+                                                           ccl_private float3 *r_light_wo = nullptr,
+                                                           const bool consider_all_refractive = false,
+                                                           ccl_private float *r_light_distance = nullptr,
+                                                           const float wavelength_rand_override = -1.0f)
 {
   /*
    * 1. send seed ray from shading point to light sample position (or along sampled light
@@ -994,7 +938,7 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
     }
 
     const uint object_flags = intersection_get_object_flags(kg, &probe_isect);
-    if (object_flags & SD_OBJECT_CAUSTICS_CASTER) {
+    if (consider_all_refractive || (object_flags & SD_OBJECT_CAUSTICS_CASTER)) {
 
       /* Do we have enough slots. */
       if (vertex_count >= MNEE_MAX_CAUSTIC_CASTERS) {
@@ -1012,15 +956,13 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
       shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
 
 #ifdef __SPECTRAL__
-      shader_setup_wavelength(kg, sd_mnee, state);
-#endif
-
-      /* Reject caster if smooth normals are not available: Manifold exploration assumes local
-       * differential geometry can be created at any point on the surface which is not possible if
-       * normals are not smooth. */
-      if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL)) {
-        return SHADER_EVAL_EMPTY;
+      if (wavelength_rand_override >= 0.0f) {
+        sd_mnee->rand_wavelength = wavelength_rand_override;
       }
+      else {
+        shader_setup_wavelength(kg, sd_mnee, state);
+      }
+#endif
 
       /* Last bool argument is the MNEE flag (for TINY_MAX_CLOSURE cap in kernel_shader.h). */
       surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
@@ -1050,6 +992,14 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
         if (CLOSURE_IS_REFRACTION(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type)) {
           /* Note that Glass closures are treated as refractive further below. */
 
+          /* Flat faces have an exact zero normal derivative, but a bump/normal-mapped flat face
+           * does not. Do not silently use the geometric derivative for a perturbed closure. */
+          if (!(sd_mnee->shader & SHADER_SMOOTH_NORMAL) &&
+              dot(bsdf->N, sd_mnee->Ng) < 1.0f - 1.0e-5f)
+          {
+            return SHADER_EVAL_EMPTY;
+          }
+
           found_refractive_microfacet_bsdf = true;
           ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
 
@@ -1059,8 +1009,11 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
 
           float2 h = zero_float2();
           if (microfacet_bsdf->alpha_x > 0.f && microfacet_bsdf->alpha_y > 0.f) {
-            /* Sample transmissive microfacet bsdf. */
-            const float2 bsdf_uv = path_state_rng_2D(kg, rng_state, PRNG_SURFACE_BSDF);
+            /* Each interface contributes its own slope density to the path weight.
+             * Reusing the same dimensions would correlate those slopes and sample
+             * a lower-dimensional distribution than that product describes. */
+            const float2 bsdf_uv = path_state_rng_2D(
+                kg, rng_state, manifold_vertex_rng_dimension(uint(vertex_count - 1)));
             h = mnee_sample_bsdf_dh(bsdf->type,
                                     microfacet_bsdf->alpha_x,
                                     microfacet_bsdf->alpha_y,
@@ -1139,7 +1092,9 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                      vertex_count,
                                                      vertices,
                                                      throughput,
-                                                     r_receiver_wo);
+                                                     r_receiver_wo,
+                                                     r_light_wo,
+                                                     r_light_distance);
 
     /* TODO: Cache misses are not handled correctly.
      * - PATH_MNEE_VALID flag is not handled properly

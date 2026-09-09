@@ -1326,6 +1326,23 @@ struct SVMNodeTextureMapping {
 static_assert(alignof(SVMNodeTextureMapping) <= alignof(uint));
 static_assert(sizeof(SVMNodeTextureMapping) % sizeof(uint) == 0);
 
+/* Compiler-certified image displacement program. Stored outside the executable SVM stream;
+ * its original bytecode remains available to all regular shader and bake paths. */
+struct SVMDisplacementImage {
+  SVMNodeAttr attribute;
+  SVMNodeTexImage image;
+  SVMNodeTextureMapping mapping;
+  SVMNodeConvert convert;
+  SVMNodeGeometry geometry;
+  SVMNodeDisplacement displacement;
+  SVMNodeSetDisplacement output;
+  int use_mapping;
+  int use_derivatives;
+  int height_is_alpha;
+};
+static_assert(alignof(SVMDisplacementImage) <= alignof(uint));
+static_assert(sizeof(SVMDisplacementImage) % sizeof(uint) == 0);
+
 /* NODE_MIN_MAX */
 struct SVMNodeMinMax {
   SVMStackOffset vec_offset;

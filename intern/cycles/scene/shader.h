@@ -113,6 +113,8 @@ class Shader : public Node {
   bool has_surface_raytrace;
   bool has_volume;
   bool has_displacement;
+  bool has_compact_displacement = false;
+  int displacement_image_offset = -1;
   bool has_surface_bssrdf;
   bool has_bump_from_surface;
   bool has_bump_from_displacement;
@@ -202,6 +204,7 @@ class ShaderManager {
   /* device update */
   void device_update_pre(Device *device, DeviceScene *dscene, Scene *scene, Progress &progress);
   void device_update_post(Device *device, DeviceScene *dscene, Scene *scene, Progress &progress);
+  void device_update_displacement_bounds(DeviceScene *dscene, Scene *scene, Progress &progress);
   virtual void device_free(Device *device, DeviceScene *dscene, Scene *scene) = 0;
 
   /* get globally unique id for a type of attribute */

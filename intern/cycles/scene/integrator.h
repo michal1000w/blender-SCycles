@@ -41,6 +41,7 @@ class Integrator : public Node {
   NODE_DECLARE
 
   bool use_photon_mapping_on_device(const Device *device) const;
+  bool use_bidirectional_path_tracing_on_device(const Device *device) const;
 
   NODE_SOCKET_API(int, min_bounce)
   NODE_SOCKET_API(int, max_bounce)
@@ -73,6 +74,8 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, use_volume_guiding);
   NODE_SOCKET_API(float, volume_guiding_probability);
   NODE_SOCKET_API(int, guiding_training_samples);
+  NODE_SOCKET_API(int, guiding_gpu_memory_mb);
+  NODE_SOCKET_API(int, guiding_gpu_history_memory_mb);
   NODE_SOCKET_API(bool, use_guiding_direct_light);
   NODE_SOCKET_API(bool, use_guiding_mis_weights);
   NODE_SOCKET_API(GuidingDistributionType, guiding_distribution_type);
@@ -82,6 +85,12 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
   NODE_SOCKET_API(float, filter_glossy)
+
+  NODE_SOCKET_API(bool, use_bidirectional_path_tracing)
+  NODE_SOCKET_API(int, bdpt_light_paths)
+  NODE_SOCKET_API(int, bdpt_reference_pixels)
+  NODE_SOCKET_API(int, bdpt_max_bounces)
+  NODE_SOCKET_API(int, bdpt_update_samples)
 
   NODE_SOCKET_API(bool, use_photon_mapping)
   NODE_SOCKET_API(int, photon_count)
@@ -136,6 +145,7 @@ class Integrator : public Node {
   NODE_SOCKET_API(bool, use_pixel_displacement)
   NODE_SOCKET_API(float, pixel_displacement_scale)
   NODE_SOCKET_API(float, pixel_displacement_max_distance)
+  NODE_SOCKET_API(bool, use_pixel_displacement_resolution_clamp)
   NODE_SOCKET_API(int, pixel_displacement_resolution)
   NODE_SOCKET_API(int, pixel_displacement_steps)
   int pixel_jitter_frame = 0;

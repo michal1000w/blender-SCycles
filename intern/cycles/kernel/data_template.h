@@ -200,21 +200,44 @@ KERNEL_STRUCT_MEMBER(integrator, int, caustics_reflective)
 KERNEL_STRUCT_MEMBER(integrator, int, caustics_refractive)
 KERNEL_STRUCT_MEMBER(integrator, float, filter_glossy)
 KERNEL_STRUCT_MEMBER(integrator, float, differential_widen_scale)
+/* Metal bidirectional path tracing. Light subpaths are cached in render-working memory. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_bidirectional_path_tracing)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_light_paths)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_reference_pixels)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_max_bounces)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_update_samples)
 /* Progressive surface photon mapping. The map itself is render-working memory and its pointers
  * live in IntegratorStateGPU; these values are scene-level controls shared by emission/gather. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_photon_mapping)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_count)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_max_bounces)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_gather_max)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_camera_samples)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_map_update_samples)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, photon_time_bins)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_radius)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_radius_decay)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_volume_radius_scale)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_roughness_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, photon_normal_threshold)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float4, photon_scene)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float4, photon_target)
 /* Seed. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
@@ -234,7 +257,8 @@ KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, sobol_index_mask)
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, blue_noise_sequence_length)
-/* Pixel-level shader displacement. */
+/* Pixel-level shader displacement. Specializing the controls lets Metal fold
+ * repeated clamps and constant factors in the native solver. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_pixel_displacement)
 KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_steps)
 KERNEL_STRUCT_MEMBER(integrator, float, pixel_displacement_scale)
@@ -261,7 +285,22 @@ KERNEL_STRUCT_MEMBER(integrator, int, use_surface_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_volume_guiding)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_direct_light)
 KERNEL_STRUCT_MEMBER(integrator, int, use_guiding_mis_weights)
-KERNEL_STRUCT_MEMBER(integrator, int, pad1)
+/* Training limits and field bounds change independently of shader specialization. */
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, guiding_training_samples)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, guiding_gpu_memory_mb)
+KERNEL_STRUCT_MEMBER(integrator, int, guiding_gpu_history_memory_mb)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float4, guiding_bounds_min)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float4, guiding_bounds_max)
+/* Evaluator kinds: 1 compact, 2 full, 4 image, 8 diagnostic force-full.
+ * Capabilities: 16 full image reference, 32 uncertified/cache inputs, 64 resident linear image.
+ * 128 certifies uniform triangle normals independently of native UV eligibility.
+ * 256 certifies displacement directions parallel to the base-face normals.
+ * See PixelDisplacementEvaluatorFlags; capability bits are independent of evaluator kinds. */
+KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_evaluator_set)
 
 KERNEL_STRUCT_MEMBER(integrator, float2, pixel_jitter)
 KERNEL_STRUCT_END(KernelIntegrator)

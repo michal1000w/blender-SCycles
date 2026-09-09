@@ -50,6 +50,11 @@ KERNEL_STRUCT_MEMBER(path, float, optical_depth, KERNEL_FEATURE_PATH_TRACING)
  * zero and distance. Note that transparency and volume attenuation increase
  * the ray tmin but keep P unmodified so that this works. */
 KERNEL_STRUCT_MEMBER(path, float, mis_ray_pdf, KERNEL_FEATURE_PATH_TRACING)
+/* Logarithms of recursive MIS terms; negative infinity denotes an empty sum. */
+KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vcm, KERNEL_FEATURE_BDPT)
+KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vc, KERNEL_FEATURE_BDPT)
+/* Completed surface stages, retained while a reciprocal shader waits for image tiles. */
+KERNEL_STRUCT_MEMBER(path, uint, bdpt_surface_stage, KERNEL_FEATURE_BDPT)
 /* Object at last scatter point for light linking. */
 KERNEL_STRUCT_MEMBER(path, int, mis_ray_object, KERNEL_FEATURE_LIGHT_LINKING)
 /* Normal at last scatter point for light tree. */
@@ -72,6 +77,19 @@ KERNEL_STRUCT_MEMBER(path, PackedSpectrum, denoising_feature_throughput, KERNEL_
 /* TODO: compress as uint16? or leave out entirely and recompute key in sorting code? */
 KERNEL_STRUCT_MEMBER(path, uint32_t, shader_sort_key, KERNEL_FEATURE_PATH_TRACING)
 KERNEL_STRUCT_END(path)
+
+/* Main and shadow paths retain immutable training history by index. */
+#ifndef KERNEL_STRUCT_GPU_GUIDING_FEATURE
+#  define KERNEL_STRUCT_GPU_GUIDING_FEATURE KERNEL_FEATURE_PATH_GUIDING
+#  define KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
+#endif
+KERNEL_STRUCT_BEGIN(gpu_guiding)
+KERNEL_STRUCT_MEMBER(gpu_guiding, uint, history_head, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_END(gpu_guiding)
+#ifdef KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
+#  undef KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
+#  undef KERNEL_STRUCT_GPU_GUIDING_FEATURE
+#endif
 
 /************************************** Ray ***********************************/
 
@@ -117,34 +135,51 @@ KERNEL_STRUCT_END_ARRAY(volume_stack,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE)
 
 /************************************ Path Guiding *****************************/
+#ifndef KERNEL_STRUCT_CPU_GUIDING_FEATURE
+#  define KERNEL_STRUCT_CPU_GUIDING_FEATURE KERNEL_FEATURE_PATH_GUIDING
+#  define KERNEL_STRUCT_CPU_GUIDING_LOCAL
+#endif
 KERNEL_STRUCT_BEGIN(guiding)
 #if defined(__PATH_GUIDING__)
 /* Current path segment of the random walk/path. */
 KERNEL_STRUCT_MEMBER(guiding,
                      openpgl::cpp::PathSegment *,
                      path_segment,
-                     KERNEL_FEATURE_PATH_GUIDING)
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 #else
 /* Current path segment of the random walk/path. */
-KERNEL_STRUCT_MEMBER(guiding, uint64_t, path_segment, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding, uint64_t, path_segment, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 #endif
 /* If surface guiding is enabled */
-KERNEL_STRUCT_MEMBER(guiding, bool, use_surface_guiding, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding, bool, use_surface_guiding, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* Random number used for additional guiding decisions (e.g., cache query, selection to use guiding
  * or BSDF sampling) */
-KERNEL_STRUCT_MEMBER(guiding, float, sample_surface_guiding_rand, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding,
+                     float,
+                     sample_surface_guiding_rand,
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* The probability to use surface guiding (i.e., diffuse sampling prob * guiding prob). */
-KERNEL_STRUCT_MEMBER(guiding, float, surface_guiding_sampling_prob, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding,
+                     float,
+                     surface_guiding_sampling_prob,
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* Probability of sampling a BSSRDF closure instead of a BSDF closure. */
-KERNEL_STRUCT_MEMBER(guiding, float, bssrdf_sampling_prob, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding, float, bssrdf_sampling_prob, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* If volume guiding is enabled */
-KERNEL_STRUCT_MEMBER(guiding, bool, use_volume_guiding, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding, bool, use_volume_guiding, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* Random number used for additional guiding decisions (e.g., cache query, selection to use guiding
  * or BSDF sampling) */
-KERNEL_STRUCT_MEMBER(guiding, float, sample_volume_guiding_rand, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding, float, sample_volume_guiding_rand, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* The probability to use surface guiding (i.e., diffuse sampling prob * guiding prob). */
-KERNEL_STRUCT_MEMBER(guiding, float, volume_guiding_sampling_prob, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(guiding,
+                     float,
+                     volume_guiding_sampling_prob,
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 KERNEL_STRUCT_END(guiding)
+#ifdef KERNEL_STRUCT_CPU_GUIDING_LOCAL
+#  undef KERNEL_STRUCT_CPU_GUIDING_FEATURE
+#  undef KERNEL_STRUCT_CPU_GUIDING_LOCAL
+#endif
 
 /******************************* Shadow linking *******************************/
 

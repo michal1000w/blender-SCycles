@@ -69,6 +69,7 @@ set(SRC_HEADERS
   hash.h
   ies.h
   image.h
+  image_displacement_bounds.h
   image_impl.h
   image_maketx.h
   image_metadata.h

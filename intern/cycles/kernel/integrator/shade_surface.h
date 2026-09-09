@@ -151,12 +151,19 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
   /* Evaluate emissive closure. */
   const Spectrum L = surface_shader_emission(sd);
 
-  const float mis_weight = light_sample_mis_weight_forward_surface(
-      kg, state, path_visibility, path_flag, sd);
+  float mis_weight;
+#ifdef __KERNEL_METAL__
+  mis_weight = bdpt_enabled_for_surface_path(state) ?
+                   bdpt_emission_mis_weight_surface(kg, state, sd) :
+                   light_sample_mis_weight_forward_surface(
+                       kg, state, path_visibility, path_flag, sd);
+#else
+  mis_weight = light_sample_mis_weight_forward_surface(kg, state, path_visibility, path_flag, sd);
+#endif
 
   guiding_record_surface_emission(kg, state, L, mis_weight);
   film_write_surface_emission(
-      kg, state, L, mis_weight, render_buffer, object_lightgroup(kg, sd->object));
+      kg, state, L, mis_weight, render_buffer, object_lightgroup(kg, sd->object), sd->P);
 }
 
 ccl_device int integrate_surface_ray_portal(KernelGlobals kg,
@@ -398,6 +405,10 @@ ccl_device
   float avg_roughness_squared = 0.0f;
   const float bsdf_pdf = surface_shader_bsdf_eval(
       kg, state, sd, ls.D, &bsdf_eval, ls.shader, avg_roughness_squared);
+#ifdef __KERNEL_METAL__
+  const Spectrum guiding_scattering_throughput = INTEGRATOR_STATE(state, path, throughput) *
+                                                 bsdf_eval_sum(&bsdf_eval);
+#endif
 
   Ray ray ccl_optional_struct_init;
 
@@ -415,7 +426,17 @@ ccl_device
   else
 #endif /* __MNEE__ */
   {
-    const float mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
+    float mis_weight;
+#ifdef __KERNEL_METAL__
+    mis_weight = bdpt_enabled_for_surface_path(state) ?
+                     bdpt_nee_mis_weight(kg, state, sd, &ls, bsdf_pdf) :
+                     light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
+    if (sd->runtime_flag & SR_CACHE_MISS) {
+      return SHADER_EVAL_CACHE_MISS;
+    }
+#else
+    mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
+#endif
     bsdf_eval_mul(&bsdf_eval, light_shader_eval * ls.eval_fac / ls.pdf * mis_weight);
 
     /* Path termination for constant light shader. */
@@ -455,6 +476,21 @@ ccl_device
       mnee_vertex_count,
       is_constant_light_shader);
 
+#ifdef __KERNEL_METAL__
+  guiding_gpu_shadow_endpoint(shadow_state, sd->P);
+  if (mnee_vertex_count == 0) {
+    guiding_gpu_record_direct(shadow_state,
+                              state,
+                              sd->P,
+                              ls.D,
+                              guiding_scattering_throughput,
+                              false,
+                              guiding_gpu_surface_orientation(sd),
+                              false,
+                              ls.t);
+  }
+#endif
+
   if (is_transmission) {
 #ifdef __VOLUME__
     volume_stack_enter_exit<true>(kg, shadow_state, sd);
@@ -490,6 +526,259 @@ ccl_device
   return SHADER_EVAL_OK;
 }
 
+#ifdef __KERNEL_METAL__
+/* Connect the current camera vertex to one uniformly selected entry of the global light-vertex
+ * cache. Every entry is a per-path reservoir sample over the connectible vertices that path
+ * actually reached. Uniform cache sampling plus the stored reservoir support converts the
+ * selected vertex into an unbiased estimate of the sum over light-subpath lengths. */
+ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
+                                                            IntegratorState state,
+                                                            ccl_private ShaderData *sd,
+                                                            const ccl_private RNGState *rng_state)
+{
+  if (!bdpt_enabled_for_surface_path(state) || !(sd->runtime_flag & SR_BSDF_HAS_EVAL) ||
+      !kernel_integrator_state.bdpt_vertices || !kernel_integrator_state.bdpt_vertex_count)
+  {
+    return false;
+  }
+
+  const uint vertex_count = min(*kernel_integrator_state.bdpt_vertex_count,
+                                kernel_integrator_state.bdpt_vertex_capacity);
+  if (vertex_count == 0 || kernel_integrator_state.bdpt_light_path_count == 0) {
+    return false;
+  }
+
+  const uint bounce = uint(INTEGRATOR_STATE(state, path, bounce));
+  const float select = hash_uint3_to_float(INTEGRATOR_STATE(state, path, rng_pixel),
+                                           uint(INTEGRATOR_STATE(state, path, sample)),
+                                           bounce ^ 0x62647074u);
+  const uint vertex_index = min(uint(select * float(vertex_count)), vertex_count - 1u);
+  const ccl_global KernelBDPTVertex *light_vertex =
+      &kernel_integrator_state.bdpt_vertices[kernel_integrator_state.bdpt_vertex_indices[vertex_index]];
+  const uint light_path_length = light_vertex->path_length & 0xffu;
+  const uint light_selection_count = (light_vertex->path_length >> 8u) & 0xfffu;
+  const uint transparent_bounce = INTEGRATOR_STATE(state, path, transparent_bounce) +
+                                  (light_vertex->path_length >> 20u);
+
+  if (light_selection_count == 0u ||
+      (transparent_bounce > 0u &&
+       transparent_bounce >= uint(kernel_data.integrator.transparent_max_bounce)) ||
+      light_path_length + bounce + 1u > uint(kernel_data.integrator.max_bounce + 1))
+  {
+    return false;
+  }
+
+  const float3 delta = light_vertex->P - sd->P;
+  const float distance2 = len_squared(delta);
+  if (!(distance2 > 1.0e-12f)) {
+    return false;
+  }
+  const float distance = sqrtf(distance2);
+  const float3 direction = delta / distance;
+
+  BsdfEval camera_eval;
+  float camera_roughness_squared = 0.0f;
+  const float camera_pdf = surface_shader_bsdf_eval(
+      kg, state, sd, direction, &camera_eval, SHADER_USE_MIS, camera_roughness_squared);
+  if (!(camera_pdf > 0.0f) || bsdf_eval_is_zero(&camera_eval)) {
+    return false;
+  }
+  const float camera_reverse_pdf = bdpt_reverse_pdf(kg, state, sd, direction);
+  if (sd->runtime_flag & SR_CACHE_MISS) {
+    return false;
+  }
+
+  packed_normal packed_incoming;
+  packed_incoming.value = light_vertex->incoming;
+  const float3 light_incoming = packed_incoming.decode();
+
+  Ray light_ray ccl_optional_struct_init;
+  light_ray.P = light_vertex->P - light_incoming;
+  light_ray.D = light_incoming;
+  light_ray.tmin = 0.0f;
+  light_ray.tmax = 1.0f;
+  light_ray.time = photon_unpack_time(light_vertex->time_wavelength);
+#  ifdef __RAY_DIFFERENTIALS__
+  light_ray.dP = differential_zero_compact();
+  light_ray.dD = differential_zero_compact();
+#  endif
+
+  Intersection light_isect;
+  light_isect.t = 1.0f;
+  light_isect.u = light_vertex->u;
+  light_isect.v = light_vertex->v;
+  light_isect.prim = light_vertex->prim;
+  light_isect.object = light_vertex->object;
+  light_isect.type = light_vertex->type;
+
+  ShaderData light_sd;
+  shader_setup_from_ray(kg, &light_sd, &light_ray, &light_isect);
+#  ifdef __SPECTRAL__
+  light_sd.rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
+#  endif
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+      kg, state, &light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
+  if (light_sd.runtime_flag & SR_CACHE_MISS) {
+    sd->runtime_flag |= SR_CACHE_MISS;
+    return false;
+  }
+  surface_shader_prepare_closures(kg, state, &light_sd, PATH_RAY_VISIBILITY_GLOSSY);
+
+  BsdfEval light_eval;
+  float light_roughness_squared = 0.0f;
+  const uint emitter_shader_flags = (light_path_length == 2u) ?
+                                        (light_vertex->emitter_shader_flags | SHADER_USE_MIS) :
+                                        SHADER_USE_MIS;
+  const float light_pdf = surface_shader_bsdf_eval(kg,
+                                                   state,
+                                                   &light_sd,
+                                                   -direction,
+                                                   &light_eval,
+                                                   emitter_shader_flags,
+                                                   light_roughness_squared,
+                                                   true);
+  if (!(light_pdf > 0.0f) || bsdf_eval_is_zero(&light_eval)) {
+    return false;
+  }
+
+  /* Rebuild the light vertex in the reciprocal orientation. Cycles closures may bake
+   * direction-dependent layering data during shader evaluation, so swapping ShaderData::wi only
+   * is not sufficient for Principled and arbitrary node graphs. */
+  light_ray.P = light_vertex->P - direction;
+  light_ray.D = direction;
+  shader_setup_from_ray(kg, &light_sd, &light_ray, &light_isect);
+#  ifdef __SPECTRAL__
+  light_sd.rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
+#  endif
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+      kg, state, &light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
+  if (light_sd.runtime_flag & SR_CACHE_MISS) {
+    sd->runtime_flag |= SR_CACHE_MISS;
+    return false;
+  }
+  surface_shader_prepare_closures(kg, state, &light_sd, PATH_RAY_VISIBILITY_GLOSSY);
+
+  BsdfEval light_adjoint_eval;
+  float light_adjoint_roughness_squared = 0.0f;
+  const float light_reverse_pdf = surface_shader_bsdf_eval(kg,
+                                                           state,
+                                                           &light_sd,
+                                                           -light_incoming,
+                                                           &light_adjoint_eval,
+                                                           emitter_shader_flags,
+                                                           light_adjoint_roughness_squared);
+  if (!(light_reverse_pdf > 0.0f) || bsdf_eval_is_zero(&light_adjoint_eval)) {
+    return false;
+  }
+
+  const float cos_camera = max(fabsf(dot(sd->Ng, direction)), 1.0e-8f);
+  const float cos_light = max(fabsf(dot(light_sd.Ng, -direction)), 1.0e-8f);
+  const float camera_pdf_area = camera_pdf * cos_light / distance2;
+  const float light_pdf_area = light_pdf * cos_camera / distance2;
+  /* The cache contains one reservoir-selected vertex per light path that reached a connectible
+   * event. K*n/N is the exact global-selection support, where n is this path's actual number of
+   * candidates. Unlike a configured maximum-bounce factor, it does not amplify sparse splats from
+   * short paths. */
+  const float cache_scale = float(vertex_count) * float(light_selection_count) /
+                            float(kernel_integrator_state.bdpt_light_path_count);
+
+  const float selection_ratio = light_path_length == 2u ?
+      bdpt_light_selection_ratio(kg,
+                                 light_vertex->emitter_distribution,
+                                 light_vertex->emitter_P,
+                                 light_sd.P,
+                                 light_sd.time,
+                                 light_sd.P,
+                                 light_sd.N,
+                                 light_sd.runtime_flag,
+                                 light_sd.object) : 1.0f;
+  const BDPTMISWeight w_light =
+      BDPTMISWeight(camera_pdf_area) *
+      (BDPTMISWeight::from_encoded(light_vertex->d_vcm) * selection_ratio +
+       BDPTMISWeight::from_encoded(light_vertex->d_vc) * light_reverse_pdf);
+  const BDPTMISWeight w_camera =
+      BDPTMISWeight(light_pdf_area) *
+      (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
+       BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) * camera_reverse_pdf);
+  /* Reservoir subsampling estimates the sum over all connectible light-path vertices.
+   * Its inverse inclusion probability belongs in the contribution below. The recursive MIS
+   * partition still describes those complete strategies, as do NEE and sensor connections.
+   * Applying cache_scale here as well would make their weights fail to sum to one. */
+  const float mis_weight = (BDPTMISWeight(1.0f) + w_light + w_camera).inverse();
+
+  const Spectrum light_connection_eval = bdpt_transpose_surface_eval(
+      bsdf_eval_sum(&light_adjoint_eval), light_sd.Ng, -light_incoming, -direction);
+  const Spectrum spectral_weight = bdpt_light_vertex_spectral_weight(
+      kg,
+      state,
+      light_vertex->time_wavelength,
+      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u);
+  Spectrum connection = Spectrum(light_vertex->throughput) * spectral_weight *
+                        bsdf_eval_sum(&camera_eval) * light_connection_eval *
+                        (cache_scale * mis_weight / distance2);
+  if (!isfinite_safe(connection) || is_zero(connection)) {
+    return false;
+  }
+  Ray ray ccl_optional_struct_init;
+  bool skip_self = true;
+  ray.P = shadow_ray_offset(kg, sd, direction, &skip_self);
+  const float3 light_shadow_P = ray_offset(
+      light_sd.P, dot(light_sd.Ng, -direction) >= 0.0f ? light_sd.Ng : -light_sd.Ng);
+  const float3 shadow_delta = light_shadow_P - ray.P;
+  const float shadow_distance = len(shadow_delta);
+  if (!(shadow_distance > 1.0e-8f)) {
+    return false;
+  }
+  ray.D = shadow_delta / shadow_distance;
+  ray.tmin = 0.0f;
+  ray.tmax = shadow_distance;
+  ray.time = sd->time;
+  ray.self.object = skip_self ? sd->object : OBJECT_NONE;
+  ray.self.prim = skip_self ? sd->prim : PRIM_NONE;
+  ray.self.light_object = light_vertex->emitter_object;
+  ray.self.light_prim = PRIM_NONE;
+#  ifdef __RAY_DIFFERENTIALS__
+  ray.dP = differential_zero_compact();
+  ray.dD = differential_zero_compact();
+#  endif
+
+  IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
+      kg, state, &ray, connection, light_vertex->light_group, 0, true);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = transparent_bounce;
+  guiding_gpu_record_direct(shadow_state,
+                            state,
+                            sd->P,
+                            direction,
+                            INTEGRATOR_STATE(state, path, throughput) *
+                                bsdf_eval_sum(&camera_eval),
+                            false,
+                            guiding_gpu_surface_orientation(sd),
+                            true,
+                            len(light_vertex->P - sd->P));
+
+  uint32_t shadow_flag = INTEGRATOR_STATE(state, path, flag);
+  if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
+    PackedSpectrum pass_diffuse_weight;
+    PackedSpectrum pass_glossy_weight;
+    if (shadow_flag & PATH_RAY_ANY_PASS) {
+      pass_diffuse_weight = INTEGRATOR_STATE(state, path, pass_diffuse_weight);
+      pass_glossy_weight = INTEGRATOR_STATE(state, path, pass_glossy_weight);
+    }
+    else {
+      shadow_flag |= PATH_RAY_SURFACE_PASS;
+      pass_diffuse_weight = PackedSpectrum(bsdf_eval_pass_diffuse_weight(&camera_eval));
+      pass_glossy_weight = PackedSpectrum(bsdf_eval_pass_glossy_weight(&camera_eval));
+    }
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, pass_diffuse_weight) = pass_diffuse_weight;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, pass_glossy_weight) = pass_glossy_weight;
+  }
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = INTEGRATOR_STATE(
+      state, path, visibility);
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = shadow_flag;
+  return true;
+}
+#endif
+
 /* Path tracing: bounce off or through surface with new direction. */
 ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     KernelGlobals kg,
@@ -509,6 +798,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   /* BSSRDF closure, we schedule subsurface intersection kernel. */
   if (CLOSURE_IS_BSSRDF(sc->type)) {
 #  ifdef __KERNEL_METAL__
+    if (kernel_data.integrator.use_bidirectional_path_tracing) {
+      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_UNSUPPORTED;
+    }
     if (kernel_data.integrator.use_photon_mapping) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;
@@ -540,9 +832,33 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   float bsdf_avg_roughness_squared = 0.0f;
 
+#ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0) {
+    const float rand_guiding = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF_GUIDING);
+    const float3 rand_resampling = path_state_rng_3D(kg, rng_state, PRNG_SURFACE_RIS_GUIDING_0);
+    label = surface_shader_bsdf_gpu_guided_sample_closure(kg,
+                                                          sd,
+                                                          sc,
+                                                          rand_bsdf,
+                                                          rand_guiding,
+                                                          rand_resampling,
+                                                          &bsdf_eval,
+                                                          &bsdf_wo,
+                                                          &bsdf_pdf,
+                                                          &mis_pdf,
+                                                          &unguided_bsdf_pdf,
+                                                          &bsdf_sampled_roughness,
+                                                          &bsdf_eta,
+                                                          bsdf_avg_roughness_squared);
+    if (!(bsdf_pdf > 0.0f) || bsdf_eval_is_zero(&bsdf_eval)) {
+      return LABEL_NONE;
+    }
+  }
+  else
+#endif
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  if (kernel_data.integrator.use_surface_guiding &&
-      (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING))
+      if (kernel_data.integrator.use_surface_guiding &&
+          (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING))
   {
     label = surface_shader_bsdf_guided_sample_closure(kg,
                                                       state,
@@ -586,7 +902,29 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     unguided_bsdf_pdf = bsdf_pdf;
   }
 
+#ifdef __KERNEL_METAL__
+  /* Resolve reciprocal texture reads before changing the ray, throughput or training record.
+   * A miss replays this scattering stage with the same random sample after tiles are loaded. */
+  float reverse_pdf = 0.0f;
+  const bool update_bdpt_mis = bdpt_enabled_for_surface_path(state) &&
+                               !(label & LABEL_TRANSPARENT);
+  if (update_bdpt_mis) {
+    reverse_pdf = (label & LABEL_SINGULAR) ? mis_pdf : bdpt_reverse_pdf(kg, state, sd, bsdf_wo);
+    if (sd->runtime_flag & SR_CACHE_MISS) {
+      return LABEL_CACHE_MISS;
+    }
+  }
+  if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0) {
+    INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) *= bsdf_pdf / unguided_bsdf_pdf;
+  }
+#endif
+
   if (label & LABEL_TRANSPARENT) {
+#ifdef __KERNEL_METAL__
+    if (bdpt_enabled_for_surface_path(state)) {
+      bdpt_recursive_mis_undo_transparent_hit(state, sd);
+    }
+#endif
     /* Only need to modify start distance for transparent. */
     INTEGRATOR_STATE_WRITE(state, ray, tmin) = intersection_t_offset(sd->ray_length);
   }
@@ -611,6 +949,31 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   /* Update throughput. */
   const Spectrum bsdf_weight = bsdf_eval_sum(&bsdf_eval) / bsdf_pdf;
   INTEGRATOR_STATE_WRITE(state, path, throughput) *= bsdf_weight;
+
+#ifdef __KERNEL_METAL__
+  GuidingVirtualDistance source_distance;
+  guiding_gpu_record_bounce(
+      state,
+      sd->P,
+      normalize(bsdf_wo),
+      bsdf_pdf,
+      label,
+      false,
+      guiding_gpu_surface_orientation(sd),
+      source_distance.scatter_scale(
+          label & LABEL_SINGULAR,
+          safe_sqrtf(min(bsdf_sampled_roughness.x, bsdf_sampled_roughness.y)),
+          bsdf_eta,
+          dot(sd->N, sd->wi),
+          dot(sd->N, normalize(bsdf_wo))));
+#endif
+
+#ifdef __KERNEL_METAL__
+  if (update_bdpt_mis) {
+    const float cos_out = max(fabsf(dot(sd->Ng, normalize(bsdf_wo))), 1.0e-8f);
+    bdpt_recursive_mis_after_scatter(state, label, cos_out, mis_pdf, reverse_pdf);
+  }
+#endif
 
   if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
     if (INTEGRATOR_STATE(state, path, bounce) == 0) {
@@ -802,6 +1165,15 @@ ccl_device int integrate_surface(KernelGlobals kg,
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
+#ifdef __KERNEL_METAL__
+  const bool staged_bdpt = bdpt_enabled_for_surface_path(state);
+  const uint surface_stage = staged_bdpt ? INTEGRATOR_STATE(state, path, bdpt_surface_stage) : 0;
+#else
+  const uint surface_stage = 0;
+#endif
+  /* 0: initial shading, 1: direct light pending, 2: connection pending, 3: scatter pending.
+   * Texture retries reconstruct closures but never repeat completed film or shadow writes. */
+
   /* Skip most work for volume bounding surface. */
 #ifdef __VOLUME__
   if (!(sd.shader_flag & SD_HAS_ONLY_VOLUME)) {
@@ -813,14 +1185,19 @@ ccl_device int integrate_surface(KernelGlobals kg,
     {
       /* Evaluate shader. */
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_EVAL);
-      surface_shader_eval<node_feature_mask>(
-          kg, state, &sd, render_buffer, path_visibility, path_flag);
+      surface_shader_eval<node_feature_mask>(kg,
+                                             state,
+                                             &sd,
+                                             surface_stage == 0 ? render_buffer : nullptr,
+                                             path_visibility,
+                                             path_flag);
     }
 
     if (sd.runtime_flag & SR_CACHE_MISS) {
       return LABEL_CACHE_MISS;
     }
 
+    if (surface_stage == 0) {
 #ifdef __SPECTRAL__
     if (sd.runtime_flag & (SR_BSDF_HAS_DISPERSION | SR_BSDF_HAS_SPECTRAL_TRANSMISSION)) {
       update_path_throughput_for_dispersion(kg, state, sd.rand_wavelength);
@@ -829,6 +1206,17 @@ ccl_device int integrate_surface(KernelGlobals kg,
 
     /* After shader evaluation, in case of texture cache miss. */
     guiding_record_surface_segment(kg, state, &sd);
+#ifdef __KERNEL_METAL__
+    if (sd.runtime_flag & SR_BSDF_HAS_EVAL) {
+      guiding_gpu_record_importance(state,
+                                    sd.P,
+                                    sd.wi,
+                                    fabsf(dot(sd.Ng, sd.wi)),
+                                    false,
+                                    guiding_gpu_surface_orientation(&sd));
+    }
+#endif
+    }
 
 #ifdef __SUBSURFACE__
     if (path_flag & PATH_RAY_SUBSURFACE) {
@@ -842,6 +1230,13 @@ ccl_device int integrate_surface(KernelGlobals kg,
     {
       /* Filter closures. */
       surface_shader_prepare_closures(kg, state, &sd, path_visibility);
+
+      if (surface_stage == 0) {
+#ifdef __KERNEL_METAL__
+      if (bdpt_enabled_for_surface_path(state)) {
+        bdpt_recursive_mis_after_hit(kg, state, &sd);
+      }
+#endif
 
       /* Evaluate holdout. */
       if (!integrate_surface_holdout(kg, state, &sd, render_buffer)) {
@@ -878,7 +1273,20 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #ifdef __DENOISING_FEATURES__
       film_write_denoising_features_surface(kg, state, &sd, render_buffer);
 #endif
+      }
+      else if (((sd.runtime_flag & SR_HOLDOUT) || (sd.object_flag & SD_OBJECT_HOLDOUT_MASK)) &&
+               (path_flag & PATH_RAY_TRANSPARENT_BACKGROUND))
+      {
+        /* Reconstruct the holdout-adjusted closures without repeating the film contribution. */
+        surface_shader_apply_holdout(&sd);
+      }
     }
+
+#ifdef __KERNEL_METAL__
+    if (staged_bdpt && surface_stage == 0) {
+      INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 1;
+    }
+#endif
 
     /* Load random number state. */
     RNGState rng_state;
@@ -890,24 +1298,49 @@ ccl_device int integrate_surface(KernelGlobals kg,
       guiding_write_debug_passes(kg, state, &sd, render_buffer);
     }
 #endif
-    /* Direct light. */
-    PROFILING_EVENT(PROFILING_SHADE_SURFACE_DIRECT_LIGHT);
-    const ShaderEvalResult result = integrate_surface_direct_light<node_feature_mask>(
-        kg, state, &sd, &rng_state);
-    if (result == SHADER_EVAL_CACHE_MISS) {
-      return LABEL_CACHE_MISS;
+    if (surface_stage < 2) {
+      /* Direct light. */
+      PROFILING_EVENT(PROFILING_SHADE_SURFACE_DIRECT_LIGHT);
+      const ShaderEvalResult result = integrate_surface_direct_light<node_feature_mask>(
+          kg, state, &sd, &rng_state);
+      if (result == SHADER_EVAL_CACHE_MISS) {
+        return LABEL_CACHE_MISS;
+      }
+#ifdef __KERNEL_METAL__
+      if (staged_bdpt) {
+        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 2;
+      }
+#endif
     }
 
-#if defined(__AO__)
-    /* Ambient occlusion pass. */
-    if (kernel_data.kernel_features & KERNEL_FEATURE_AO) {
-      PROFILING_EVENT(PROFILING_SHADE_SURFACE_AO);
-      integrate_surface_ao(kg, state, &sd, &rng_state);
-    }
+    if (surface_stage < 3) {
+#ifdef __KERNEL_METAL__
+      integrate_surface_bidirectional(kg, state, &sd, &rng_state);
+      if (sd.runtime_flag & SR_CACHE_MISS) {
+        return LABEL_CACHE_MISS;
+      }
 #endif
+
+#if defined(__AO__)
+      /* Ambient occlusion pass. */
+      if (kernel_data.kernel_features & KERNEL_FEATURE_AO) {
+        PROFILING_EVENT(PROFILING_SHADE_SURFACE_AO);
+        integrate_surface_ao(kg, state, &sd, &rng_state);
+      }
+#endif
+#ifdef __KERNEL_METAL__
+      if (staged_bdpt) {
+        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 3;
+      }
+#endif
+    }
 
     PROFILING_EVENT(PROFILING_SHADE_SURFACE_INDIRECT_LIGHT);
     continue_path_label = integrate_surface_bsdf_bssrdf_bounce(kg, state, &sd, &rng_state);
+    if (continue_path_label == LABEL_CACHE_MISS) {
+      return LABEL_CACHE_MISS;
+    }
+
 #ifdef __KERNEL_METAL__
     /* The synthetic diffuse bounce at a BSSRDF exit is not a local photon-map receiver. */
     if (kernel_data.integrator.use_photon_mapping && (path_flag & PATH_RAY_SUBSURFACE)) {

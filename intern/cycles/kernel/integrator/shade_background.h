@@ -148,8 +148,26 @@ ccl_device_inline ShaderEvalResult integrate_background(
     }
 
     /* Background MIS weights. */
-    const float mis_weight = light_sample_mis_weight_forward_background(
-        kg, state, path_visibility, path_flag);
+    float mis_weight;
+#ifdef __KERNEL_METAL__
+    if (bdpt_enabled_for_surface_path(state) && kernel_data.background.use_mis) {
+      const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
+      const float3 ray_D = INTEGRATOR_STATE(state, ray, D);
+      const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights *
+                                 background_light_pdf(kg, ray_P, ray_D);
+      mis_weight = bdpt_emission_mis_weight_infinite(
+          state, direct_pdf_w, bdpt_infinite_position_pdf(ray_P, -ray_D),
+          bdpt_forward_selection_pdf(kg, state, kernel_data.background.object_index, -1,
+                                     kernel_data.integrator.distribution_pdf_lights) /
+              bdpt_safe_pdf(kernel_data.integrator.distribution_pdf_lights));
+    }
+    else {
+      mis_weight = light_sample_mis_weight_forward_background(
+          kg, state, path_visibility, path_flag);
+    }
+#else
+    mis_weight = light_sample_mis_weight_forward_background(kg, state, path_visibility, path_flag);
+#endif
 
     guiding_record_background(kg, state, L, mis_weight);
     L *= mis_weight;
@@ -234,8 +252,25 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
     }
 
     /* MIS weighting. */
-    const float mis_weight = light_sample_mis_weight_forward_distant(
+    float mis_weight;
+#ifdef __KERNEL_METAL__
+    if (bdpt_enabled_for_surface_path(state)) {
+      const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
+      const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights * light_eval.pdf;
+      mis_weight = bdpt_emission_mis_weight_infinite(
+          state, direct_pdf_w, bdpt_infinite_position_pdf(ray_P, ray_D),
+          bdpt_forward_selection_pdf(kg, state, klight->object_id, -1,
+                                     kernel_data.integrator.distribution_pdf_lights) /
+              bdpt_safe_pdf(kernel_data.integrator.distribution_pdf_lights));
+    }
+    else {
+      mis_weight = light_sample_mis_weight_forward_distant(
+          kg, state, path_visibility, path_flag, klight->object_id, light_eval.pdf);
+    }
+#else
+    mis_weight = light_sample_mis_weight_forward_distant(
         kg, state, path_visibility, path_flag, klight->object_id, light_eval.pdf);
+#endif
 
     /* Write to render buffer. */
     guiding_record_background(kg, state, eval, mis_weight);

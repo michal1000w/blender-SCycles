@@ -51,7 +51,13 @@ static bool device_supports_metal_features(const Device *device)
 
 bool Integrator::use_photon_mapping_on_device(const Device *device) const
 {
-  return get_use_photon_mapping() && device_supports_metal_features(device);
+  return get_use_photon_mapping() && !get_use_bidirectional_path_tracing() &&
+         device_supports_metal_features(device);
+}
+
+bool Integrator::use_bidirectional_path_tracing_on_device(const Device *device) const
+{
+  return get_use_bidirectional_path_tracing() && device_supports_metal_features(device);
 }
 
 static bool photon_input_is_varying(ShaderNode *node, const char *name)
@@ -213,6 +219,8 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(use_volume_guiding, "Volume Guiding", true);
   SOCKET_FLOAT(volume_guiding_probability, "Volume Guiding Probability", 0.5f);
   SOCKET_INT(guiding_training_samples, "Training Samples", 128);
+  SOCKET_INT(guiding_gpu_memory_mb, "GPU Guiding Memory", 256);
+  SOCKET_INT(guiding_gpu_history_memory_mb, "GPU Guiding Training Memory", 128);
   SOCKET_BOOLEAN(use_guiding_direct_light, "Guide Direct Light", true);
   SOCKET_BOOLEAN(use_guiding_mis_weights, "Use MIS Weights", true);
   SOCKET_ENUM(guiding_distribution_type,
@@ -228,6 +236,12 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", true);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
+
+  SOCKET_BOOLEAN(use_bidirectional_path_tracing, "Bidirectional Path Tracing", false);
+  SOCKET_INT(bdpt_light_paths, "BDPT Light Paths", 65536);
+  SOCKET_INT(bdpt_reference_pixels, "BDPT Reference Pixels", 1);
+  SOCKET_INT(bdpt_max_bounces, "BDPT Max Bounces", 8);
+  SOCKET_INT(bdpt_update_samples, "BDPT Update Samples", 8);
 
   SOCKET_BOOLEAN(use_photon_mapping, "Photon Mapping", false);
   SOCKET_INT(photon_count, "Photon Count", 65536);
@@ -286,6 +300,7 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(use_pixel_displacement, "Pixel Level Displacement", true);
   SOCKET_FLOAT(pixel_displacement_scale, "Pixel Displacement Scale", 1.0f);
   SOCKET_FLOAT(pixel_displacement_max_distance, "Pixel Displacement Max Distance", 0.1f);
+  SOCKET_BOOLEAN(use_pixel_displacement_resolution_clamp, "Clamp Pixel Displacement Resolution", false);
   SOCKET_INT(pixel_displacement_resolution, "Pixel Displacement Micromesh Resolution", 1024);
   SOCKET_INT(pixel_displacement_steps, "Pixel Displacement Steps", 32);
 
@@ -399,6 +414,16 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   /* Photon mapping is currently scheduled by the GPU path tracer and enabled only on Metal.
    * Keeping the complete configuration in KernelData makes all regular shading kernels see an
    * immutable map description while a render batch is in flight. */
+  /* Sensor splats do not carry the split foreground/background state required by shadow catcher
+   * compositing. Keep the complete regular estimator for such scenes instead of leaking light
+   * tracing into the combined or catcher passes. */
+  kintegrator->use_bidirectional_path_tracing = use_bidirectional_path_tracing_on_device(device) &&
+                                                !scene->has_shadow_catcher();
+  kintegrator->bdpt_light_paths = clamp(bdpt_light_paths, 1024, 4 * 1024 * 1024);
+  kintegrator->bdpt_reference_pixels = max(bdpt_reference_pixels, 1);
+  kintegrator->bdpt_max_bounces = clamp(bdpt_max_bounces, 1, 64);
+  kintegrator->bdpt_update_samples = clamp(bdpt_update_samples, 1, 1024);
+
   kintegrator->use_photon_mapping = use_photon_mapping_on_device(device);
   if (kintegrator->use_photon_mapping) {
     /* MNEE and photon mapping estimate the same sharp-caustic transport. The regular camera
@@ -443,7 +468,6 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   else {
     kintegrator->photon_target = kintegrator->photon_scene;
   }
-
   kintegrator->filter_closures = 0;
   if (!use_direct_light) {
     kintegrator->filter_closures |= FILTER_CLOSURE_DIRECT_LIGHT;
@@ -472,6 +496,14 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   const GuidingParams guiding_params = get_guiding_params(device);
   kintegrator->use_guiding = guiding_params.use;
+  kintegrator->guiding_training_samples = max(guiding_training_samples, 0);
+  kintegrator->guiding_gpu_memory_mb = clamp(guiding_gpu_memory_mb, 16, 1024);
+  kintegrator->guiding_gpu_history_memory_mb = clamp(guiding_gpu_history_memory_mb, 16, 1024);
+  const float3 guiding_lower = photon_bounds.valid() ? photon_bounds.min : make_float3(-1.0f);
+  const float3 guiding_upper = photon_bounds.valid() ? photon_bounds.max : make_float3(1.0f);
+  const float3 guiding_padding = max((guiding_upper - guiding_lower) * 1e-4f, make_float3(1e-4f));
+  kintegrator->guiding_bounds_min = make_float4(guiding_lower - guiding_padding, 0.0f);
+  kintegrator->guiding_bounds_max = make_float4(guiding_upper + guiding_padding, 0.0f);
   kintegrator->train_guiding = kintegrator->use_guiding;
   kintegrator->use_surface_guiding = guiding_params.use_surface_guiding;
   kintegrator->use_volume_guiding = guiding_params.use_volume_guiding;
@@ -649,6 +681,13 @@ uint64_t Integrator::get_kernel_features() const
 
   if (get_use_light_tree()) {
     kernel_features |= KERNEL_FEATURE_LIGHT_TREE;
+  }
+
+  if (get_use_bidirectional_path_tracing()) {
+    /* BDPT sensor connections use the manifold solver for specular chains between a cached light
+     * vertex and the camera. This is intrinsic bidirectional transport and does not require the
+     * user-facing shadow-caustics caster/receiver annotations. */
+    kernel_features |= KERNEL_FEATURE_BDPT | KERNEL_FEATURE_MNEE;
   }
 
   return kernel_features;

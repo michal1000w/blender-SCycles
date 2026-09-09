@@ -5,12 +5,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
 #include "device/device.h"
 
 #include "integrator/shader_eval.h"
+
+#include "kernel/svm/node_types.h"
 
 #include "scene/attribute.h"
 #include "scene/devicescene.h"
@@ -23,6 +26,9 @@
 #include "scene/shader_nodes.h"
 
 #include "util/progress.h"
+#include "util/image_displacement_bounds.h"
+#include "util/color.h"
+#include "util/log.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -40,6 +46,7 @@ constexpr uint PIXEL_DISPLACEMENT_CACHE_BVH_FLAG = (1u << 31);
 constexpr uint PIXEL_DISPLACEMENT_CACHE_OPEN_SURFACE_FLAG = (1u << 30);
 constexpr uint PIXEL_DISPLACEMENT_CACHE_GRID_MASK = (1u << 30) - 1;
 constexpr int PIXEL_DISPLACEMENT_CACHE_BLOCK_SIZE = 2;
+constexpr size_t PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES = 8 * 1024 * 1024;
 
 struct PixelDisplacementBVHBlock {
   BoundBox bounds;
@@ -243,6 +250,12 @@ static bool mesh_triangle_uv_extent(const Mesh *mesh, const int triangle, float 
 
 static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const int triangle)
 {
+  /* An unbounded procedural shader has no finite cache resolution. Evaluate it at ray hits
+   * instead of imposing a hidden sampling limit or allocating an unbounded micromesh. */
+  if (!scene->integrator->get_use_pixel_displacement_resolution_clamp()) {
+    return 0;
+  }
+
   const int shader_index = mesh->get_shader()[triangle];
   const array<Node *> &mesh_used_shaders = mesh->get_used_shaders();
   const Shader *shader = (shader_index < mesh_used_shaders.size()) ?
@@ -253,7 +266,7 @@ static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const 
     return 0;
   }
 
-  const int resolution = clamp(scene->integrator->get_pixel_displacement_resolution(), 64, 2048);
+  const int resolution = clamp(scene->integrator->get_pixel_displacement_resolution(), 64, 16384);
   float max_uv_edge;
   if (!mesh_triangle_uv_extent(mesh, triangle, &max_uv_edge)) {
     return resolution;
@@ -266,12 +279,15 @@ static int mesh_triangle_cache_grid(const Scene *scene, const Mesh *mesh, const 
   /* UVs produced by regular subdivisions should land on an integer resolution. Avoid ceilf()
    * turning harmless float round-off (for example 8.000001) into a different micromesh density,
    * which would make the rendered surface depend on the base mesh subdivision. */
-  return clamp(int(ceilf(scaled_resolution - 1.0e-5f)), 1, 2048);
+  if (!std::isfinite(scaled_resolution)) {
+    return 0;
+  }
+  /* Clamp before converting to int, including for very large but finite UV coordinates. */
+  return int(clamp(ceilf(scaled_resolution - 1.0e-5f), 1.0f, float(resolution)));
 }
 
 bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
 {
-  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
   size_t total_samples = 0;
 
   for (const Geometry *geom : scene->geometry) {
@@ -309,7 +325,7 @@ bool scene_allows_pixel_displacement_metalrt(const Scene *scene)
         return false;
       }
       total_samples += size_t(pixel_displacement_cache_sample_count(grid));
-      if (total_samples > max_cache_samples) {
+      if (total_samples > PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES) {
         return false;
       }
     }
@@ -323,6 +339,11 @@ static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
                                                       device_vector<int> &cache_offset,
                                                       size_t *r_cacheable_triangles)
 {
+  *r_cacheable_triangles = 0;
+  if (!scene->integrator->get_use_pixel_displacement_resolution_clamp()) {
+    return 0;
+  }
+
   uint *grid_data = cache_grid.data();
   int *offset_data = cache_offset.data();
   size_t total_samples = 0;
@@ -346,10 +367,16 @@ static size_t prepare_pixel_displacement_cache_layout(const Scene *scene,
       if (grid == 0) {
         continue;
       }
+      const size_t samples = size_t(pixel_displacement_cache_sample_count(grid));
+      /* Stop before writing offsets that cannot fit the bounded cache. The caller clears the
+       * partial layout and uses direct shader evaluation for the entire scene. */
+      if (samples > PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES - total_samples) {
+        return PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES + 1;
+      }
       const int prim = int(mesh->prim_offset) + triangle;
       grid_data[prim] = uint(grid) | surface_flag;
       offset_data[prim] = int(total_samples);
-      total_samples += size_t(pixel_displacement_cache_sample_count(grid));
+      total_samples += samples;
       cacheable_triangles++;
     }
   }
@@ -582,11 +609,1044 @@ static void read_pixel_displacement_cache_output(
   }
 }
 
+/* Certify constant normals separately from native UV eligibility. The uniform-normal
+ * context can reuse its displacement direction; varying normals retain per-sample evaluation. */
+static bool pixel_displacement_has_uniform_normals(const Mesh *mesh, const int triangle)
+{
+  const Attribute *normals = mesh->attributes.find(ATTR_STD_CORNER_NORMAL);
+  const bool corner_normals = normals != nullptr;
+  if (!normals) {
+    normals = mesh->attributes.find(ATTR_STD_VERTEX_NORMAL);
+  }
+  if (!normals) {
+    return false;
+  }
+  const Mesh::Triangle tri = mesh->get_triangle(triangle);
+  const packed_normal *values = normals->data<packed_normal>();
+  const int count = normals->size;
+  if (!values || count <= 0) {
+    return false;
+  }
+  int indices[3];
+  for (int corner = 0; corner < 3; corner++) {
+    indices[corner] = corner_normals ? triangle * 3 + corner : tri.v[corner];
+    if (indices[corner] < 0 || indices[corner] >= count) {
+      return false;
+    }
+  }
+  return values[indices[0]] == values[indices[1]] && values[indices[0]] == values[indices[2]];
+}
+
+/* Keep the original point/displacement arithmetic when its rounding is material, or
+ * the triangle/instance conversion is ill-conditioned. */
+static bool pixel_displacement_stable_context(DeviceScene *dscene,
+                                              const Mesh *mesh,
+                                              const int triangle,
+                                              const int object_index,
+                                              const float max_distance)
+{
+  const Mesh::Triangle tri = mesh->get_triangle(triangle);
+  const float3 p[3] = {float3(mesh->get_position()[tri.v[0]]),
+                       float3(mesh->get_position()[tri.v[1]]),
+                       float3(mesh->get_position()[tri.v[2]])};
+  const float3 e0 = p[1] - p[0], e1 = p[2] - p[0];
+  const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
+  if (!(d00 * d11 - d01 * d01 > max(1.0e-20f, 1.0e-6f * d00 * d11))) {
+    return false;
+  }
+  const KernelObject &object = dscene->objects[object_index];
+  if (!(object.displacement_transform_bound * object.displacement_inverse_bound < 1000.0f)) {
+    return false;
+  }
+  float position_bound = len(max(fabs(p[0]), max(fabs(p[1]), fabs(p[2]))));
+  if (!(dscene->object_flag[object_index] & SD_OBJECT_TRANSFORM_APPLIED)) {
+    position_bound = position_bound * object.displacement_transform_bound +
+                     len(make_float3(object.tfm.x.w, object.tfm.y.w, object.tfm.z.w));
+  }
+  return std::isfinite(position_bound) && position_bound * FLT_EPSILON <= 1.0e-4f * max_distance;
+}
+
+/* Cache lookup metadata only. The original GPU evaluator still fetches and interpolates
+ * native values, preserving its floating-point arithmetic and conversion paths. */
+static bool pixel_displacement_cache_attribute(DeviceScene *dscene,
+                                               const Shader *shader,
+                                               const int object,
+                                               const int prim,
+                                               float4 &descriptor)
+{
+  const int program_offset = shader->displacement_image_offset;
+  if (program_offset < 0 || size_t(program_offset) > dscene->svm_nodes.size() ||
+      sizeof(SVMDisplacementImage) / sizeof(uint) >
+          dscene->svm_nodes.size() - size_t(program_offset) ||
+      object < 0 || size_t(object) >= dscene->objects.size() || prim < 0 ||
+      size_t(prim) >= dscene->tri_vindex.size())
+  {
+    return false;
+  }
+  SVMDisplacementImage program;
+  memcpy(&program, dscene->svm_nodes.data() + program_offset, sizeof(program));
+  if (program.attribute.output_type != NODE_ATTR_OUTPUT_FLOAT3) {
+    return false;
+  }
+
+  size_t map_offset = dscene->objects[object].attribute_map_offset;
+  /* Mirror the kernel's attribute-map chaining, with bounds/cycle protection. */
+  for (size_t visited = 0; visited < dscene->attributes_map.size(); visited++) {
+    if (map_offset >= dscene->attributes_map.size()) {
+      return false;
+    }
+    const AttributeMap &entry = dscene->attributes_map[map_offset];
+    if (entry.id != program.attribute.attr) {
+      if (entry.id == ATTR_STD_NONE) {
+        if (entry.element == ATTR_ELEMENT_NONE) {
+          return false;
+        }
+        map_offset = entry.offset;
+      }
+      else {
+        map_offset += ATTR_PRIM_TYPES;
+      }
+      continue;
+    }
+    if ((entry.element != ATTR_ELEMENT_VERTEX && entry.element != ATTR_ELEMENT_CORNER) ||
+        (entry.type != NODE_ATTR_FLOAT2 && entry.type != NODE_ATTR_FLOAT3))
+    {
+      return false;
+    }
+    const uint3 indices = dscene->tri_vindex[prim];
+    for (int corner = 0; corner < 3; corner++) {
+      const int64_t index = entry.element == ATTR_ELEMENT_CORNER ?
+                                int64_t(prim) * 3 + corner :
+                                (corner == 0 ? indices.x : (corner == 1 ? indices.y : indices.z));
+      const int64_t offset = int64_t(entry.offset) + index;
+      if (offset < 0) {
+        return false;
+      }
+      if (entry.type == NODE_ATTR_FLOAT2) {
+        if (uint64_t(offset) >= dscene->attributes_float2.size()) {
+          return false;
+        }
+      }
+      else {
+        if (uint64_t(offset) >= dscene->attributes_float3.size()) {
+          return false;
+        }
+      }
+    }
+    descriptor = make_float4(float(entry.element),
+                             float(entry.type),
+                             float(uint(entry.offset) & 65535u),
+                             float(uint(entry.offset) >> 16));
+    return true;
+  }
+  return false;
+}
+
+/* Invariant normal-field coefficients and native UVs for a static triangle. */
+static bool pixel_displacement_normal_inputs(DeviceScene *dscene,
+                                             const int object_index,
+                                             const int prim,
+                                             const float3 p[3],
+                                             float4 data[6])
+{
+  const uint info = dscene->pixel_displacement_info[prim];
+  if ((info & (5u << 27)) != (5u << 27)) {
+    return false;
+  }
+  const uint flag = dscene->object_flag[object_index];
+  const KernelObject &object = dscene->objects[object_index];
+  const uint3 indices = dscene->tri_vindex[prim];
+  const float3 e0 = p[1] - p[0], e1 = p[2] - p[0];
+  float3 Ng = safe_normalize(cross(e0, e1));
+  if ((flag & SD_OBJECT_NEGATIVE_SCALE) && (flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+    Ng = -Ng;
+  }
+  const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
+  const float determinant = d00 * d11 - d01 * d01;
+  if (fabsf(determinant) < 1.0e-20f) {
+    return false;
+  }
+  const float inv_det = 1.0f / determinant;
+  float3 coefficients[3];
+  bool tangential = false;
+  for (int i = 0; i < 3; i++) {
+    const int index = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 + i : indices[i];
+    float3 Q = dscene->attributes_normal[object.normal_offset + index].decode();
+    if (flag & SD_OBJECT_TRANSFORM_APPLIED) {
+      Q = transform_direction(&object.tfm, transform_direction_transposed(&object.tfm, Q));
+    }
+    const float normal_component = dot(Q, Ng);
+    if (!isfinite_safe(Q) || fabsf(normal_component) < max(1.0e-6f, 1.0e-4f * len(Q))) {
+      return false;
+    }
+    tangential |= len_squared(Q - normal_component * Ng) > 1.0e-10f * len_squared(Q);
+    const float d20 = dot(Q, e0), d21 = dot(Q, e1);
+    coefficients[i] = make_float3((d11 * d20 - d01 * d21) * inv_det,
+                                   (d00 * d21 - d01 * d20) * inv_det, normal_component);
+  }
+  if (!tangential || coefficients[0].z * coefficients[1].z <= 0.0f ||
+      coefficients[0].z * coefficients[2].z <= 0.0f)
+  {
+    return false;
+  }
+  for (int i = 0; i < 3; i++) {
+    const float3 q = i == 0 ? coefficients[0] : coefficients[i] - coefficients[0];
+    data[i] = make_float4(q.x, q.y, q.z, 0.0f);
+  }
+  const float4 desc = dscene->pixel_displacement_data[dscene->pixel_displacement_offset[prim]];
+  const int attr_offset = int(uint(desc.z) | (uint(desc.w) << 16));
+  float2 uv[3];
+  for (int i = 0; i < 3; i++) {
+    const int index = uint(desc.x) == ATTR_ELEMENT_CORNER ? prim * 3 + i : indices[i];
+    uv[i] = dscene->attributes_float2[attr_offset + index];
+  }
+  data[3] = make_float4(uv[0].x, uv[0].y, uv[1].x, uv[1].y);
+  data[4] = make_float4(uv[2].x, uv[2].y, 0.0f, 0.0f);
+  data[5] = make_float4(d00, d01, d11, determinant > 0.01f * d00 * d11 ? 1.0f : 0.0f);
+  return true;
+}
+
+/* Preorder escape links remove the traversal stack from direct-bound queries. */
+static void pixel_displacement_direct_escape(std::vector<PixelDisplacementBVHNode> &nodes,
+                                             const int node, const int escape)
+{
+  if (nodes[node].leaf) {
+    nodes[node].v = escape;
+  }
+  else {
+    const int left = nodes[node].child0, right = nodes[node].child1;
+    pixel_displacement_direct_escape(nodes, left, right);
+    pixel_displacement_direct_escape(nodes, right, escape);
+    nodes[node].child1 = escape;
+  }
+}
+
+static bool pixel_displacement_rigid_transform(const KernelObject &object)
+{
+  const Transform &tfm = object.tfm;
+  const float3 axes[3] = {make_float3(tfm.x), make_float3(tfm.y), make_float3(tfm.z)};
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      if (!(fabsf(dot(axes[i], axes[j]) - (i == j ? 1.0f : 0.0f)) <= 1.0e-6f)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/* Bound the continuous native-image surface, independently of the fallback micro mesh.
+ * The hierarchy stores only boxes; it never supplies a displacement sample or a hit. */
+static int build_pixel_displacement_direct_bounds(DeviceScene *dscene,
+                                                  Scene *scene,
+                                                  Progress &progress,
+                                                  const Mesh *mesh,
+                                                  const int triangle,
+                                                  const int object_index,
+                                                  const size_t max_nodes,
+                                                  int &bounds_image,
+                                                  DisplacementImageBounds &pyramid,
+                                                  float3 frame[3],
+                                                  const bool dense_bounds,
+                                                  std::vector<PixelDisplacementBVHNode> &nodes)
+{
+  const int grid = dense_bounds ? 64 : 32;
+  if (nodes.size() + grid * (grid + 1) + 1 > max_nodes) {
+    return -1;
+  }
+  const int prim = int(mesh->prim_offset) + triangle;
+  const uint info = dscene->pixel_displacement_info[prim];
+  if ((info & (5u << 27)) != (5u << 27)) {
+    return -1;
+  }
+  const KernelObject &object = dscene->objects[object_index];
+  /* Non-rigid transforms retain the general search until their normalized field is bounded. */
+  if (!pixel_displacement_rigid_transform(object)) {
+    return -1;
+  }
+  const int shader_id = dscene->tri_shader[prim] & SHADER_MASK;
+  const int evaluator = dscene->shaders[shader_id].displacement_evaluator;
+  if (evaluator < 2) {
+    return -1;
+  }
+  SVMDisplacementImage program;
+  memcpy(&program, dscene->svm_nodes.data() + evaluator - 2, sizeof(program));
+  if (program.image.projection != NODE_IMAGE_PROJ_FLAT || program.image.id < 0 ||
+      size_t(program.image.id) >= dscene->image_textures.size() || program.height_is_alpha ||
+      (program.image.flags & NODE_IMAGE_ALPHA_UNASSOCIATE))
+  {
+    return -1;
+  }
+  const KernelImageTexture &tex = dscene->image_textures[program.image.id];
+  if (tex.interpolation != INTERPOLATION_LINEAR ||
+      tex.tile_descriptor_offset != KERNEL_TILE_LOAD_NONE)
+  {
+    return -1;
+  }
+  device_image *memory = nullptr;
+  for (ShaderNode *node : scene->shaders[shader_id]->graph->nodes) {
+    if (node->type == ImageTextureNode::get_node_type()) {
+      auto *image = static_cast<ImageTextureNode *>(node);
+      if (image->handle.kernel_id() == program.image.id) {
+        memory = image->handle.vdb_image_memory();
+        break;
+      }
+    }
+  }
+  if (!memory || tex.image_info_id == KERNEL_IMAGE_NONE) {
+    return -1;
+  }
+  const KernelImageInfo &image = memory->info;
+  if (bounds_image != program.image.id) {
+    bool built = false;
+    if (image.data_type == IMAGE_DATA_TYPE_BYTE && memory->data<uchar>()) {
+      built = pyramid.build<uchar>(
+          {memory->data<uchar>(), memory->data_size}, image.width, image.height, 256);
+    }
+    else if (image.data_type == IMAGE_DATA_TYPE_USHORT && memory->data<uint16_t>()) {
+      built = pyramid.build<uint16_t>(
+          {memory->data<uint16_t>(), memory->data_size}, image.width, image.height, 256);
+    }
+    bounds_image = built ? program.image.id : -1;
+    if (!built) {
+      return -1;
+    }
+  }
+  const float4 desc = dscene->pixel_displacement_data[dscene->pixel_displacement_offset[prim]];
+  const int attr_offset = int(uint(desc.z) | (uint(desc.w) << 16));
+  const uint3 indices = dscene->tri_vindex[prim];
+  const Mesh::Triangle tri = mesh->get_triangle(triangle);
+  float2 uv[3];
+  float3 p[3], n[3];
+  const uint flag = dscene->object_flag[object_index];
+  for (int i = 0; i < 3; i++) {
+    const int index = uint(desc.x) == ATTR_ELEMENT_CORNER ? prim * 3 + i : indices[i];
+    uv[i] = dscene->attributes_float2[attr_offset + index];
+    if (program.use_mapping) {
+      const Transform mapping = make_transform(program.mapping.tfm);
+      uv[i] = make_float2(transform_point(&mapping, make_float3(uv[i])));
+    }
+    if (!std::isfinite(uv[i].x) || !std::isfinite(uv[i].y) ||
+        fabsf(uv[i].x * image.width) > 1.0e8f || fabsf(uv[i].y * image.height) > 1.0e8f)
+    {
+      return -1;
+    }
+    p[i] = float3(mesh->get_position()[tri.v[i]]);
+    const int ni = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 + i : indices[i];
+    n[i] = dscene->attributes_normal[object.normal_offset + ni].decode();
+  }
+  frame[2] = safe_normalize(n[0] + n[1] + n[2]);
+  if (is_zero(frame[2])) {
+    return -1;
+  }
+  make_orthonormals(frame[2], &frame[0], &frame[1]);
+  if (!dense_bounds) {
+    frame[0] = make_float3(1.0f, 0.0f, 0.0f);
+    frame[1] = make_float3(0.0f, 1.0f, 0.0f);
+    frame[2] = make_float3(0.0f, 0.0f, 1.0f);
+  }
+  for (int i = 0; i < 3; i++) {
+    p[i] = make_float3(dot(p[i], frame[0]), dot(p[i], frame[1]), dot(p[i], frame[2]));
+    n[i] = make_float3(dot(n[i], frame[0]), dot(n[i], frame[1]), dot(n[i], frame[2]));
+  }
+  const float scale = __uint_as_float(program.displacement.scale.bits) *
+                      scene->integrator->get_pixel_displacement_scale();
+  const float midlevel = __uint_as_float(program.displacement.midlevel.bits);
+  const float distance = scene->integrator->get_pixel_displacement_max_distance();
+  if (!std::isfinite(scale) || !std::isfinite(midlevel)) {
+    return -1;
+  }
+  const float gray = scene->shader_manager->linear_rgb_to_gray(one_float3());
+  if (!std::isfinite(gray)) {
+    return -1;
+  }
+  std::vector<PixelDisplacementBVHBlock> blocks;
+  for (int u = 0; u < grid; u++) {
+    for (int v = 0; u + v < grid; v++) {
+      if (progress.get_cancel()) {
+        return -1;
+      }
+      BoundBox base = BoundBox::empty;
+      float2 uvlo = make_float2(FLT_MAX, FLT_MAX), uvhi = -uvlo;
+      float3 nlo = make_float3(FLT_MAX), nhi = -nlo;
+      float norm_hi = 0.0f;
+      for (int corner = 0; corner < 4; corner++) {
+        const float a = float(u + (corner & 1)) / grid;
+        const float b = float(min(v + (corner >> 1), grid - u - (corner & 1))) / grid;
+        const float2 t = uv[0] + a * (uv[1] - uv[0]) + b * (uv[2] - uv[0]);
+        const float3 normal = n[0] + a * (n[1] - n[0]) + b * (n[2] - n[0]);
+        base.grow(p[0] + a * (p[1] - p[0]) + b * (p[2] - p[0]));
+        uvlo = min(uvlo, t);
+        uvhi = max(uvhi, t);
+        nlo = min(nlo, normal);
+        nhi = max(nhi, normal);
+        norm_hi = max(norm_hi, len(normal));
+      }
+      float3 nearest = max(nlo, zero_float3()) + min(nhi, zero_float3());
+      const float norm_lo = len(nearest);
+      /* Nearly opposed normals amplify small transform/normal rounding errors. */
+      if (!(norm_lo > 0.01f)) {
+        return -1;
+      }
+      const float3 normal_lo = min(nlo / norm_lo, nlo / norm_hi);
+      const float3 normal_hi = max(nhi / norm_lo, nhi / norm_hi);
+      using Extension = DisplacementImageBounds::Extension;
+      const Extension extension = tex.extension == EXTENSION_REPEAT ? Extension::Repeat :
+                                  tex.extension == EXTENSION_EXTEND ? Extension::Extend :
+                                  tex.extension == EXTENSION_CLIP ? Extension::Clip :
+                                                                  Extension::Unknown;
+      const uint32_t range = pyramid.query_linear(uvlo.x, uvlo.y, uvhi.x, uvhi.y, extension);
+      float lo = float(DisplacementImageBounds::lower(range)) / 65535.0f;
+      float hi = float(DisplacementImageBounds::upper(range)) / 65535.0f;
+      if (program.image.flags & NODE_IMAGE_COMPRESS_AS_SRGB) {
+        lo = color_srgb_to_linear(lo);
+        hi = color_srgb_to_linear(hi);
+      }
+      const float a = (lo * gray - midlevel) * scale;
+      const float b = (hi * gray - midlevel) * scale;
+      if (!std::isfinite(a) || !std::isfinite(b)) {
+        return -1;
+      }
+      lo = clamp(min(a, b), -distance, distance);
+      hi = clamp(max(a, b), -distance, distance);
+      const float3 dlo = min(min(normal_lo * lo, normal_lo * hi),
+                             min(normal_hi * lo, normal_hi * hi));
+      const float3 dhi = max(max(normal_lo * lo, normal_lo * hi),
+                             max(normal_hi * lo, normal_hi * hi));
+      base.min += dlo;
+      base.max += dhi;
+      /* Root-search residual tolerance and host/device arithmetic. */
+      const float margin = 0.001f + distance * 0.001f +
+                           128.0f * FLT_EPSILON * max(len(base.min), len(base.max));
+      base.min -= make_float3(margin);
+      base.max += make_float3(margin);
+      blocks.push_back({base, u, v});
+    }
+  }
+  const int root = int(nodes.size());
+  build_pixel_displacement_bvh_recursive(blocks, 0, int(blocks.size()), nodes);
+  pixel_displacement_direct_escape(nodes, root, -1);
+  return root;
+}
+
+/* Accelerate the existing finite grazing fallback. No additional shader samples are
+ * created; the combined samples and bounds remain inside the fallback's 16 MiB budget. */
+static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
+                                               Scene *scene,
+                                               Progress &progress,
+                                               const int grids[3],
+                                               const int num_grids)
+{
+  const size_t budget = 16 * 1024 * 1024;
+  const size_t sample_bytes = dscene->pixel_displacement_data.size() * sizeof(float4);
+  if (sample_bytes >= budget) {
+    return;
+  }
+  const size_t max_nodes = (budget - sample_bytes) / (2 * sizeof(float4));
+  std::vector<PixelDisplacementBVHNode> nodes;
+  /* Each header occupies six float4s: fallback roots/tag, four flat-input records,
+   * then (direct root + 1, normal-input record + 1, bounds frame + 1, 0).
+   * Zero means unavailable. */
+  vector<pair<int, int3>> headers;
+  struct DirectBoundsTask {
+    Mesh *mesh;
+    int triangle, object, header;
+    int3 fallback_roots;
+  };
+  vector<DirectBoundsTask> direct_tasks;
+  vector<int3> direct_roots;
+  struct ContextRecord {
+    int header;
+    bool mapped;
+    float4 data[4];
+  };
+  vector<ContextRecord> contexts;
+  struct NormalRecord {
+    int header, offset;
+    float4 data[6];
+  };
+  vector<NormalRecord> normal_records;
+  float max_normal_tangent_squared = 0.0f;
+  const float scale = scene->integrator->get_pixel_displacement_scale();
+  const float max_distance = scene->integrator->get_pixel_displacement_max_distance();
+  for (Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+    Mesh *mesh = static_cast<Mesh *>(geom);
+    int object_index;
+    if (!single_object_for_mesh(scene, mesh, &object_index)) {
+      continue;
+    }
+    const packed_float3 *verts = mesh->get_position();
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int prim = int(mesh->prim_offset) + triangle;
+      const uint info = dscene->pixel_displacement_info[prim];
+      if (!(info & (1u << 29)) || dscene->pixel_displacement_offset[prim] < 0) {
+        continue;
+      }
+      /* All three bounded grids together need fewer than 256 nodes. */
+      if (nodes.size() + 256 > max_nodes) {
+        continue;
+      }
+      const int header = int(nodes.size());
+      for (int record = 0; record < 3; record++) {
+        nodes.push_back({BoundBox::empty, 0, 0, 0, 0, false});
+      }
+      int3 roots = make_int3(-1, -1, -1);
+      int sample_offset = dscene->pixel_displacement_offset[prim] + ((info & (1u << 27)) ? 1 : 0);
+      const Mesh::Triangle tri = mesh->get_triangle(triangle);
+      const float3 p0 = float3(verts[tri.v[0]]);
+      const float3 e0 = float3(verts[tri.v[1]]) - p0;
+      const float3 e1 = float3(verts[tri.v[2]]) - p0;
+      if ((info & (7u << 27)) == (7u << 27)) {
+        const float4 desc =
+            dscene->pixel_displacement_data[dscene->pixel_displacement_offset[prim]];
+        const int attr_offset = int(uint(desc.z) | (uint(desc.w) << 16));
+        const uint3 indices = dscene->tri_vindex[prim];
+        float2 uv[3];
+        for (int i = 0; i < 3; i++) {
+          const int index = uint(desc.x) == ATTR_ELEMENT_CORNER ? prim * 3 + i : indices[i];
+          uv[i] = dscene->attributes_float2[attr_offset + index];
+        }
+        const int shader = dscene->tri_shader[prim] & SHADER_MASK;
+        const int evaluator = dscene->shaders[shader].displacement_evaluator;
+        SVMDisplacementImage program;
+        memcpy(&program, dscene->svm_nodes.data() + evaluator - 2, sizeof(program));
+        const bool mapped = program.use_mapping &&
+                            program.image.projection == NODE_IMAGE_PROJ_FLAT;
+        if (mapped) {
+          const Transform mapping = make_transform(program.mapping.tfm);
+          for (int i = 0; i < 3; i++) {
+            uv[i] = make_float2(transform_point(&mapping, make_float3(uv[i])));
+          }
+        }
+        const uint flag = dscene->object_flag[object_index];
+        const KernelObject &object = dscene->objects[object_index];
+        const int normal_index = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 : indices.x;
+        float3 N = safe_normalize(
+            dscene->attributes_normal[object.normal_offset + normal_index].decode());
+        if (is_zero(N)) {
+          N = safe_normalize(cross(e0, e1));
+          if ((flag & SD_OBJECT_NEGATIVE_SCALE) && (flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+            N = -N;
+          }
+        }
+        if (!(flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+          N = normalize(transform_direction_transposed(&object.itfm, N));
+        }
+        N = safe_normalize(transform_direction_transposed(&object.tfm, N));
+        N = transform_direction(&object.tfm, N);
+        if (!(flag & SD_OBJECT_TRANSFORM_APPLIED)) {
+          N = transform_direction(&object.itfm, N);
+        }
+        max_normal_tangent_squared = max(max_normal_tangent_squared,
+                                         len_squared(cross(N, safe_normalize(cross(e0, e1)))) /
+                                             max(len_squared(N), 1.0e-20f));
+        const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
+        const float denominator = d00 * d11 - d01 * d01;
+        contexts.push_back(
+            {header,
+             mapped,
+             {make_float4(N.x,
+                          N.y,
+                          N.z,
+                          len_squared(cross(N, safe_normalize(cross(e0, e1)))) <=
+                                  1.0e-8f * len_squared(N) ?
+                              1.0f :
+                              0.0f),
+              make_float4(uv[0].x, uv[0].y, uv[1].x, uv[1].y),
+              make_float4(uv[2].x, uv[2].y, 0.0f, 0.0f),
+              make_float4(
+                  d00, d01, d11, fabsf(denominator) < 1.0e-20f ? 0.0f : 1.0f / denominator)}});
+      }
+      for (int slot = 0; slot < num_grids; slot++) {
+        const int grid = grids[slot];
+        const float inv_grid = 1.0f / float(grid);
+        std::vector<PixelDisplacementBVHBlock> blocks;
+        for (int u0 = 0; u0 < grid; u0 += 2) {
+          for (int v0 = 0; u0 + v0 < grid; v0 += 2) {
+            BoundBox bounds = BoundBox::empty;
+            for (int u = u0; u <= min(u0 + 2, grid); u++) {
+              for (int v = v0; v <= min(v0 + 2, grid - u); v++) {
+                const int index = sample_offset +
+                                  pixel_displacement_cache_sample_index(grid, u, v);
+                float3 D = make_float3(dscene->pixel_displacement_data[index]) * scale;
+                const float distance = len(D);
+                if (distance > max_distance && distance > 0.0f) {
+                  D *= max_distance / distance;
+                }
+                bounds.grow(p0 + (float(u) * inv_grid) * e0 + (float(v) * inv_grid) * e1 +
+                            ensure_finite(D));
+              }
+            }
+            /* Enclose the microtriangle edge tolerance as well as CPU/GPU roundoff. */
+            const float margin = 0.002f * max(1.0f, len(bounds.max - bounds.min)) +
+                                 128.0f * FLT_EPSILON * max(len(bounds.min), len(bounds.max));
+            bounds.min -= make_float3(margin);
+            bounds.max += make_float3(margin);
+            blocks.push_back({bounds, u0, v0});
+          }
+        }
+        roots[slot] = int(nodes.size());
+        build_pixel_displacement_bvh_recursive(blocks, 0, int(blocks.size()), nodes);
+        sample_offset += pixel_displacement_cache_sample_count(grid);
+      }
+      NormalRecord normal_record;
+      normal_record.header = header;
+      normal_record.offset = int(nodes.size());
+      const float3 triangle_verts[3] = {p0, float3(verts[tri.v[1]]), float3(verts[tri.v[2]])};
+      if (nodes.size() + 3 <= max_nodes &&
+          pixel_displacement_normal_inputs(
+              dscene, object_index, prim, triangle_verts, normal_record.data))
+      {
+        normal_records.push_back(normal_record);
+        for (int i = 0; i < 3; i++) {
+          nodes.push_back({BoundBox::empty, 0, 0, 0, 0, false});
+        }
+      }
+      direct_tasks.push_back({mesh, triangle, object_index, header, roots});
+      headers.push_back({header, roots});
+      dscene->pixel_displacement_bvh_offset[prim] = header;
+    }
+  }
+  if (nodes.empty()) {
+    return;
+  }
+  /* Preserve every existing fallback/context allocation before spending the remaining
+   * budget on optional native-surface bounds. */
+  /* Reuse one image pyramid across adjacent triangles, without retaining a copy
+   * for every image in a large scene. */
+  DisplacementImageBounds pyramid;
+  int bounds_image = -1;
+  bool dense_bounds = !normal_records.empty() && normal_records.size() == direct_tasks.size();
+  for (const NormalRecord &record : normal_records) {
+    dense_bounds &= record.data[5].w != 0.0f;
+  }
+  for (const DirectBoundsTask &task : direct_tasks) {
+    float3 frame[3];
+    const int root = build_pixel_displacement_direct_bounds(dscene,
+                                                            scene,
+                                                            progress,
+                                                            task.mesh,
+                                                            task.triangle,
+                                                            task.object,
+                                                            max_nodes,
+                                                            bounds_image,
+                                                            pyramid,
+                                                            frame,
+                                                            dense_bounds,
+                                                            nodes);
+    int frame_index = -1;
+    /* World-axis bounds do not need a per-ray frame transform. */
+    if (root >= 0 && dense_bounds) {
+      frame_index = int(nodes.size());
+      BoundBox frame_data;
+      frame_data.min = frame[0];
+      frame_data.max = frame[1];
+      nodes.push_back({frame_data, 0, 0, 0, 0, false});
+    }
+    direct_roots.push_back(make_int3(task.header, root, frame_index));
+    if (root >= 0) {
+      if (task.mesh->pixel_displacement_bounds.empty()) {
+        task.mesh->pixel_displacement_bounds.resize(task.mesh->num_triangles());
+        for (BoundBox &bounds : task.mesh->pixel_displacement_bounds) {
+          bounds = BoundBox::empty;
+        }
+      }
+      const BoundBox local_bounds = nodes[root].bounds;
+      BoundBox bounds = BoundBox::empty;
+      for (int corner = 0; corner < 8; corner++) {
+        const float3 point = make_float3(corner & 1 ? local_bounds.max.x : local_bounds.min.x,
+                                         corner & 2 ? local_bounds.max.y : local_bounds.min.y,
+                                         corner & 4 ? local_bounds.max.z : local_bounds.min.z);
+        bounds.grow(frame[0] * point.x + frame[1] * point.y + frame[2] * point.z);
+      }
+      for (int slot = 0; slot < num_grids; slot++) {
+        bounds.grow(nodes[task.fallback_roots[slot]].bounds);
+      }
+      task.mesh->pixel_displacement_bounds[task.triangle] = bounds;
+      task.mesh->pixel_displacement_bounds_are_direct = true;
+    }
+  }
+  float4 *data = dscene->pixel_displacement_bvh_nodes.alloc(nodes.size() * 2);
+  for (size_t i = 0; i < nodes.size(); i++) {
+    const auto &node = nodes[i];
+    data[i * 2] = make_float4(
+        node.bounds.min.x,
+        node.bounds.min.y,
+        node.bounds.min.z,
+        __uint_as_float(node.leaf ? (0x80000000u | uint(node.u)) : uint(node.child0)));
+    data[i * 2 + 1] = make_float4(node.bounds.max.x,
+                                  node.bounds.max.y,
+                                  node.bounds.max.z,
+                                  __uint_as_float(node.leaf ? uint(node.v) : uint(node.child1)));
+  }
+  for (const auto &header : headers) {
+    data[header.first * 2] = make_float4(
+        float(header.second.x), float(header.second.y), float(header.second.z), 0.0f);
+  }
+  for (const auto &root : direct_roots) {
+    data[root.x * 2 + 5] = make_float4(float(root.y + 1), 0.0f, float(root.z + 1), 0.0f);
+  }
+  for (const NormalRecord &record : normal_records) {
+    data[record.header * 2 + 5].y = float(record.offset + 1);
+    for (int i = 0; i < 6; i++) {
+      data[record.offset * 2 + i] = record.data[i];
+    }
+  }
+  for (const ContextRecord &ctx : contexts) {
+    data[ctx.header * 2].w = ctx.mapped ? 2.0f : 1.0f;
+    for (int i = 0; i < 4; i++) {
+      data[ctx.header * 2 + 1 + i] = ctx.data[i];
+    }
+  }
+  dscene->pixel_displacement_bvh_nodes.copy_to_device();
+  dscene->pixel_displacement_bvh_offset.copy_to_device();
+  LOG_DEBUG << "Displacement fallback BVH: " << headers.size() << " triangles, " << nodes.size()
+            << " nodes, " << sample_bytes + nodes.size() * 2 * sizeof(float4)
+            << " combined sample and bounds bytes; " << normal_records.size()
+            << " normal-input records; uniform normal tangent squared " << max_normal_tangent_squared;
+}
+
+static void build_pixel_displacement_patch_cache(Device *device,
+                                                 DeviceScene *dscene,
+                                                 Scene *scene,
+                                                 Progress &progress)
+{
+  if (getenv("CYCLES_PIXEL_DISPLACEMENT_DISABLE_PATCH_CACHE") != nullptr) {
+    return;
+  }
+  constexpr uint patch_cache_flag = 1u << 29;
+  constexpr size_t max_patch_samples = 1024 * 1024;
+  const bool compare_image = getenv("CYCLES_PIXEL_DISPLACEMENT_COMPARE_FUSED_IMAGE") != nullptr;
+  const bool cache_inputs = !compare_image &&
+                            getenv("CYCLES_PIXEL_DISPLACEMENT_DISABLE_INPUT_CACHE") == nullptr;
+  const int steps = clamp(scene->integrator->get_pixel_displacement_steps(), 8, 128);
+  int grids[3];
+  int num_grids = 0;
+  uint packed_grids = patch_cache_flag;
+  size_t samples_per_triangle = 0;
+  for (int factor = 1; factor <= 4; factor *= 2) {
+    const int grid = clamp(int(ceilf(sqrtf(float(min(steps * factor, 128)))) + 2), 6, 14);
+    if (num_grids > 0 && grid == grids[num_grids - 1]) {
+      continue;
+    }
+    packed_grids |= uint(grid) << (4 * num_grids);
+    grids[num_grids++] = grid;
+    samples_per_triangle += size_t(pixel_displacement_cache_sample_count(grid));
+  }
+  if (compare_image) {
+    samples_per_triangle = 4096;
+  }
+
+  struct PatchTriangle {
+    int object;
+    int prim;
+    bool cache_attribute;
+    float4 descriptor;
+  };
+  vector<PatchTriangle> triangles;
+  size_t total_samples = 0;
+  for (const Geometry *geom : scene->geometry) {
+    if (!geom->is_mesh()) {
+      continue;
+    }
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    if (!mesh->use_pixel_displacement || mesh->get_use_motion_blur()) {
+      continue;
+    }
+    int object_index;
+    const Object *object = single_object_for_mesh(scene, mesh, &object_index);
+    if (object == nullptr || object->use_motion()) {
+      continue;
+    }
+    for (int triangle = 0; triangle < mesh->num_triangles(); triangle++) {
+      const int shader_index = mesh->get_shader()[triangle];
+      const array<Node *> &shaders = mesh->get_used_shaders();
+      const Shader *shader = (shader_index >= 0 && size_t(shader_index) < shaders.size()) ?
+                                 static_cast<Shader *>(shaders[shader_index]) :
+                                 scene->default_surface;
+      if (!shader_allows_pixel_displacement_cache(shader) ||
+          (compare_image && shader->displacement_image_offset < 0) ||
+          samples_per_triangle > max_patch_samples - total_samples)
+      {
+        continue;
+      }
+      const int prim = int(mesh->prim_offset) + triangle;
+      float4 descriptor = zero_float4();
+      const bool cache_attribute = cache_inputs &&
+                                   pixel_displacement_stable_context(
+                                       dscene,
+                                       mesh,
+                                       triangle,
+                                       object_index,
+                                       scene->integrator->get_pixel_displacement_max_distance()) &&
+                                   pixel_displacement_cache_attribute(
+                                       dscene, shader, object_index, prim, descriptor) &&
+                                   uint(descriptor.y) == NODE_ATTR_FLOAT2;
+      const size_t triangle_samples = samples_per_triangle + (cache_attribute ? 1 : 0);
+      if (triangle_samples > max_patch_samples - total_samples) {
+        continue;
+      }
+      const bool uniform_normal = pixel_displacement_has_uniform_normals(mesh, triangle);
+      dscene->pixel_displacement_info[prim] =
+          packed_grids | (cache_attribute ? (1u << 27) | (uniform_normal ? (1u << 28) : 0) : 0);
+      dscene->pixel_displacement_offset[prim] = int(total_samples);
+      total_samples += triangle_samples;
+      triangles.push_back({object_index, prim, cache_attribute, descriptor});
+    }
+  }
+  if (triangles.empty()) {
+    if (compare_image) {
+      progress.set_error("No eligible fused image program for the diagnostic comparison");
+    }
+    return;
+  }
+
+  /* Store raw object-space displacement. Integrator settings are uploaded after this bake;
+   * scale and distance clamping are applied by the ray query, using its current settings. */
+  progress.set_status("Updating Mesh", "Caching Displacement Fallback Samples");
+  ShaderEval shader_eval(device, progress);
+  const bool success = shader_eval.eval(
+      SHADER_EVAL_DISPLACE,
+      int(triangles.size() * samples_per_triangle),
+      3,
+      [&triangles, &grids, num_grids, compare_image](device_vector<KernelShaderEvalInput> &input) {
+        int count = 0;
+        for (const PatchTriangle &triangle : triangles) {
+          if (compare_image) {
+            for (int sample = 0; sample < 4096; sample++) {
+              float u = (float(sample & 63) + 0.37f) / 64.0f;
+              float v = (float(sample >> 6) + 0.61f) / 64.0f;
+              if (u + v > 1.0f) {
+                u = 1.0f - u;
+                v = 1.0f - v;
+              }
+              input[count++] = {~triangle.object, ~triangle.prim, u, v};
+            }
+            continue;
+          }
+          for (int slot = 0; slot < num_grids; slot++) {
+            const int grid = grids[slot];
+            for (int u = 0; u <= grid; u++) {
+              for (int v = 0; u + v <= grid; v++) {
+                /* Negative primitive IDs request the direct shader setup in the Metal bake
+                 * kernel. UVs encode integer patch coordinates to preserve GPU rounding. */
+                input[count++] = {compare_image ? ~triangle.object : triangle.object,
+                                  ~triangle.prim,
+                                  float(grid * 16 + u),
+                                  float(v)};
+              }
+            }
+          }
+        }
+        return count;
+      },
+      [dscene, total_samples, samples_per_triangle, compare_image, &progress, &triangles](
+          device_vector<float> &output) {
+        if (compare_image) {
+          float maximum = 0.0f;
+          double squared = 0.0;
+          for (size_t i = 0; i < total_samples * 3; i++) {
+            maximum = max(maximum, fabsf(output[i]));
+            const double value = output[i];
+            squared += value * value;
+          }
+          LOG_INFO << "Fused displacement raw comparison: samples " << total_samples << " max "
+                   << maximum << " rms " << sqrt(squared / double(total_samples * 3));
+          progress.set_error("Diagnostic comparison complete; render intentionally stopped");
+          return;
+        }
+        float4 *data = dscene->pixel_displacement_data.alloc(total_samples);
+        size_t source = 0;
+        for (const PatchTriangle &triangle : triangles) {
+          size_t destination = dscene->pixel_displacement_offset[triangle.prim];
+          if (triangle.cache_attribute) {
+            data[destination++] = triangle.descriptor;
+          }
+          for (size_t sample = 0; sample < samples_per_triangle; sample++, source++) {
+            data[destination++] = make_float4(
+                output[3 * source], output[3 * source + 1], output[3 * source + 2], 0.0f);
+          }
+        }
+        LOG_DEBUG << "Displacement fallback cache: " << triangles.size() << " triangles, "
+                  << source << " baked samples, " << total_samples - source
+                  << " cached attribute descriptors";
+      });
+  if (!success || progress.get_cancel()) {
+    for (const PatchTriangle &triangle : triangles) {
+      dscene->pixel_displacement_info[triangle.prim] = 0;
+      dscene->pixel_displacement_offset[triangle.prim] = -1;
+    }
+    dscene->pixel_displacement_data.free();
+  }
+  if (success && !progress.get_cancel()) {
+    build_pixel_displacement_patch_bvh(dscene, scene, progress, grids, num_grids);
+  }
+  /* Keep the full fallback available unless every image triangle has certified inputs.
+   * This scene-wide flag lets Metal omit the unused interpreter in fully eligible scenes. */
+  bool needs_full_evaluator = false;
+  bool all_uniform_normals = true;
+  bool all_parallel_normals = true;
+  bool all_normal_inputs = true;
+  for (size_t prim = 0; prim < dscene->tri_shader.size(); prim++) {
+    const int shader_id = dscene->tri_shader[prim] & SHADER_MASK;
+    if (dscene->shaders[shader_id].displacement_evaluator >= 2) {
+      const int header = dscene->pixel_displacement_bvh_offset[prim];
+      if (header < 0 || size_t(header) * 2 + 5 >= dscene->pixel_displacement_bvh_nodes.size() ||
+          dscene->pixel_displacement_bvh_nodes[header * 2 + 5].y <= 0.0f)
+      {
+        all_normal_inputs = false;
+      }
+      else {
+        for (int slot = 0; slot < num_grids; slot++) {
+          const int root = int(dscene->pixel_displacement_bvh_nodes[header * 2][slot]);
+          if (int((dscene->pixel_displacement_info[prim] >> (slot * 4)) & 15u) != grids[slot] ||
+              root < 0 || size_t(root) * 2 + 1 >= dscene->pixel_displacement_bvh_nodes.size())
+          {
+            all_normal_inputs = false;
+          }
+        }
+        const int record = int(dscene->pixel_displacement_bvh_nodes[header * 2 + 5].y) - 1;
+        if (dscene->pixel_displacement_bvh_nodes[record * 2 + 5].w == 0.0f) {
+          all_normal_inputs = false;
+        }
+      }
+
+      if (header < 0 || size_t(header) * 2 + 1 >= dscene->pixel_displacement_bvh_nodes.size() ||
+          dscene->pixel_displacement_bvh_nodes[header * 2].w == 0.0f ||
+          dscene->pixel_displacement_bvh_nodes[header * 2 + 1].w != 1.0f)
+      {
+        all_parallel_normals = false;
+      }
+    }
+    if (dscene->shaders[shader_id].displacement_evaluator >= 2 &&
+        !(dscene->pixel_displacement_info[prim] & (1u << 28)))
+    {
+      all_uniform_normals = false;
+    }
+    if (dscene->shaders[shader_id].displacement_evaluator >= 2 &&
+        ((dscene->pixel_displacement_info[prim] & (5u << 27)) != (5u << 27) ||
+         dscene->pixel_displacement_offset[prim] < 0))
+    {
+      needs_full_evaluator = true;
+      break;
+    }
+  }
+  if (!needs_full_evaluator && success && !progress.get_cancel()) {
+    dscene->data.integrator.pixel_displacement_evaluator_set &=
+        ~PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
+    if (all_uniform_normals) {
+      dscene->data.integrator.pixel_displacement_evaluator_set |=
+          PIXEL_DISPLACEMENT_UNIFORM_NORMALS;
+    }
+    if (all_uniform_normals && all_parallel_normals) {
+      dscene->data.integrator.pixel_displacement_evaluator_set |=
+          PIXEL_DISPLACEMENT_PARALLEL_NORMALS;
+    }
+    bool resident_linear = true;
+    bool scalar_images = true;
+    bool identity_mapping = true;
+    for (size_t shader_index = 0; shader_index < dscene->shaders.size(); shader_index++) {
+      const KernelShader &shader = dscene->shaders[shader_index];
+      if (shader.displacement_evaluator < 2) {
+        continue;
+      }
+      SVMDisplacementImage program;
+      memcpy(
+          &program, dscene->svm_nodes.data() + shader.displacement_evaluator - 2, sizeof(program));
+      if (program.image.projection != NODE_IMAGE_PROJ_FLAT || program.image.id < 0 ||
+          program.image.id >= dscene->image_textures.size())
+      {
+        resident_linear = false;
+        break;
+      }
+      if (program.use_mapping && !(make_transform(program.mapping.tfm) == transform_identity())) {
+        identity_mapping = false;
+      }
+      const KernelImageTexture &tex = dscene->image_textures[program.image.id];
+      if (tex.tile_descriptor_offset != KERNEL_TILE_LOAD_NONE ||
+          tex.image_info_id == KERNEL_IMAGE_NONE || tex.interpolation != INTERPOLATION_LINEAR)
+      {
+        resident_linear = false;
+        break;
+      }
+      device_image *image_memory = nullptr;
+      for (ShaderNode *node : scene->shaders[shader_index]->graph->nodes) {
+        if (node->type == ImageTextureNode::get_node_type()) {
+          auto *image_node = static_cast<ImageTextureNode *>(node);
+          if (image_node->handle.kernel_id() == program.image.id) {
+            image_memory = image_node->handle.vdb_image_memory();
+            break;
+          }
+        }
+      }
+      if (!image_memory || program.height_is_alpha) {
+        scalar_images = false;
+      }
+      else {
+        const auto type = image_memory->info.data_type;
+        if (!(type == IMAGE_DATA_TYPE_BYTE || type == IMAGE_DATA_TYPE_USHORT ||
+              type == IMAGE_DATA_TYPE_HALF || type == IMAGE_DATA_TYPE_FLOAT))
+        {
+          scalar_images = false;
+        }
+      }
+    }
+    if (resident_linear) {
+      dscene->data.integrator.pixel_displacement_evaluator_set |=
+          PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE;
+      bool rigid = true;
+      for (size_t i = 0; i < dscene->objects.size(); i++) {
+        if ((dscene->object_flag[i] & SD_OBJECT_MOTION) ||
+            !pixel_displacement_rigid_transform(dscene->objects[i]))
+        {
+          rigid = false;
+          break;
+        }
+      }
+      if (rigid) {
+        dscene->data.integrator.pixel_displacement_evaluator_set |=
+            PIXEL_DISPLACEMENT_RIGID_TRANSFORMS;
+        if (all_normal_inputs && !all_uniform_normals &&
+            !(dscene->data.integrator.pixel_displacement_evaluator_set & (1 | 2 | 8)))
+        {
+          dscene->data.integrator.pixel_displacement_evaluator_set |=
+              PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS;
+          if (scalar_images) {
+            dscene->data.integrator.pixel_displacement_evaluator_set |=
+                PIXEL_DISPLACEMENT_SCALAR_IMAGE;
+          }
+          if (identity_mapping) {
+            dscene->data.integrator.pixel_displacement_evaluator_set |=
+                PIXEL_DISPLACEMENT_IDENTITY_MAPPING;
+          }
+        }
+      }
+    }
+    LOG_DEBUG << "Direct resident linear image specialization: " << resident_linear
+              << "; uniform normals " << all_uniform_normals << "; parallel normals "
+              << all_parallel_normals << "; normal inputs " << all_normal_inputs
+              << "; scalar images " << scalar_images << "; identity mapping " << identity_mapping;
+  }
+  dscene->pixel_displacement_info.copy_to_device();
+  dscene->pixel_displacement_offset.copy_to_device();
+  dscene->pixel_displacement_data.copy_to_device();
+}
+
 bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
                                                              DeviceScene *dscene,
                                                              Scene *scene,
                                                              Progress &progress)
 {
+  dscene->data.integrator.pixel_displacement_evaluator_set &= ~(
+      PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE | PIXEL_DISPLACEMENT_UNIFORM_NORMALS |
+      PIXEL_DISPLACEMENT_PARALLEL_NORMALS | PIXEL_DISPLACEMENT_RIGID_TRANSFORMS |
+      PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS | PIXEL_DISPLACEMENT_SCALAR_IMAGE |
+      PIXEL_DISPLACEMENT_IDENTITY_MAPPING);
+  dscene->data.integrator.pixel_displacement_evaluator_set |=
+      PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS;
   device_vector<uint> &cache_info = dscene->pixel_displacement_info;
   device_vector<int> &cache_offset = dscene->pixel_displacement_offset;
   device_vector<float4> &cache_data = dscene->pixel_displacement_data;
@@ -614,14 +1674,16 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
     if (geom->is_mesh()) {
       Mesh *mesh = static_cast<Mesh *>(geom);
       mesh->pixel_displacement_bounds.clear();
+      mesh->pixel_displacement_bounds_are_direct = false;
     }
   }
 
   size_t cacheable_triangles = 0;
   const size_t total_samples = prepare_pixel_displacement_cache_layout(
       scene, cache_info, cache_offset, &cacheable_triangles);
-  constexpr size_t max_cache_samples = 8 * 1024 * 1024;
-  if (cacheable_triangles == 0 || total_samples == 0 || total_samples > max_cache_samples) {
+  if (cacheable_triangles == 0 || total_samples == 0 ||
+      total_samples > PIXEL_DISPLACEMENT_MAX_CACHE_SAMPLES)
+  {
     for (int i = 0; i < cache_info.size(); i++) {
       info[i] = 0;
     }
@@ -631,6 +1693,7 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
     cache_info.copy_to_device();
     cache_offset.copy_to_device();
     bvh_offset.copy_to_device();
+    build_pixel_displacement_patch_cache(device, dscene, scene, progress);
     return false;
   }
 
@@ -684,6 +1747,7 @@ bool GeometryManager::device_update_pixel_displacement_cache(Device *device,
       if (geom->is_mesh()) {
         Mesh *mesh = static_cast<Mesh *>(geom);
         mesh->pixel_displacement_bounds.clear();
+        mesh->pixel_displacement_bounds_are_direct = false;
       }
     }
     cache_info.copy_to_device();

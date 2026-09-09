@@ -243,7 +243,8 @@ bool BVHMetal::build_BLAS_mesh(Progress &progress,
         for (size_t triangle = 0; triangle < num_triangles; ++triangle) {
           float3 bounds_min;
           float3 bounds_max;
-          if (num_motion_steps == 1 && mesh->pixel_displacement_bounds.size() == num_triangles) {
+          if (num_motion_steps == 1 && mesh->pixel_displacement_bounds.size() == num_triangles &&
+              mesh->pixel_displacement_bounds[triangle].valid()) {
             bounds_min = mesh->pixel_displacement_bounds[triangle].min;
             bounds_max = mesh->pixel_displacement_bounds[triangle].max;
             const float3 bounds_epsilon = make_float3(1.0e-6f);

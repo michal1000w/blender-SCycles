@@ -274,11 +274,16 @@ def list_render_passes(scene, srl):
     for lightgroup in srl.lightgroups:
         yield ("Combined_%s" % lightgroup.name, "RGB", 'COLOR')
 
-    # Path guiding debug passes.
+    # These diagnostics are written by the OpenPGL CPU backend.
     if _cycles.with_debug and scene.cycles.use_guiding:
-        yield (n_("Guiding Color"), "RGB", 'COLOR')
-        yield (n_("Guiding Probability"), "X", 'VALUE')
-        yield (n_("Guiding Average Roughness"), "X", 'VALUE')
+        import bpy
+        preferences = bpy.context.preferences.addons[__package__].preferences
+        if (scene.cycles.device == 'CPU' or
+                preferences.compute_device_type == 'NONE' or
+                not preferences.has_active_device()):
+            yield (n_("Guiding Color"), "RGB", 'COLOR')
+            yield (n_("Guiding Probability"), "X", 'VALUE')
+            yield (n_("Guiding Average Roughness"), "X", 'VALUE')
 
 
 def register_passes(engine, scene, view_layer):

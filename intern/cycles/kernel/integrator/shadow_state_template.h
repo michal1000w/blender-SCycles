@@ -52,19 +52,30 @@ KERNEL_STRUCT_MEMBER(shadow_path, uint16_t, packed_num_hits, KERNEL_FEATURE_PATH
 /* Light group. */
 KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, lightgroup, KERNEL_FEATURE_PATH_TRACING)
 /* Path guiding. */
-KERNEL_STRUCT_MEMBER(shadow_path, PackedSpectrum, unlit_throughput, KERNEL_FEATURE_PATH_GUIDING)
+#ifndef KERNEL_STRUCT_CPU_GUIDING_FEATURE
+#  define KERNEL_STRUCT_CPU_GUIDING_FEATURE KERNEL_FEATURE_PATH_GUIDING
+#  define KERNEL_STRUCT_CPU_GUIDING_LOCAL
+#endif
+KERNEL_STRUCT_MEMBER(shadow_path,
+                     PackedSpectrum,
+                     unlit_throughput,
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 #if defined(__PATH_GUIDING__)
 KERNEL_STRUCT_MEMBER(shadow_path,
                      openpgl::cpp::PathSegment *,
                      path_segment,
-                     KERNEL_FEATURE_PATH_GUIDING)
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 #else
-KERNEL_STRUCT_MEMBER(shadow_path, uint64_t, path_segment, KERNEL_FEATURE_PATH_GUIDING)
+KERNEL_STRUCT_MEMBER(shadow_path, uint64_t, path_segment, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 #endif
 KERNEL_STRUCT_MEMBER(shadow_path,
                      float,
                      guiding_light_linking_mis_weight,
-                     KERNEL_FEATURE_PATH_GUIDING)
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
+#ifdef KERNEL_STRUCT_CPU_GUIDING_LOCAL
+#  undef KERNEL_STRUCT_CPU_GUIDING_FEATURE
+#  undef KERNEL_STRUCT_CPU_GUIDING_LOCAL
+#endif
 /* Only need when path tracing without the light tree. Stored as a single float to save
  * space, as we do not expect to make it a big difference. */
 KERNEL_STRUCT_MEMBER(shadow_path,
@@ -72,6 +83,42 @@ KERNEL_STRUCT_MEMBER(shadow_path,
                      bsdf_eval_average,
                      KernelFeatureRequest(KERNEL_FEATURE_PATH_TRACING, KERNEL_FEATURE_LIGHT_TREE))
 KERNEL_STRUCT_END(shadow_path)
+
+#ifndef KERNEL_STRUCT_GPU_GUIDING_FEATURE
+#  define KERNEL_STRUCT_GPU_GUIDING_FEATURE KERNEL_FEATURE_PATH_GUIDING
+#  define KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
+#endif
+KERNEL_STRUCT_BEGIN(shadow_gpu_guiding)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding, uint, history_head, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding,
+                     packed_float3,
+                     history_endpoint,
+                     KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding,
+                     float,
+                     direct_record_distance,
+                     KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding,
+                     uint,
+                     direct_record_direction,
+                     KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding,
+                     uint,
+                     direct_record_index,
+                     KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding,
+                     PackedSpectrum,
+                     direct_inverse_weight,
+                     KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(shadow_gpu_guiding,
+                     packed_float3,
+                     direct_record_position,
+                     KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_END(shadow_gpu_guiding)
+#ifdef KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
+#  undef KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
+#  undef KERNEL_STRUCT_GPU_GUIDING_FEATURE
+#endif
 
 /********************************** Shadow Ray *******************************/
 

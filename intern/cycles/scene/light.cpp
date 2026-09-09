@@ -574,10 +574,12 @@ void LightManager::device_update_distribution(Device * /*unused*/,
                                               Progress &progress)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  /* Photon emission needs a view-independent emitter CDF even when camera paths use the light
-   * tree. Building both is intentional; the regular light sampler continues using the tree. */
+  /* Photon and bidirectional light-subpath emission need a view-independent emitter CDF even when
+   * camera paths use the light tree. Building both is intentional; regular NEE keeps using the
+   * tree. */
   if (kintegrator->use_light_tree &&
-      !scene->integrator->use_photon_mapping_on_device(scene->device))
+      !scene->integrator->use_photon_mapping_on_device(scene->device) &&
+      !scene->integrator->use_bidirectional_path_tracing_on_device(scene->device))
   {
     dscene->light_distribution.free();
     return;
@@ -1425,6 +1427,8 @@ void LightManager::count_lights(KernelIntegrator *kintegrator, const Scene *scen
 void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
 {
   KernelIntegrator *kintegrator = &dscene->data.integrator;
+  /* BDPT retains an independent emission CDF; its endpoint MIS evaluates the receiver-dependent
+   * tree probability separately from the probability used to launch a light subpath. */
   kintegrator->use_light_tree = scene->integrator->get_use_light_tree();
   kintegrator->use_light_mis = scene->use_light_mis();
 

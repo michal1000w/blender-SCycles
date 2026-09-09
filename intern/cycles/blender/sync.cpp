@@ -400,6 +400,15 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
+  integrator->set_use_bidirectional_path_tracing(
+      get_boolean(cscene, "use_bidirectional_path_tracing"));
+  integrator->set_bdpt_light_paths(get_int(cscene, "bdpt_light_paths"));
+  const int64_t bdpt_reference_pixels = int64_t(max(render_resolution_x(b_scene->r), 1)) *
+                                        int64_t(max(render_resolution_y(b_scene->r), 1));
+  integrator->set_bdpt_reference_pixels(
+      int(bdpt_reference_pixels > INT_MAX ? INT_MAX : bdpt_reference_pixels));
+  integrator->set_bdpt_max_bounces(get_int(cscene, "bdpt_max_bounces"));
+  integrator->set_bdpt_update_samples(get_int(cscene, "bdpt_update_samples"));
   integrator->set_use_photon_mapping(get_boolean(cscene, "use_photon_mapping"));
   integrator->set_photon_count(get_int(cscene, "photon_count"));
   integrator->set_photon_radius(get_float(cscene, "photon_radius"));
@@ -417,12 +426,15 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_pixel_displacement_scale(get_float(cscene, "pixel_displacement_scale"));
   integrator->set_pixel_displacement_max_distance(
       get_float(cscene, "pixel_displacement_max_distance"));
+  integrator->set_use_pixel_displacement_resolution_clamp(
+      get_boolean(cscene, "use_pixel_displacement_resolution_clamp"));
   integrator->set_pixel_displacement_resolution(get_int(cscene, "pixel_displacement_resolution"));
   integrator->set_pixel_displacement_steps(get_int(cscene, "pixel_displacement_steps"));
 
   if (integrator->use_pixel_displacement_is_modified() ||
       integrator->pixel_displacement_scale_is_modified() ||
       integrator->pixel_displacement_max_distance_is_modified() ||
+      integrator->use_pixel_displacement_resolution_clamp_is_modified() ||
       integrator->pixel_displacement_resolution_is_modified() ||
       integrator->pixel_displacement_steps_is_modified())
   {
@@ -477,7 +489,12 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_use_light_tree(use_light_tree);
   integrator->set_light_sampling_threshold(get_float(cscene, "light_sampling_threshold"));
 
-  if (integrator->use_light_tree_is_modified()) {
+  /* Switching emitted-path integrators changes whether a CDF is needed alongside the tree,
+   * even when the light-tree checkbox itself has not changed (e.g. viewport toggles). */
+  if (integrator->use_light_tree_is_modified() ||
+      integrator->use_bidirectional_path_tracing_is_modified() ||
+      integrator->use_photon_mapping_is_modified())
+  {
     scene->light_manager->tag_update(scene, LightManager::UPDATE_ALL);
   }
 
@@ -591,24 +608,27 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_use_surface_guiding(get_boolean(cscene, "use_surface_guiding"));
   integrator->set_use_volume_guiding(get_boolean(cscene, "use_volume_guiding"));
   integrator->set_guiding_training_samples(get_int(cscene, "guiding_training_samples"));
+  integrator->set_guiding_gpu_memory_mb(get_int(cscene, "guiding_gpu_memory_mb"));
+  integrator->set_guiding_gpu_history_memory_mb(get_int(cscene, "guiding_gpu_history_memory_mb"));
+  integrator->set_surface_guiding_probability(get_float(cscene, "surface_guiding_probability"));
+  integrator->set_volume_guiding_probability(get_float(cscene, "volume_guiding_probability"));
+  integrator->set_guiding_roughness_threshold(get_float(cscene, "guiding_roughness_threshold"));
 
   if (use_developer_ui) {
     integrator->set_deterministic_guiding(get_boolean(cscene, "use_deterministic_guiding"));
-    integrator->set_surface_guiding_probability(get_float(cscene, "surface_guiding_probability"));
-    integrator->set_volume_guiding_probability(get_float(cscene, "volume_guiding_probability"));
     integrator->set_use_guiding_direct_light(get_boolean(cscene, "use_guiding_direct_light"));
     integrator->set_use_guiding_mis_weights(get_boolean(cscene, "use_guiding_mis_weights"));
     const GuidingDistributionType guiding_distribution_type = (GuidingDistributionType)get_enum(
         cscene, "guiding_distribution_type", GUIDING_NUM_TYPES, GUIDING_TYPE_PARALLAX_AWARE_VMM);
     integrator->set_guiding_distribution_type(guiding_distribution_type);
-    const GuidingDirectionalSamplingType guiding_directional_sampling_type =
-        (GuidingDirectionalSamplingType)get_enum(cscene,
-                                                 "guiding_directional_sampling_type",
-                                                 GUIDING_DIRECTIONAL_SAMPLING_NUM_TYPES,
-                                                 GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS);
-    integrator->set_guiding_directional_sampling_type(guiding_directional_sampling_type);
-    integrator->set_guiding_roughness_threshold(get_float(cscene, "guiding_roughness_threshold"));
   }
+  /* This sampling control is exposed in the Metal panel, independently of developer UI. */
+  const GuidingDirectionalSamplingType guiding_directional_sampling_type =
+      (GuidingDirectionalSamplingType)get_enum(cscene,
+                                               "guiding_directional_sampling_type",
+                                               GUIDING_DIRECTIONAL_SAMPLING_NUM_TYPES,
+                                               GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS);
+  integrator->set_guiding_directional_sampling_type(guiding_directional_sampling_type);
 
   DenoiseParams denoise_params = get_denoise_params(
       *b_scene, &b_view_layer, background, denoise_device_info);

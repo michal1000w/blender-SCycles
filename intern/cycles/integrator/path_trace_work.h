@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "integrator/pass_accessor.h"
 #include "scene/pass.h"
 #include "session/buffers.h"
@@ -142,7 +144,14 @@ class PathTraceWork {
   {
     /* NOTE: Rely on the fact that on x86 CPU reading scalar can happen without atomic even in
      * threaded environment. */
-    return *cancel_requested_flag_;
+    return cancel_requested_flag_ && *cancel_requested_flag_;
+  }
+
+  /* Background applications may expose cancellation through a callback instead of the
+   * viewport's immediate flag. GPU workers poll it at a bounded interval within large work. */
+  void set_cancel_callback(std::function<bool()> callback)
+  {
+    cancel_callback_ = std::move(callback);
   }
 
   /* Access to the device which is used to path trace this work on. */
@@ -198,6 +207,7 @@ class PathTraceWork {
   BufferParams effective_denoised_buffer_params_;
 
   const bool *cancel_requested_flag_ = nullptr;
+  std::function<bool()> cancel_callback_;
 };
 
 CCL_NAMESPACE_END

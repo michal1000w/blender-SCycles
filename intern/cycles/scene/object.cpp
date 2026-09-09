@@ -4,6 +4,9 @@
 
 #include "scene/object.h"
 
+#include <cmath>
+#include <limits>
+
 #include "device/device.h"
 #include "kernel/types.h"
 #include "scene/camera.h"
@@ -559,6 +562,32 @@ static int object_num_motion_verts(Geometry *geom)
                                                   0;
 }
 
+/* Compute once per object, rather than repeating matrix norm calculations for every ray.
+ * Gershgorin row bounds of T^T T enclose the squared largest singular value. */
+static float displacement_transform_bound(const Transform &tfm)
+{
+  const double m[3][3] = {{tfm.x.x, tfm.x.y, tfm.x.z},
+                          {tfm.y.x, tfm.y.y, tfm.y.z},
+                          {tfm.z.x, tfm.z.y, tfm.z.z}};
+  double bound = 0.0;
+  for (int i = 0; i < 3; i++) {
+    double row = 0.0;
+    for (int j = 0; j < 3; j++) {
+      double dot = 0.0;
+      for (int k = 0; k < 3; k++) {
+        dot += m[k][i] * m[k][j];
+      }
+      row += std::fabs(dot);
+    }
+    if (!std::isfinite(row)) {
+      return std::numeric_limits<float>::infinity();
+    }
+    bound = std::max(bound, row);
+  }
+  return std::nextafter(float(std::sqrt(bound) * (1.0 + 1.0e-12)),
+                        std::numeric_limits<float>::infinity());
+}
+
 void ObjectManager::device_update_object_transform(UpdateObjectTransformState *state,
                                                    Object *ob,
                                                    bool update_all,
@@ -583,6 +612,8 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
 
   kobject.tfm = tfm;
   kobject.itfm = itfm;
+  kobject.displacement_transform_bound = displacement_transform_bound(tfm);
+  kobject.displacement_inverse_bound = displacement_transform_bound(itfm);
   kobject.volume_density = object_volume_density(tfm, geom);
   kobject.color[0] = color.x;
   kobject.color[1] = color.y;

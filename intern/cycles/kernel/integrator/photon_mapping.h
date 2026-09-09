@@ -112,6 +112,12 @@ ccl_device_inline void photon_state_init(IntegratorState state, const uint seed,
   INTEGRATOR_STATE_WRITE(state, path, rng_offset) = 0;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = one_spectrum();
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
+#ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_guiding) {
+    INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, history_head) = ~0u;
+  }
+#endif
 #ifdef __PATH_GUIDING__
   if (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) {
     INTEGRATOR_STATE_WRITE(state, guiding, use_surface_guiding) = false;
@@ -130,7 +136,8 @@ ccl_device_inline Spectrum photon_eval_triangle_emission(KernelGlobals kg,
                                                          const int prim,
                                                          const float u,
                                                          const float v,
-                                                         const float time)
+                                                         const float time,
+                                                         ccl_private bool *cache_miss = nullptr)
 {
   Spectrum eval = zero_spectrum();
   if (surface_shader_constant_emission(kg, shader, &eval)) {
@@ -143,7 +150,13 @@ ccl_device_inline Spectrum photon_eval_triangle_emission(KernelGlobals kg,
       kg, sd, P, Ng, -D, shader, object, prim, u, v, 0.0f, time, false, false);
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT>(
       kg, state, sd, nullptr, PATH_RAY_VISIBILITY_NONE, PATH_RAY_EMISSION);
-  return (sd->runtime_flag & SR_CACHE_MISS) ? zero_spectrum() : surface_shader_emission(sd);
+  if (sd->runtime_flag & SR_CACHE_MISS) {
+    if (cache_miss) {
+      *cache_miss = true;
+    }
+    return zero_spectrum();
+  }
+  return surface_shader_emission(sd);
 }
 
 /* Sample a point spotlight proportional to its angular falloff. Sampling the full sphere and
@@ -238,8 +251,21 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                              const float time,
                                              ccl_private Ray *ray,
                                              ccl_private Spectrum *flux,
-                                             ccl_private int *emitter_object)
+                                             ccl_private int *emitter_object,
+                                             ccl_private int *light_group = nullptr,
+                                             ccl_private float *emission_pdf = nullptr,
+                                             ccl_private float *direct_pdf = nullptr,
+                                             ccl_private float *emission_cosine_out = nullptr,
+                                             ccl_private bool *is_delta = nullptr,
+                                             ccl_private bool *is_finite = nullptr,
+                                             ccl_private uint *emitter_shader_flags = nullptr,
+                                             ccl_private float *emitter_max_bounces = nullptr,
+                                             ccl_private int *emitter_distribution = nullptr,
+                                             ccl_private bool *cache_miss = nullptr)
 {
+  if (cache_miss) {
+    *cache_miss = false;
+  }
   /* MetalRT consumes the self-intersection payload unconditionally. Keep it initialized for
    * analytic emitters, and replace it below for emissive geometry. */
   ray->self.prim = PRIM_NONE;
@@ -254,8 +280,27 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
   const int emitter = light_distribution_sample(kg, lcg_step_float(rng));
   const ccl_global KernelLightDistribution *distribution = &kernel_data_fetch(light_distribution,
                                                                               emitter);
+  if (emitter_distribution) {
+    *emitter_distribution = emitter;
+  }
   const int prim_or_lamp = distribution->prim;
   *emitter_object = distribution->object_id;
+  if (light_group) {
+    *light_group = LIGHTGROUP_NONE;
+  }
+  if (emission_pdf) {
+    *emission_pdf = 0.0f;
+    *direct_pdf = 0.0f;
+    *emission_cosine_out = 1.0f;
+    *is_delta = false;
+    *is_finite = true;
+  }
+  if (emitter_shader_flags) {
+    *emitter_shader_flags = 0u;
+  }
+  if (emitter_max_bounces) {
+    *emitter_max_bounces = FLT_MAX;
+  }
 
   if (prim_or_lamp >= 0) {
     float3 V[3];
@@ -285,6 +330,12 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
     ray->self.object = *emitter_object;
 
     const int shader = kernel_data_fetch(tri_shader, prim_or_lamp);
+    if (emitter_shader_flags) {
+      *emitter_shader_flags = uint(shader);
+    }
+    if (light_group) {
+      *light_group = object_lightgroup(kg, *emitter_object);
+    }
     const int shader_flags = kernel_data_fetch(shaders, shader & SHADER_MASK).flags;
     const bool front = (shader_flags & SD_MIS_FRONT) != 0;
     const bool back = (shader_flags & SD_MIS_BACK) != 0;
@@ -305,23 +356,49 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
     if (!(direction_pdf > 0.0f)) {
       return false;
     }
+    float flat_selection;
+    const float position_pdf = triangle_light_emission_pdf(
+        kg, *emitter_object, prim_or_lamp, time, &flat_selection);
+    if (emission_pdf) {
+      *emission_pdf = position_pdf * side_pdf * direction_pdf;
+      *direct_pdf = position_pdf;
+      *emission_cosine_out = direction_pdf * M_PI_F;
+    }
 
-    const Spectrum Le = photon_eval_triangle_emission(
-        kg, state, ray->P, Ng, ray->D, shader, *emitter_object, prim_or_lamp, u, v, time);
-    /* The flat CDF chooses triangles proportional to area, hence conditional position PDF and
-     * selection PDF reduce to distribution_pdf_triangles. Cosine sampling cancels the emission
-     * cosine, leaving pi. */
-    *flux = Le *
-            (M_PI_F / max(kernel_data.integrator.distribution_pdf_triangles * side_pdf, 1.0e-20f));
+    const Spectrum Le = photon_eval_triangle_emission(kg,
+                                                      state,
+                                                      ray->P,
+                                                      Ng,
+                                                      ray->D,
+                                                      shader,
+                                                      *emitter_object,
+                                                      prim_or_lamp,
+                                                      u,
+                                                      v,
+                                                      time,
+                                                      cache_miss);
+    /* The fixed CDF and shutter-time area both enter the position density.
+     * Cosine sampling cancels the emission cosine, leaving pi. */
+    *flux = Le * (M_PI_F / max(position_pdf * side_pdf, 1.0e-20f));
   }
   else {
     const int lamp = ~prim_or_lamp;
     const ccl_global KernelLight *klight = &kernel_data_fetch(lights, lamp);
+    if (emitter_shader_flags) {
+      *emitter_shader_flags = uint(klight->shader_id);
+    }
+    if (emitter_max_bounces) {
+      *emitter_max_bounces = klight->max_bounces;
+    }
+    if (light_group) {
+      *light_group = object_lightgroup(kg, klight->object_id);
+    }
     const float select_pdf = max(kernel_data.integrator.distribution_pdf_lights, 1.0e-20f);
     const LightType type = (LightType)klight->type;
     float ray_pdf = 0.0f;
     float eval_fac = 1.0f;
     float emission_cosine = 1.0f;
+    float infinite_direction_pdf = 0.0f;
 
     if (type == LIGHT_AREA) {
       const float2 rpos = make_float2(lcg_step_float(rng), lcg_step_float(rng));
@@ -349,6 +426,16 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       }
     }
     else if (type == LIGHT_POINT || type == LIGHT_SPOT) {
+      /* Cycles' non-sphere finite-radius point light is a receiver-facing disk impostor: its
+       * position and normal depend on the point from which it is sampled. There is consequently
+       * no single emitter surface (nor a reciprocal emission measure) from which a forward path
+       * can be launched. Keep those lights on Cycles' regular camera-path estimator. A physical
+       * sphere light has a well-defined surface and participates in every BDPT strategy. */
+      if (!klight->spot.is_sphere && klight->spot.radius > 0.0f) {
+        return false;
+      }
+
+      eval_fac = klight->spot.eval_fac;
       if (klight->spot.is_sphere) {
         const float3 N = sample_uniform_sphere(
             make_float2(lcg_step_float(rng), lcg_step_float(rng)));
@@ -366,15 +453,13 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
           float spot_attenuation;
           ray->D = photon_sample_point_spot_direction(
               kg, klight, rng, &spot_attenuation, &ray_pdf);
-          eval_fac = klight->spot.eval_fac * spot_attenuation;
+          eval_fac *= spot_attenuation;
         }
         else {
           ray->D = photon_sample_point_direction(kg, ray->P, rng, &ray_pdf);
         }
       }
-      if (klight->spot.is_sphere) {
-        eval_fac = klight->spot.eval_fac;
-      }
+
       if (type == LIGHT_SPOT && klight->spot.is_sphere) {
         const float3 local_ray = spot_light_to_local(kg, klight, ray->D);
         eval_fac *= spot_light_attenuation(&klight->spot, local_ray);
@@ -389,12 +474,18 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       const float target_radius = min(kernel_data.integrator.photon_target.w, scene_radius);
       float direction_pdf;
       if (type == LIGHT_SUN) {
-        float unused;
-        ray->D = sample_uniform_cone(klight->co,
-                                     klight->sun.one_minus_cosangle,
-                                     make_float2(lcg_step_float(rng), lcg_step_float(rng)),
-                                     &unused,
-                                     &direction_pdf);
+        if (klight->sun.angle == 0.0f) {
+          ray->D = klight->co;
+          direction_pdf = 1.0f;
+        }
+        else {
+          float unused;
+          ray->D = sample_uniform_cone(klight->co,
+                                       klight->sun.one_minus_cosangle,
+                                       make_float2(lcg_step_float(rng), lcg_step_float(rng)),
+                                       &unused,
+                                       &direction_pdf);
+        }
         eval_fac = klight->sun.eval_fac;
       }
       else {
@@ -403,6 +494,7 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                           make_float2(lcg_step_float(rng), lcg_step_float(rng)),
                                           &direction_pdf);
       }
+      infinite_direction_pdf = direction_pdf;
 
       /* Most light paths are aimed through the aggregate bounds of likely sharp caustic casters.
        * A full-scene component preserves support for procedural/OSL shaders and any conservative
@@ -439,6 +531,33 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       return false;
     }
 
+    if (emission_pdf) {
+      *emission_pdf = select_pdf * ray_pdf;
+      *emission_cosine_out = emission_cosine;
+      if (type == LIGHT_AREA) {
+        const bool ellipse = area_light_is_ellipse(&klight->area);
+        const float area = ellipse ? M_PI_F * klight->area.len_u * klight->area.len_v * 0.25f :
+                                     klight->area.len_u * klight->area.len_v;
+        *direct_pdf = select_pdf / max(area, 1.0e-20f);
+      }
+      else if ((type == LIGHT_POINT || type == LIGHT_SPOT) && klight->spot.is_sphere) {
+        const float area = 4.0f * M_PI_F * sqr(klight->spot.radius);
+        *direct_pdf = select_pdf / max(area, 1.0e-20f);
+      }
+      else if (type == LIGHT_POINT || type == LIGHT_SPOT) {
+        *direct_pdf = select_pdf;
+        *is_delta = true;
+      }
+      else {
+        /* Infinite emission additionally samples a launch disk. Direct lighting samples only the
+         * direction, so its density excludes that position factor. SmallVCM deliberately treats
+         * this directional density as an area density in the recursive endpoint formula. */
+        *direct_pdf = select_pdf * infinite_direction_pdf;
+        *is_delta = (type == LIGHT_SUN && klight->sun.angle == 0.0f);
+        *is_finite = false;
+      }
+    }
+
     Spectrum Le;
     if (type == LIGHT_BACKGROUND) {
       INTEGRATOR_STATE_WRITE(state, ray, P) = ray->P;
@@ -450,6 +569,9 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       ShaderEvalResult result;
       Le = integrator_eval_background_shader(kg, state, nullptr, result);
       if (result != SHADER_EVAL_OK) {
+        if (cache_miss) {
+          *cache_miss = result == SHADER_EVAL_CACHE_MISS;
+        }
         return false;
       }
     }
@@ -457,6 +579,9 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
       const ShaderEvalResult result = light_sample_shader_eval_forward(
           kg, state, lamp, ray->P, ray->D, 0.0f, time, Le);
       if (result != SHADER_EVAL_OK) {
+        if (cache_miss) {
+          *cache_miss = result == SHADER_EVAL_CACHE_MISS;
+        }
         return false;
       }
     }

@@ -17,6 +17,7 @@
 #  include "kernel/device/metal/function_constants.h"
 
 #  include "util/debug.h"
+#  include "util/log.h"
 #  include "util/md5.h"
 #  include "util/path.h"
 #  include "util/tbb.h"
@@ -250,8 +251,53 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
     return false;
   }
 
-  if (!device_kernel_has_gpu_function(device_kernel)) {
+  if (!device_kernel_has_gpu_function(device_kernel, true)) {
     /* Skip megakernel and other markers without a GPU function. */
+    return false;
+  }
+
+  /* Avoid materializing pipelines that the current scene cannot enqueue. If a scene edit enables
+   * one of these feature bits, load_kernels() is called again and requests the newly required
+   * pipeline. Besides reducing cold-start work, this is particularly important for the mutually
+   * exclusive photon and BDPT kernels, whose large shading call graphs are expensive on Metal. */
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_BAKE &&
+      !(device->kernel_features & KERNEL_FEATURE_BAKING))
+  {
+    return false;
+  }
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE &&
+      !(device->kernel_features & KERNEL_FEATURE_SUBSURFACE))
+  {
+    return false;
+  }
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT &&
+      (device->kernel_features & KERNEL_FEATURE_BDPT))
+  {
+    return false;
+  }
+  if ((device_kernel == DEVICE_KERNEL_GUIDING_BEGIN_UPDATE ||
+       device_kernel == DEVICE_KERNEL_GUIDING_REFINE ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PUBLISH ||
+       device_kernel == DEVICE_KERNEL_GUIDING_FLUSH_HISTORY ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
+       device_kernel == DEVICE_KERNEL_GUIDING_FIT) &&
+      !(device->kernel_features & KERNEL_FEATURE_PATH_GUIDING))
+  {
+    return false;
+  }
+  if ((device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT) &&
+      (!(device->kernel_features & KERNEL_FEATURE_BDPT) ||
+       (device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER)))
+  {
+    return false;
+  }
+  if (device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS &&
+      !(device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER))
+  {
     return false;
   }
 
@@ -353,6 +399,34 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
     pipeline->num_threads_per_block = occupancy_tuning[device_kernel].num_threads_per_block;
   }
 
+  /* General direct displacement keeps shadow rays active for very different numbers of samples.
+   * Smaller dispatch groups reduce that scheduling tail on M2 Max/Ultra. Preserve the
+   * architecture's compiler register budget; reducing it hurts this evaluator's throughput. */
+  if (MetalInfo::get_apple_gpu_architecture(mtlDevice) == APPLE_M2_BIG &&
+      pso_type == PSO_SPECIALIZED_INTERSECT && device->scene_use_pixel_displacement &&
+      device->scene_pixel_displacement_scale != 0.0f &&
+      device->scene_pixel_displacement_max_distance > 0.0f &&
+      !(pipeline->kernel_data_.integrator.pixel_displacement_evaluator_set &
+        PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS) &&
+      device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW)
+  {
+    pipeline->num_threads_per_block = 128;
+  }
+
+  /* The certified normal-image solver omits the general evaluator and its large
+   * temporary state. On M2 Max/Ultra, a reduced compiler thread limit
+   * and small dispatch groups improve occupancy and reduce long-ray scheduling tails. */
+  if (MetalInfo::get_apple_gpu_architecture(mtlDevice) == APPLE_M2_BIG &&
+      pso_type == PSO_SPECIALIZED_INTERSECT &&
+      (pipeline->kernel_data_.integrator.pixel_displacement_evaluator_set &
+       PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS) &&
+      (device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW))
+  {
+    pipeline->threads_per_threadgroup = 512;
+    pipeline->num_threads_per_block = 64;
+  }
+
   /* metalrt options */
   pipeline->use_metalrt = device->use_metalrt_for_current_scene();
   pipeline->kernel_features = device->kernel_features;
@@ -366,12 +440,39 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
 
 MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const MetalDevice *device)
 {
+  /* Generic kernels omit pixel displacement. These specializations are required for
+   * correctness, so pending or failed compilation must never select the generic fallback. */
+  const bool requires_displacement = device->scene_use_pixel_displacement &&
+                                     device->scene_pixel_displacement_scale != 0.0f &&
+                                     device->scene_pixel_displacement_max_distance > 0.0f &&
+                                     kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+                                     kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT;
+  const MetalPipelineType required_type = kernel < DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND ?
+                                             PSO_SPECIALIZED_INTERSECT : PSO_SPECIALIZED_SHADE;
   while (running && !device->has_error) {
     /* Search all loaded pipelines with matching kernels_md5 checksums. */
     MetalKernelPipeline *best_match = nullptr;
+    bool generic_failed = false;
     {
       thread_scoped_lock lock(cache_mutex);
       for (auto &candidate : pipelines[kernel]) {
+        /* Only completed requests enter this collection. A matching failed generic
+         * entry cannot become ready by waiting; optional specializations may still
+         * provide a usable replacement, so finish the search before reporting it. */
+        generic_failed |= candidate->pso_type == PSO_GENERIC && !candidate->loaded &&
+                          candidate->kernels_md5 == device->kernels_md5[PSO_GENERIC];
+        if (requires_displacement) {
+          if (candidate->pso_type != required_type ||
+              candidate->kernels_md5 != device->kernels_md5[required_type])
+          {
+            continue;
+          }
+          /* Entries are published only after compile() returns. An unloaded matching
+           * entry therefore represents a failed compilation, not an in-flight request. */
+          if (!candidate->loaded) {
+            return nullptr;
+          }
+        }
         if (candidate->loaded &&
             candidate->kernels_md5 == device->kernels_md5[candidate->pso_type])
         {
@@ -391,6 +492,10 @@ MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const M
       }
       best_match->usage_count += 1;
       return best_match;
+    }
+
+    if (generic_failed) {
+      return nullptr;
     }
 
     /* Spin until a matching kernel is loaded, or we're shutting down. */
@@ -420,12 +525,16 @@ bool MetalKernelPipeline::should_use_binary_archive() const
       return true;
     }
 
-    if ((device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
+    if (pso_type == PSO_SPECIALIZED_INTERSECT ||
+        (device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
          device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW) ||
         (device_kernel >= DEVICE_KERNEL_SHADER_EVAL_DISPLACE &&
          device_kernel <= DEVICE_KERNEL_SHADER_EVAL_VOLUME_DENSITY))
     {
-      /* Archive all shade kernels - they take a long time to compile. */
+      /* Archive all specialized intersection and shade kernels. Intersection kernels used to be
+       * left to Metal's opaque system shader cache on the assumption that they were cheap. Pixel
+       * displacement and bidirectional/photon tracing make that assumption invalid, and losing
+       * the system cache otherwise forces full recompilation. */
       return true;
     }
 
@@ -435,7 +544,8 @@ bool MetalKernelPipeline::should_use_binary_archive() const
   return false;
 }
 
-static MTLFunctionConstantValues *GetConstantValues(const KernelData *data = nullptr)
+static MTLFunctionConstantValues *GetConstantValues(
+    const KernelData *data = nullptr, const MetalPipelineType pso_type = PSO_GENERIC)
 {
   MTLFunctionConstantValues *constant_values = [MTLFunctionConstantValues new];
 
@@ -446,6 +556,12 @@ static MTLFunctionConstantValues *GetConstantValues(const KernelData *data = nul
   KernelData zero_data = {0};
   if (!data) {
     data = &zero_data;
+  }
+  KernelData specialization_data = *data;
+  if (pso_type == PSO_SPECIALIZED_INTERSECT) {
+    specialization_data.integrator.use_bidirectional_path_tracing = 0;
+    specialization_data.integrator.use_photon_mapping = 0;
+    data = &specialization_data;
   }
   [constant_values setConstantValue:&zero_data type:MTLDataType_int atIndex:Kernel_DummyConstant];
 
@@ -502,6 +618,11 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   const MetalKernelPipeline *best_pipeline = MetalDeviceKernels::get_best_pipeline(metal_device,
                                                                                    kernel);
   if (!best_pipeline) {
+    if (!metal_device->have_error()) {
+      metal_device->set_error(string_printf(
+          "Failed to load required Metal kernel %s. See the Cycles log for the compiler error.",
+          device_kernel_as_string(kernel)));
+    }
     return false;
   }
 
@@ -563,7 +684,7 @@ id<MTLFunction> MetalKernelPipeline::make_intersection_function(const char *func
   desc.name = [@(function_name) copy];
 
   if (pso_type != PSO_GENERIC) {
-    desc.constantValues = GetConstantValues(&kernel_data_);
+    desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
   }
   else {
     desc.constantValues = GetConstantValues();
@@ -597,7 +718,7 @@ void MetalKernelPipeline::compile()
   func_desc.name = [@(function_name.c_str()) copy];
 
   if (pso_type != PSO_GENERIC) {
-    func_desc.constantValues = GetConstantValues(&kernel_data_);
+    func_desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
   }
   else {
     func_desc.constantValues = GetConstantValues();
@@ -619,6 +740,7 @@ void MetalKernelPipeline::compile()
   if (use_metalrt && device_kernel_has_intersection(device_kernel)) {
 
     NSMutableSet *unique_functions = [[NSMutableSet alloc] init];
+    bool required_intersection_function_missing = false;
 
     auto add_intersection_functions = [&](int table_index,
                                           const char *tri_fn,
@@ -635,8 +757,20 @@ void MetalKernelPipeline::compile()
       for (int i = 0; i < function_count; i++) {
         if (function_names[i]) {
           id<MTLFunction> intersection_function = make_intersection_function(function_names[i]);
-          [functions addObject:intersection_function];
-          [unique_functions addObject:intersection_function];
+          if (intersection_function) {
+            [functions addObject:intersection_function];
+            [unique_functions addObject:intersection_function];
+          }
+          else {
+            /* Adaptive compilation can remove an intersection function for a geometry feature
+             * absent from the scene. Preserve its table offset without inserting nil into the
+             * NSMutableArray (which raises an Objective-C exception). */
+            [functions addObject:[NSNull null]];
+            const bool optional_scene_function =
+                (i == 1 && !(kernel_features & KERNEL_FEATURE_HAIR)) ||
+                (i == 2 && !(kernel_features & KERNEL_FEATURE_POINTCLOUD));
+            required_intersection_function_missing |= !optional_scene_function;
+          }
         }
         else {
           /* Keep the slot empty so geometry intersectionFunctionTableOffset values continue to
@@ -653,33 +787,53 @@ void MetalKernelPipeline::compile()
                                "__intersection__curve",
                                "__intersection__point",
                                "__intersection__pixel_displacement");
-    add_intersection_functions(METALRT_TABLE_SHADOW,
-                               "__intersection__tri_shadow",
-                               "__intersection__curve_shadow",
-                               "__intersection__point_shadow",
-                               "__intersection__pixel_displacement_shadow");
-    add_intersection_functions(METALRT_TABLE_SHADOW_ALL,
-                               "__intersection__tri_shadow_all",
-                               "__intersection__curve_shadow_all",
-                               "__intersection__point_shadow_all",
-                               "__intersection__pixel_displacement_shadow_all");
-    add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
-    add_intersection_functions(METALRT_TABLE_LOCAL,
-                               "__intersection__local_tri",
-                               nullptr,
-                               nullptr,
-                               "__intersection__local_pixel_displacement");
-    add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");
-    add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT,
-                               "__intersection__local_tri_single_hit",
-                               nullptr,
-                               nullptr,
-                               "__intersection__local_pixel_displacement_single_hit");
-    add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT_MBLUR,
-                               "__intersection__local_tri_single_hit_mblur");
+
+    const bool is_light_cache_kernel =
+        device_kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT;
+    if (is_light_cache_kernel) {
+      /* These self-contained light-cache kernels use ordinary scene intersections plus volume
+       * stack initialization. Linking the shadow, local and single-hit tables as well makes Metal
+       * optimize several large, unreachable intersection call graphs into each pipeline. */
+      add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
+    }
+    else {
+      add_intersection_functions(METALRT_TABLE_SHADOW,
+                                 "__intersection__tri_shadow",
+                                 "__intersection__curve_shadow",
+                                 "__intersection__point_shadow",
+                                 "__intersection__pixel_displacement_shadow");
+      add_intersection_functions(METALRT_TABLE_SHADOW_ALL,
+                                 "__intersection__tri_shadow_all",
+                                 "__intersection__curve_shadow_all",
+                                 "__intersection__point_shadow_all",
+                                 "__intersection__pixel_displacement_shadow_all");
+      add_intersection_functions(METALRT_TABLE_VOLUME, "__intersection__volume_tri");
+      add_intersection_functions(METALRT_TABLE_LOCAL,
+                                 "__intersection__local_tri",
+                                 nullptr,
+                                 nullptr,
+                                 "__intersection__local_pixel_displacement");
+      add_intersection_functions(METALRT_TABLE_LOCAL_MBLUR, "__intersection__local_tri_mblur");
+      add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT,
+                                 "__intersection__local_tri_single_hit",
+                                 nullptr,
+                                 nullptr,
+                                 "__intersection__local_pixel_displacement_single_hit");
+      add_intersection_functions(METALRT_TABLE_LOCAL_SINGLE_HIT_MBLUR,
+                                 "__intersection__local_tri_single_hit_mblur");
+    }
+
+    if (required_intersection_function_missing) {
+      metal_printf("Required MetalRT intersection function is missing: %s", error_str.c_str());
+      return;
+    }
 
     for (const int table : {METALRT_TABLE_LOCAL, METALRT_TABLE_LOCAL_SINGLE_HIT}) {
-      if (table_functions[table].count <= 3 || table_functions[table][3] == [NSNull null]) {
+      if (table_functions[table] &&
+          (table_functions[table].count <= 3 || table_functions[table][3] == [NSNull null]))
+      {
         metal_printf("MetalRT pixel-displacement local intersection table is incomplete");
         return;
       }
@@ -772,6 +926,7 @@ void MetalKernelPipeline::compile()
   }
 
   bool recreate_archive = false;
+  string compilation_error;
 
   /* Lambda to do the actual pipeline compilation. */
   auto do_compilation = [&]() {
@@ -818,8 +973,14 @@ void MetalKernelPipeline::compile()
       while (ShaderCache::running && !compilation_finished) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
+      /* Shutdown can stop this wait before the callback provides a result. Do not
+       * read its unfinished error string or report cancellation as compilation failure. */
+      if (!ShaderCache::running) {
+        return;
+      }
     }
 
+    compilation_error = error_str;
     if (creating_new_archive && pipeline) {
       /* Add pipeline into the new archive. */
       NSError *error;
@@ -839,13 +1000,16 @@ void MetalKernelPipeline::compile()
           (archive && !recreate_archive) ? " Archive may be incomplete or corrupt - attempting "
                                            "recreation.." :
                                            "",
-          error_str.c_str());
+          compilation_error.c_str());
     }
   };
 
   double starttime = time_dt();
 
   do_compilation();
+  if (!ShaderCache::running) {
+    return;
+  }
 
   /* An archive might have a corrupt entry and fail to materialize the pipeline. This shouldn't
    * happen, but if it does we recreate it. */
@@ -855,11 +1019,16 @@ void MetalKernelPipeline::compile()
     path_remove(metalbin_path);
 
     do_compilation();
+    if (!ShaderCache::running) {
+      return;
+    }
   }
 
   double duration = time_dt() - starttime;
 
   if (pipeline == nil) {
+    LOG_ERROR << "Metal pipeline compilation failed for " << device_kernel_as_string(device_kernel)
+              << " (" << kernel_type_as_string(pso_type) << "): " << compilation_error;
     metal_printf("%16s | %2d | %-55s | %7.2fs | FAILED!",
                  kernel_type_as_string(pso_type),
                  device_kernel,
@@ -883,7 +1052,10 @@ void MetalKernelPipeline::compile()
                      [[error localizedDescription] UTF8String]);
       }
       else {
-        path_cache_kernel_mark_added_and_clear_old(metalbin_path);
+        /* Scene specialization produces a content-addressed archive variant. Keep enough variants
+         * for normal production scene switching instead of cycling through the old five-entry
+         * window and repeatedly recompiling unchanged kernels. */
+        path_cache_kernel_mark_added_and_clear_old(metalbin_path, 32);
       }
     }
   }
@@ -966,7 +1138,9 @@ bool MetalDeviceKernels::is_benchmark_warmup()
   NSArray *args = [[NSProcessInfo processInfo] arguments];
   for (int i = 0; i < args.count; i++) {
     if (const char *arg = [[args objectAtIndex:i] cStringUsingEncoding:NSASCIIStringEncoding]) {
-      if (!strcmp(arg, "--warm-up")) {
+      /* Also recognize the spelling used by the Cycles scene benchmark runner.
+       * Its discarded warmup must finish specialization before measured renders. */
+      if (!strcmp(arg, "--warm-up") || !strcmp(arg, "--warmup")) {
         return true;
       }
     }

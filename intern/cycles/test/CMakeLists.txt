@@ -30,14 +30,21 @@ set(SRC
   integrator_adaptive_sampling_test.cpp
   integrator_render_scheduler_test.cpp
   integrator_tile_test.cpp
+  kernel_bidirectional_pdf_test.cpp
   kernel_camera_projection_test.cpp
+  kernel_guiding_distribution_test.cpp
+  kernel_guiding_mixture_fit_test.cpp
+  kernel_guiding_parallax_test.cpp
+  kernel_guiding_resampling_test.cpp
   kernel_spectral_transmission_test.cpp
   render_graph_finalize_test.cpp
+  scene_displacement_image_test.cpp
   util_aligned_malloc_test.cpp
   util_boundbox_test.cpp
   util_cache_limiter_test.cpp
   util_half_test.cpp
   util_ies_test.cpp
+  util_image_displacement_bounds_test.cpp
   util_math_test.cpp
   util_math_fast_test.cpp
   util_math_float3_test.cpp

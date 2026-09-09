@@ -14,6 +14,11 @@
 #include "kernel/tables.h"
 
 #ifdef __KERNEL_METAL__
+/* Field methods and their math/atomic dependencies must precede the Metal context class. */
+#  include "kernel/sample/guiding_field.h"
+#endif
+
+#ifdef __KERNEL_METAL__
 #  include "kernel/device/metal/context_begin.h"
 #elif defined(__KERNEL_ONEAPI__)
 #  include "kernel/device/oneapi/context_begin.h"
@@ -33,15 +38,17 @@
 #include "kernel/integrator/intersect_shadow.h"
 #include "kernel/integrator/intersect_subsurface.h"
 #include "kernel/integrator/intersect_volume_stack.h"
+#ifdef __KERNEL_METAL__
+#  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
+#  include "kernel/integrator/photon_mapping.h"
+#endif
 #include "kernel/integrator/shade_background.h"
 #include "kernel/integrator/shade_dedicated_light.h"
 #include "kernel/integrator/shade_light.h"
 #include "kernel/integrator/shade_shadow.h"
-#include "kernel/integrator/shade_volume.h"
-#ifdef __KERNEL_METAL__
-#  include "kernel/integrator/photon_mapping.h"
-#endif
 #include "kernel/integrator/shade_surface.h"
+#include "kernel/integrator/shade_volume.h"
 
 #include "kernel/bake/bake.h"
 
@@ -78,12 +85,129 @@ ccl_gpu_kernel_postfix
 
 #ifdef __KERNEL_METAL__
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_begin_update, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() == 0 && work_size > 0) {
+    ccl_gpu_kernel_call(guiding_gpu_begin_update());
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_refine, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_refine(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_publish, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_publish(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_partition_count, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_partition_count(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_partition_prefix, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_partition_prefix(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_partition_scatter, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_partition_scatter(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_fit, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_fit(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_flush_history, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_flush_history(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_photon_emit, const int num_photons, const int iteration)
 {
   const uint photon_index = ccl_gpu_global_id_x();
   if (photon_index < uint(num_photons)) {
     ccl_gpu_kernel_call(
         integrator_photon_emit(nullptr, photon_index, photon_index, uint(iteration)));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_bdpt_light_generate,
+                             const int num_light_paths,
+                             const int iteration,
+                             const int batch_samples)
+{
+  const uint light_path_index = ccl_gpu_global_id_x();
+  if (light_path_index < uint(num_light_paths)) {
+    ccl_gpu_kernel_call(integrator_bdpt_light_generate(
+        nullptr, light_path_index, light_path_index, uint(iteration), uint(batch_samples)));
+  }
+}
+ccl_gpu_kernel_postfix
+
+/* Stable compaction of path-indexed slots. Writes only precede the current
+ * read position, so one index array suffices and reservoir data stays untouched. */
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_bdpt_cache_order, const int num_light_paths)
+{
+  if (ccl_gpu_global_id_x() == 0) {
+    ccl_gpu_kernel_call(integrator_bdpt_cache_order(uint(num_light_paths)));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_bdpt_sensor_connect,
+                             const int max_vertices,
+                             const int iteration,
+                             const int batch_samples,
+                             ccl_global float *render_buffer)
+{
+  const uint vertex_index = ccl_gpu_global_id_x();
+  if (vertex_index < uint(max_vertices)) {
+    ccl_gpu_kernel_call(integrator_bdpt_sensor_connect(
+        nullptr,
+        vertex_index,
+        vertex_index,
+        uint(iteration),
+        uint(batch_samples),
+        render_buffer));
   }
 }
 ccl_gpu_kernel_postfix
