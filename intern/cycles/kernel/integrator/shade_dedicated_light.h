@@ -186,6 +186,9 @@ ccl_device void shadow_linking_shade(KernelGlobals kg, IntegratorState state)
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
       kg, state, &ray, light_eval, light_group, 0, is_constant_light_shader);
+#  ifdef __KERNEL_METAL__
+  guiding_gpu_shadow_endpoint(shadow_state, ray.P + ray.D * ray.tmax);
+#  endif
 
   /* The light is accumulated from the shade_surface kernel, which will make the clamping decision
    * based on the actual value of the bounce. For the dedicated shadow ray we want to follow the

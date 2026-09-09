@@ -13,6 +13,7 @@
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/state_util.h"
+#include "kernel/sample/guiding_resampling.h"
 
 #ifdef __SVM__
 #  include "kernel/svm/svm.h"
@@ -440,6 +441,226 @@ ccl_device_inline float surface_shader_bsdf_eval_pdfs(const KernelGlobals kg,
   return (sum_sample_weight > 0.0f) ? sum_pdf / sum_sample_weight : 0.0f;
 }
 
+#ifdef __KERNEL_METAL__
+ccl_device_inline float3 surface_shader_gpu_guiding_normal(const ccl_private ShaderData *sd)
+{
+  /* Orient the product toward this query's incoming direction, including transmission. */
+  return dot(sd->N, sd->wi) >= 0.0f ? sd->N : -sd->N;
+}
+
+ccl_device_inline bool surface_shader_gpu_guiding_continuous(const ccl_private ShaderClosure *sc)
+{
+  if (!CLOSURE_IS_BSDF(sc->type) || CLOSURE_IS_BSDF_SINGULAR(sc->type) ||
+      CLOSURE_IS_BSDF_TRANSPARENT(sc->type) || CLOSURE_IS_RAY_PORTAL(sc->type))
+  {
+    return false;
+  }
+  if (CLOSURE_IS_BSDF_MICROFACET(sc->type)) {
+    return bsdf_microfacet_eval_flag((const ccl_private MicrofacetBsdf *)sc) != 0;
+  }
+  return true;
+}
+
+/* A single query supplies both sampling and density evaluation. The field is immutable for
+ * the entire render batch, so retaining this pointer avoids repeated spatial traversal. */
+struct SurfaceGuidingProposal {
+  const ccl_global float *weights;
+  float3 position;
+  float probability;
+  float bsdf_fraction;
+  GuidingDirectionalProduct product;
+  bool use_smooth_product;
+  GuidingGaussianProduct smooth_product;
+  bool use_resampling;
+};
+
+ccl_device_inline GuidingGaussianProduct
+surface_shader_gpu_guiding_glossy_product(const ccl_private ShaderData *sd)
+{
+  GuidingGaussianProduct product{};
+  float3 axes[2] = {zero_float3(), zero_float3()};
+  float concentrations[2] = {0.0f, 0.0f};
+  for (int i = 0; i < sd->num_closure; ++i) {
+    const ccl_private ShaderClosure *sc = &sd->closure[i];
+    if (!surface_shader_gpu_guiding_continuous(sc)) {
+      continue;
+    }
+    const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
+    const float alpha = max(bsdf->alpha_x, bsdf->alpha_y);
+    const bool thin = bsdf->type == CLOSURE_BSDF_THIN_GLASS_TRANSMISSION_ID;
+    const bool refractive = CLOSURE_IS_REFRACTION(bsdf->type) || CLOSURE_IS_GLASS(bsdf->type);
+    const float inverse_ior = refractive ? safe_divide(1.0f, bsdf->ior) : 1.0f;
+    const float3 transmission = thin       ? -sd->wi :
+                                refractive ? refract(-sd->wi, bsdf->N, inverse_ior) :
+                                             zero_float3();
+    float reflection = (CLOSURE_IS_REFRACTION(bsdf->type) || thin) ? 0.0f : 1.0f;
+    if (CLOSURE_IS_GLASS(bsdf->type)) {
+      reflection = fresnel_dielectric_cos(max(dot(bsdf->N, sd->wi), 0.0f), bsdf->ior);
+    }
+    const float weights[2] = {sc->sample_weight * reflection,
+                              is_zero(transmission) ? 0.0f :
+                                                      sc->sample_weight * (1.0f - reflection)};
+    const float3 directions[2] = {reflect(-sd->wi, bsdf->N), transmission};
+    const float widths[2] = {alpha, thin ? alpha : alpha * fabsf(1.0f - inverse_ior)};
+    for (int lobe = 0; lobe < 2; ++lobe) {
+      /* Match the central width of a GGX lobe with a smooth proposal. The ordinary BSDF
+       * component retains its longer tails; actual scattering values are never approximated. */
+      const float concentration = min(0.35f / max(sqr(widths[lobe]), 1e-8f), 16384.0f);
+      product.weights[lobe] += weights[lobe];
+      axes[lobe] += weights[lobe] * directions[lobe];
+      concentrations[lobe] += weights[lobe] * concentration;
+    }
+  }
+  for (int lobe = 0; lobe < 2; ++lobe) {
+    const float length = len(axes[lobe]);
+    product.lobes[lobe] = {length > 0.0f ? axes[lobe] / length : make_float3(0, 0, 1),
+                           safe_divide(concentrations[lobe], product.weights[lobe])};
+  }
+  const float mass = product.weights[0] + product.weights[1];
+  product.weights[0] = safe_divide(product.weights[0], mass);
+  product.weights[1] = safe_divide(product.weights[1], mass);
+  return product;
+}
+
+ccl_device_inline SurfaceGuidingProposal
+surface_shader_gpu_guiding_query(const ccl_private ShaderData *sd, const bool light_path)
+{
+  SurfaceGuidingProposal proposal{};
+  if (!kernel_data.integrator.use_surface_guiding ||
+      kernel_integrator_state.guiding_capacity == 0 ||
+      !(kernel_data.integrator.surface_guiding_probability > 0.0f) ||
+      !(sd->runtime_flag & SR_BSDF_HAS_EVAL))
+  {
+    return proposal;
+  }
+  float total_weight = 0.0f;
+  float bsdf_weight = 0.0f;
+  float roughness = 0.0f;
+  bool microfacet_only = true;
+  for (int i = 0; i < sd->num_closure; ++i) {
+    const ccl_private ShaderClosure *sc = &sd->closure[i];
+    if (CLOSURE_IS_BSDF_OR_BSSRDF(sc->type)) {
+      if ((CLOSURE_IS_GLASS(sc->type) || CLOSURE_IS_REFRACTION(sc->type)) &&
+          fabsf(((const ccl_private MicrofacetBsdf *)sc)->ior - 1.0f) < 1e-4f)
+      {
+        /* The microfacet sampler treats index-matched transmission as a Dirac event even
+         * at nonzero roughness. Keep this whole surface on its original closure sampler;
+         * its tiny continuous reflection branch and discrete transmission share one closure. */
+        return proposal;
+      }
+      total_weight += sc->sample_weight;
+      if (surface_shader_gpu_guiding_continuous(sc)) {
+        bsdf_weight += sc->sample_weight;
+        roughness += sc->sample_weight * bsdf_get_specular_roughness_squared(sc);
+        microfacet_only &= CLOSURE_IS_BSDF_MICROFACET(sc->type);
+      }
+    }
+  }
+  if (!(bsdf_weight > 0.0f) || !(roughness > 0.0f) ||
+      safe_sqrtf(roughness / bsdf_weight) < kernel_data.integrator.guiding_roughness_threshold)
+  {
+    return proposal;
+  }
+  const GuidingField field = guiding_gpu_field();
+  const GuidingFieldType type = guiding_surface_field_type(guiding_gpu_surface_orientation(sd),
+                                                           light_path);
+  proposal.position = field.normalized_position(sd->P);
+  proposal.weights = field.distribution(field.find_leaf(sd->P), type);
+  if (!(proposal.weights[0] > 0.0f)) {
+    return proposal;
+  }
+  proposal.bsdf_fraction = bsdf_weight / total_weight;
+  proposal.probability = clamp(kernel_data.integrator.surface_guiding_probability, 0.0f, 1.0f);
+  proposal.use_resampling = bsdf_weight == total_weight &&
+                            kernel_data.integrator.guiding_directional_sampling_type ==
+                                GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS;
+  if (kernel_data.integrator.guiding_directional_sampling_type ==
+      GUIDING_DIRECTIONAL_SAMPLING_TYPE_ROUGHNESS)
+  {
+    proposal.probability *= saturatef(safe_sqrtf(roughness / bsdf_weight));
+  }
+  proposal.product = {surface_shader_gpu_guiding_normal(sd),
+                      0.0f,
+                      sd->runtime_flag & SR_BSDF_HAS_TRANSMISSION ?
+                          GuidingDirectionalProduct::TWO_SIDED_COSINE :
+                          GuidingDirectionalProduct::COSINE};
+  /* Resampling uses smooth incident-radiance targets and candidate products. The direct
+   * mixture retains the adaptive histogram on broad surfaces and smooth narrow glossy lobes. */
+  /* Alpha is the square of the user-facing roughness. */
+  const bool glossy_product = microfacet_only && safe_sqrtf(roughness / bsdf_weight) < 0.25f;
+  proposal.use_smooth_product = glossy_product || proposal.use_resampling;
+  if (glossy_product) {
+    proposal.smooth_product = surface_shader_gpu_guiding_glossy_product(sd);
+  }
+  else if (proposal.use_resampling) {
+    /* A broad vMF lobe approximately matches the cosine hemisphere's first moment.
+     * RIS evaluates the actual BSDF; this smooth product is only its candidate proposal. */
+    const bool two_sided = sd->runtime_flag & SR_BSDF_HAS_TRANSMISSION;
+    proposal.smooth_product = {{{proposal.product.axis, 3.0f}, {-proposal.product.axis, 3.0f}},
+                               {two_sided ? 0.5f : 1.0f, two_sided ? 0.5f : 0.0f}};
+  }
+  return proposal;
+}
+
+ccl_device_inline float surface_shader_gpu_guiding_distribution_pdf(
+    const ccl_private SurfaceGuidingProposal &proposal, const float3 direction)
+{
+  GuidingField::DirectionalTree directional;
+  GuidingGaussianMixture smooth;
+  return proposal.use_smooth_product ?
+             smooth.pdf_product(proposal.weights + GuidingField::tree_size,
+                                proposal.smooth_product,
+                                direction,
+                                proposal.position) :
+             directional.pdf_product(proposal.weights, direction, proposal.product);
+}
+
+ccl_device_inline float3
+surface_shader_gpu_guiding_distribution_sample(const ccl_private SurfaceGuidingProposal &proposal,
+                                               const float2 random,
+                                               ccl_private float *pdf)
+{
+  GuidingField::DirectionalTree directional;
+  GuidingGaussianMixture smooth;
+  return proposal.use_smooth_product ?
+             smooth.sample_product(proposal.weights + GuidingField::tree_size,
+                                   proposal.smooth_product,
+                                   random,
+                                   pdf,
+                                   proposal.position) :
+             directional.sample_product(proposal.weights, random, proposal.product, pdf);
+}
+
+ccl_device_inline float surface_shader_gpu_guiding_pdf_from_query(
+    const ccl_private SurfaceGuidingProposal &proposal,
+    const float3 direction,
+    const float bsdf_pdf)
+{
+  /* Guided candidates are accepted only where the underlying continuous BSDF has support.
+   * Do not assign MIS weight to an unreachable reverse strategy just because the learned
+   * proposal has uniform exploration outside that support. */
+  if (!(bsdf_pdf > 0.0f)) {
+    return 0.0f;
+  }
+  if (proposal.probability == 0.0f) {
+    return bsdf_pdf;
+  }
+  const float guide_pdf = surface_shader_gpu_guiding_distribution_pdf(proposal, direction);
+  const float probability = proposal.use_resampling ? 0.5f : proposal.probability;
+  return (1.0f - probability) * bsdf_pdf + probability * proposal.bsdf_fraction * guide_pdf;
+}
+
+ccl_device_inline float surface_shader_gpu_guiding_pdf(const ccl_private ShaderData *sd,
+                                                       const float3 direction,
+                                                       const float bsdf_pdf,
+                                                       const bool light_path)
+{
+  const SurfaceGuidingProposal proposal = surface_shader_gpu_guiding_query(sd, light_path);
+  return surface_shader_gpu_guiding_pdf_from_query(proposal, direction, bsdf_pdf);
+}
+
+#endif
+
 #ifndef __KERNEL_CUDA__
 ccl_device
 #else
@@ -452,7 +673,8 @@ ccl_device_inline
                              const float3 wo,
                              ccl_private BsdfEval *bsdf_eval,
                              const uint light_shader_flags,
-                             ccl_private float &r_avg_roughness_squared)
+                             ccl_private float &r_avg_roughness_squared,
+                             ccl_attr_maybe_unused const bool guiding_light_path = false)
 {
   bsdf_eval_init(bsdf_eval, zero_spectrum());
 
@@ -491,6 +713,12 @@ ccl_device_inline
               (1.0f - guiding_sampling_prob) * pdf;
       }
     }
+  }
+#endif
+
+#ifdef __KERNEL_METAL__
+  if (light_shader_flags & SHADER_USE_MIS) {
+    pdf = surface_shader_gpu_guiding_pdf(sd, wo, pdf, guiding_light_path);
   }
 #endif
 
@@ -1085,6 +1313,229 @@ ccl_device int surface_shader_bsdf_sample_closure(KernelGlobals kg,
 
   return label;
 }
+
+#ifdef __KERNEL_METAL__
+ccl_device int surface_shader_bsdf_gpu_resampled_closure(
+    KernelGlobals kg,
+    ccl_private ShaderData *sd,
+    const ccl_private ShaderClosure *sc,
+    const ccl_private SurfaceGuidingProposal &proposal,
+    const float3 rand_bsdf,
+    const float3 rand_guide,
+    const float rand_select,
+    ccl_private BsdfEval *bsdf_eval,
+    ccl_private float3 *wo,
+    ccl_private float *pdf,
+    ccl_private float *mis_pdf,
+    ccl_private float *unguided_pdf,
+    ccl_private float2 *sampled_roughness,
+    ccl_private float *eta,
+    ccl_private float &r_avg_roughness_squared)
+{
+  struct Candidate {
+    BsdfEval eval;
+    float3 direction;
+    float2 roughness;
+    float eta;
+    float bsdf_pdf;
+    float guide_pdf;
+    float average_roughness;
+    int label;
+  } candidates[2] = {};
+
+  candidates[0].label = surface_shader_bsdf_sample_closure(kg,
+                                                           sd,
+                                                           sc,
+                                                           rand_bsdf,
+                                                           &candidates[0].eval,
+                                                           &candidates[0].direction,
+                                                           &candidates[0].bsdf_pdf,
+                                                           &candidates[0].roughness,
+                                                           &candidates[0].eta,
+                                                           candidates[0].average_roughness);
+  if (candidates[0].bsdf_pdf > 0.0f) {
+    candidates[0].guide_pdf = surface_shader_gpu_guiding_distribution_pdf(proposal,
+                                                                          candidates[0].direction);
+  }
+
+  candidates[1].direction = surface_shader_gpu_guiding_distribution_sample(
+      proposal, make_float2(rand_guide), &candidates[1].guide_pdf);
+  float closure_pdfs[MAX_CLOSURE];
+  candidates[1].bsdf_pdf = surface_shader_bsdf_eval_pdfs(kg,
+                                                         sd,
+                                                         candidates[1].direction,
+                                                         &candidates[1].eval,
+                                                         closure_pdfs,
+                                                         0,
+                                                         candidates[1].average_roughness);
+
+  GuidingResamplingPair pair{};
+  GuidingField::DirectionalTree directional;
+  GuidingGaussianMixture smooth;
+  const float uniform = (sd->runtime_flag & SR_BSDF_HAS_TRANSMISSION) ? M_1_PI_F * 0.25f :
+                                                                        M_1_PI_F * 0.5f;
+  for (int i = 0; i < 2; ++i) {
+    ccl_private Candidate &candidate = candidates[i];
+    pair.proposal[i] = 0.5f * (candidate.bsdf_pdf + candidate.guide_pdf);
+    if (candidate.bsdf_pdf > 0.0f && !bsdf_eval_is_zero(&candidate.eval)) {
+      const float incident_pdf = proposal.use_smooth_product ?
+                                     smooth.pdf(proposal.weights + GuidingField::tree_size,
+                                                candidate.direction,
+                                                proposal.position) :
+                                     directional.pdf(proposal.weights, candidate.direction);
+      pair.target[i] = average(bsdf_eval_sum(&candidate.eval)) *
+                       ((1.0f - proposal.probability) * uniform +
+                        proposal.probability * incident_pdf);
+    }
+  }
+  const int selected = pair.sample(rand_select, pdf);
+  *mis_pdf = 0.0f;
+  *unguided_pdf = 0.0f;
+  if (selected < 0) {
+    bsdf_eval_init(bsdf_eval, zero_spectrum());
+    return LABEL_NONE;
+  }
+  ccl_private Candidate &candidate = candidates[selected];
+  if (selected == 1) {
+    int closure = -1;
+    float cumulative = 0.0f;
+    for (int i = 0; i < sd->num_closure; ++i) {
+      if (closure_pdfs[i] > 0.0f) {
+        closure = i;
+        cumulative += closure_pdfs[i];
+        if (rand_guide.z < cumulative) {
+          break;
+        }
+      }
+    }
+    if (closure < 0) {
+      *pdf = 0.0f;
+      bsdf_eval_init(bsdf_eval, zero_spectrum());
+      return LABEL_NONE;
+    }
+    bsdf_roughness_eta(
+        &sd->closure[closure], candidate.direction, &candidate.roughness, &candidate.eta);
+    candidate.label = bsdf_label(kg, &sd->closure[closure], candidate.direction);
+  }
+  *bsdf_eval = candidate.eval;
+  *wo = candidate.direction;
+  *unguided_pdf = candidate.bsdf_pdf;
+  *mis_pdf = pair.proposal[selected];
+  *sampled_roughness = candidate.roughness;
+  *eta = candidate.eta;
+  r_avg_roughness_squared = candidate.average_roughness;
+  return candidate.label;
+}
+
+ccl_device int surface_shader_bsdf_gpu_guided_sample_closure(
+    KernelGlobals kg,
+    ccl_private ShaderData *sd,
+    const ccl_private ShaderClosure *sc,
+    const float3 rand_bsdf,
+    float rand_guiding,
+    const float3 rand_resampling,
+    ccl_private BsdfEval *bsdf_eval,
+    ccl_private float3 *wo,
+    ccl_private float *pdf,
+    ccl_private float *mis_pdf,
+    ccl_private float *unguided_pdf,
+    ccl_private float2 *sampled_roughness,
+    ccl_private float *eta,
+    ccl_private float &r_avg_roughness_squared,
+    const bool light_path = false)
+{
+  *mis_pdf = 0.0f;
+  /* Guiding replaces only the continuous part of closure selection. Discrete/transparent
+   * events retain their original mass, which also preserves their bidirectional MIS ratios. */
+  if (!surface_shader_gpu_guiding_continuous(sc)) {
+    const int label = surface_shader_bsdf_sample_closure(kg,
+                                                         sd,
+                                                         sc,
+                                                         rand_bsdf,
+                                                         bsdf_eval,
+                                                         wo,
+                                                         pdf,
+                                                         sampled_roughness,
+                                                         eta,
+                                                         r_avg_roughness_squared);
+    *unguided_pdf = *pdf;
+    *mis_pdf = *pdf;
+    return label;
+  }
+  const SurfaceGuidingProposal proposal = surface_shader_gpu_guiding_query(sd, light_path);
+  const float probability = proposal.probability;
+  if (probability > 0.0f && proposal.use_resampling) {
+    return surface_shader_bsdf_gpu_resampled_closure(kg,
+                                                     sd,
+                                                     sc,
+                                                     proposal,
+                                                     rand_bsdf,
+                                                     rand_resampling,
+                                                     rand_guiding,
+                                                     bsdf_eval,
+                                                     wo,
+                                                     pdf,
+                                                     mis_pdf,
+                                                     unguided_pdf,
+                                                     sampled_roughness,
+                                                     eta,
+                                                     r_avg_roughness_squared);
+  }
+  if (probability > 0.0f && rand_guiding < probability) {
+    rand_guiding /= probability;
+    float guide_pdf;
+    *wo = surface_shader_gpu_guiding_distribution_sample(
+        proposal, make_float2(rand_bsdf), &guide_pdf);
+    float closure_pdfs[MAX_CLOSURE];
+    *unguided_pdf = surface_shader_bsdf_eval_pdfs(
+        kg, sd, *wo, bsdf_eval, closure_pdfs, 0, r_avg_roughness_squared);
+    *pdf = (1.0f - probability) * *unguided_pdf + probability * proposal.bsdf_fraction * guide_pdf;
+    if (!(*unguided_pdf > 0.0f) || bsdf_eval_is_zero(bsdf_eval)) {
+      *pdf = 0.0f;
+      return LABEL_NONE;
+    }
+    int selected = -1;
+    float cumulative = 0.0f;
+    for (int i = 0; i < sd->num_closure; ++i) {
+      if (closure_pdfs[i] > 0.0f) {
+        selected = i;
+        cumulative += closure_pdfs[i];
+        if (rand_guiding < cumulative) {
+          break;
+        }
+      }
+    }
+    if (selected < 0) {
+      *pdf = 0.0f;
+      return LABEL_NONE;
+    }
+    const ccl_private ShaderClosure *selected_closure = &sd->closure[selected];
+    bsdf_roughness_eta(selected_closure, *wo, sampled_roughness, eta);
+    *mis_pdf = *pdf;
+    return bsdf_label(kg, selected_closure, *wo);
+  }
+
+  const int label = surface_shader_bsdf_sample_closure(kg,
+                                                       sd,
+                                                       sc,
+                                                       rand_bsdf,
+                                                       bsdf_eval,
+                                                       wo,
+                                                       unguided_pdf,
+                                                       sampled_roughness,
+                                                       eta,
+                                                       r_avg_roughness_squared);
+  *pdf = *unguided_pdf;
+  if (probability > 0.0f && *pdf > 0.0f) {
+    /* Dirac events carry discrete probability mass and have no continuous guide component. */
+    *pdf = (label & (LABEL_SINGULAR | LABEL_TRANSPARENT)) ?
+               (1.0f - probability) * *pdf :
+               surface_shader_gpu_guiding_pdf_from_query(proposal, *wo, *pdf);
+  }
+  *mis_pdf = *pdf;
+  return label;
+}
+#endif
 
 ccl_device float surface_shader_average_roughness(const ccl_private ShaderData *sd)
 {

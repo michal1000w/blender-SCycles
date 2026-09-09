@@ -124,6 +124,25 @@ ccl_device_forceinline float triangle_light_pdf(KernelGlobals kg,
   return pdf;
 }
 
+/* Emission samples the fixed CDF, then uniform area at the shutter time.
+ * Motion can change that area without changing the emitter-selection mass. */
+ccl_device_inline float triangle_light_emission_pdf(KernelGlobals kg,
+                                                     const int object,
+                                                     const int prim,
+                                                     const float time,
+                                                     ccl_private float *flat_selection)
+{
+  float3 V[3];
+  const bool has_motion = triangle_world_space_vertices(kg, object, prim, time, V);
+  const float area = triangle_area(V[0], V[1], V[2]);
+  if (has_motion) {
+    triangle_world_space_vertices(kg, object, prim, -1.0f, V);
+  }
+  *flat_selection = triangle_area(V[0], V[1], V[2]) *
+                    kernel_data.integrator.distribution_pdf_triangles;
+  return area > 0.0f ? *flat_selection / area : 0.0f;
+}
+
 template<bool in_volume_segment>
 ccl_device_forceinline bool triangle_light_sample(KernelGlobals kg,
                                                   const int prim,
