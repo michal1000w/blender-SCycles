@@ -30,7 +30,12 @@ set(SRC
   integrator_adaptive_sampling_test.cpp
   integrator_render_scheduler_test.cpp
   integrator_tile_test.cpp
+  kernel_bidirectional_pdf_test.cpp
   kernel_camera_projection_test.cpp
+  kernel_guiding_distribution_test.cpp
+  kernel_guiding_mixture_fit_test.cpp
+  kernel_guiding_parallax_test.cpp
+  kernel_guiding_resampling_test.cpp
   kernel_spectral_transmission_test.cpp
   render_graph_finalize_test.cpp
   scene_displacement_image_test.cpp

@@ -7,6 +7,9 @@
 #include "kernel/film/write.h"
 
 #include "kernel/integrator/shadow_catcher.h"
+#ifdef __KERNEL_METAL__
+#  include "kernel/integrator/guiding_gpu.h"
+#endif
 
 #include "kernel/sample/pattern.h"
 #include "util/atomic.h"
@@ -492,6 +495,11 @@ ccl_device_inline void film_write_direct_light(KernelGlobals kg,
 {
   /* The throughput for shadow paths already contains the light shader evaluation. */
   Spectrum contribution = INTEGRATOR_STATE(state, shadow_path, throughput);
+#ifdef __KERNEL_METAL__
+  if (!(INTEGRATOR_STATE(state, shadow_path, flag) & PATH_RAY_SHADOW_FOR_AO)) {
+    guiding_gpu_record_shadow_radiance(state, contribution);
+  }
+#endif
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, shadow_path, bounce));
 
   ccl_global float *buffer = film_pass_pixel_render_buffer_shadow(kg, state, render_buffer);
@@ -635,6 +643,9 @@ ccl_device_inline void film_write_background(KernelGlobals kg,
                                              ccl_global float *ccl_restrict render_buffer)
 {
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L;
+#ifdef __KERNEL_METAL__
+  guiding_gpu_record_radiance(state, contribution);
+#endif
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
@@ -665,6 +676,9 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
                                                   const int lightgroup = LIGHTGROUP_NONE)
 {
   Spectrum contribution = L;
+#ifdef __KERNEL_METAL__
+  guiding_gpu_record_radiance(state, contribution);
+#endif
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
@@ -677,14 +691,19 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
       kg, state, contribution, buffer, kernel_data.film.pass_emission, lightgroup);
 }
 
-ccl_device_inline void film_write_surface_emission(KernelGlobals kg,
-                                                   ConstIntegratorState state,
-                                                   const Spectrum L,
-                                                   const float mis_weight,
-                                                   ccl_global float *ccl_restrict render_buffer,
-                                                   const int lightgroup = LIGHTGROUP_NONE)
+ccl_device_inline void film_write_surface_emission(
+    KernelGlobals kg,
+    ConstIntegratorState state,
+    const Spectrum L,
+    const float mis_weight,
+    ccl_global float *ccl_restrict render_buffer,
+    const int lightgroup = LIGHTGROUP_NONE,
+    ccl_attr_maybe_unused const float3 source_position = make_float3(FLT_MAX))
 {
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L * mis_weight;
+#ifdef __KERNEL_METAL__
+  guiding_gpu_record_radiance(state, contribution, source_position);
+#endif
   film_clamp_light(kg, &contribution, INTEGRATOR_STATE(state, path, bounce) - 1);
 
   ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);

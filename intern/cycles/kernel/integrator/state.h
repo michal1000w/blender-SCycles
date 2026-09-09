@@ -27,6 +27,7 @@
  */
 
 #include "kernel/types.h"
+#include "kernel/types_guiding.h"
 
 #include "util/types.h"
 
@@ -215,10 +216,28 @@ struct IntegratorStateGPU {
 
   /* Metal bidirectional light-vertex cache. */
   ccl_global KernelBDPTVertex *bdpt_vertices;
+  ccl_global uint *bdpt_vertex_indices;
   ccl_global uint *bdpt_vertex_count;
+
+  /* GPU guiding training and sampling storage. Publication occurs between complete batches. */
+  ccl_global GuidingSpatialNode *guiding_nodes;
+  ccl_global float *guiding_accumulation;
+  ccl_global float *guiding_sampling;
+  ccl_global uint *guiding_counts;
+  ccl_global GuidingHistoryRecord *guiding_history;
+  ccl_global uint *guiding_history_count;
+  ccl_global uint *guiding_partition;
+  ccl_global uint *guiding_indices;
+  ccl_global float *guiding_fit;
+  ccl_global uint *guiding_fit_counts;
 
   /* Divisor used to partition active indices by locality when sorting by material. */
   uint sort_partition_divisor;
+
+  /* Scalars must follow sort_partition_divisor: Metal translates the preceding pointer block. */
+  uint guiding_capacity;
+  uint guiding_training;
+  uint guiding_history_capacity;
 
   uint photon_hash_size;
   uint photon_capacity;

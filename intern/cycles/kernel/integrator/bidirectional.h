@@ -15,6 +15,8 @@
 #include "kernel/camera/camera.h"
 #include "kernel/film/adaptive_sampling.h"
 #include "kernel/geom/shader_data.h"
+#include "kernel/integrator/bidirectional_transport.h"
+#include "kernel/integrator/bidirectional_volume.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/photon_mapping.h"
 #include "kernel/integrator/state_flow.h"
@@ -94,6 +96,9 @@ ccl_device_inline float bdpt_forward_selection_pdf(KernelGlobals kg,
  * normal. Subsequent light vertices already contain this ratio in their recursive d_vc term. */
 ccl_device_inline float bdpt_light_selection_ratio(KernelGlobals kg,
                                                    const int distribution_index,
+                                                   const float3 emitter_P,
+                                                   const float3 shading_P,
+                                                   const float time,
                                                    const float3 P,
                                                    const float3 N,
                                                    const int runtime_flags,
@@ -101,6 +106,67 @@ ccl_device_inline float bdpt_light_selection_ratio(KernelGlobals kg,
                                                    const bool volume = false,
                                                    const float dt = 0.0f)
 {
+  /* NEE resamples the light point from the scattering position, including
+   * volume NEE. The tree may instead be selected from an entire ray segment.
+   * Do not use that segment origin for this conditional shape density. */
+  const ccl_global KernelLightDistribution *distribution =
+      &kernel_data_fetch(light_distribution, distribution_index);
+  float shape_ratio = 1.0f;
+  if (distribution->prim >= 0) {
+    float distance;
+    ShaderData emitter_sd;
+    emitter_sd.P = emitter_P;
+    emitter_sd.wi = safe_normalize_len(shading_P - emitter_P, &distance);
+    emitter_sd.object = distribution->object_id;
+    emitter_sd.prim = distribution->prim;
+    emitter_sd.time = time;
+    float3 V[3];
+    triangle_world_space_vertices(kg, emitter_sd.object, emitter_sd.prim, time, V);
+    emitter_sd.Ng = safe_normalize(cross(V[1] - V[0], V[2] - V[0]));
+    float flat_selection;
+    const float emission_pdf_a = triangle_light_emission_pdf(
+        kg, emitter_sd.object, emitter_sd.prim, time, &flat_selection);
+    float nee_pdf_w = triangle_light_pdf(kg, &emitter_sd, distance);
+    if (kernel_data.integrator.use_light_tree) {
+      nee_pdf_w *= flat_selection;
+    }
+    shape_ratio = distance > 0.0f && emission_pdf_a > 0.0f ?
+                      nee_pdf_w * fabsf(dot(emitter_sd.Ng, emitter_sd.wi)) /
+                          (sqr(distance) * emission_pdf_a) :
+                      0.0f;
+  }
+  else {
+    const ccl_global KernelLight *light = &kernel_data_fetch(lights, ~distribution->prim);
+    if (light->type == LIGHT_AREA) {
+      float distance;
+      const float3 direction = safe_normalize_len(emitter_P - shading_P, &distance);
+      const float area = area_light_is_ellipse(&light->area) ?
+                             M_PI_F * light->area.len_u * light->area.len_v * 0.25f :
+                             light->area.len_u * light->area.len_v;
+      const LightEval eval = area_light_eval_from_intersection(
+          light, shading_P, direction, distance);
+      shape_ratio = distance > 0.0f ?
+                        eval.pdf * fabsf(dot(light->area.dir, direction)) * area / sqr(distance) :
+                        0.0f;
+    }
+    else if ((light->type == LIGHT_POINT || light->type == LIGHT_SPOT) &&
+             light->spot.is_sphere && light->spot.radius > 0.0f)
+    {
+      float distance;
+      const float3 direction = safe_normalize_len(emitter_P - shading_P, &distance);
+      const uint flag = (runtime_flags & SR_BSDF_HAS_TRANSMISSION) ?
+                            PATH_RAY_MIS_HAD_TRANSMISSION : 0u;
+      const LightEval eval = light->type == LIGHT_POINT ?
+                                 point_light_eval_from_intersection(
+                                     light, shading_P, direction, distance, N, flag) :
+                                 spot_light_eval_from_intersection(
+                                     kg, light, shading_P, direction, distance, N, flag);
+      const float cosine = fabsf(dot(safe_normalize(emitter_P - light->co), direction));
+      const float area = 4.0f * M_PI_F * sqr(light->spot.radius);
+      shape_ratio = distance > 0.0f ? eval.pdf * cosine * area / sqr(distance) : 0.0f;
+    }
+  }
+
 #ifdef __LIGHT_TREE__
   if (kernel_data.integrator.use_light_tree) {
     const ccl_global KernelLightDistribution *emitter =
@@ -116,16 +182,18 @@ ccl_device_inline float bdpt_light_selection_ratio(KernelGlobals kg,
     const float tree_pdf = volume ?
         light_tree_pdf<true>(kg, P, N, dt, flag, emitter->object_id, tree_id, receiver) :
         light_tree_pdf<false>(kg, P, N, 0.0f, flag, emitter->object_id, tree_id, receiver);
-    return tree_pdf / flat_pdf;
+    return shape_ratio * tree_pdf / flat_pdf;
   }
 #endif
-  return 1.0f;
+  return shape_ratio;
 }
 
 ccl_device_inline uint bdpt_pack_vertex_support(const uint path_length,
-                                                const uint selection_count)
+                                                const uint selection_count,
+                                                const uint transparent_bounce)
 {
-  return (path_length & 0xffu) | ((selection_count & 0xffu) << 8u);
+  return (path_length & 0xffu) | ((selection_count & 0xfffu) << 8u) |
+         (min(transparent_bounce, 4095u) << 20u);
 }
 
 ccl_device_inline uint bdpt_vertex_path_length(const ccl_private KernelBDPTVertex *light_vertex)
@@ -136,7 +204,7 @@ ccl_device_inline uint bdpt_vertex_path_length(const ccl_private KernelBDPTVerte
 ccl_device_inline uint bdpt_vertex_selection_count(
     const ccl_private KernelBDPTVertex *light_vertex)
 {
-  return (light_vertex->path_length >> 8u) & 0xffu;
+  return (light_vertex->path_length >> 8u) & 0xfffu;
 }
 
 ccl_device_inline Spectrum bdpt_light_vertex_spectral_weight(
@@ -247,10 +315,12 @@ ccl_device_inline float bdpt_emission_mis_weight_infinite(IntegratorState state,
     return 1.0f;
   }
   const float emission_pdf_w = direct_pdf_w * position_pdf;
-  const float w_camera = direct_pdf_w * selection_ratio *
-                             INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
-                         emission_pdf_w * INTEGRATOR_STATE(state, path, bdpt_d_vc);
-  return 1.0f / (1.0f + w_camera);
+  const BDPTMISWeight w_camera =
+      BDPTMISWeight(direct_pdf_w) * selection_ratio *
+          BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
+      BDPTMISWeight(emission_pdf_w) *
+          BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
+  return (BDPTMISWeight(1.0f) + w_camera).inverse();
 }
 
 ccl_device_inline float bdpt_emission_mis_weight_surface(KernelGlobals kg,
@@ -269,22 +339,28 @@ ccl_device_inline float bdpt_emission_mis_weight_surface(KernelGlobals kg,
     return 1.0f;
   }
 
-  /* The flat emitter CDF is proportional to triangle area, making this the complete position
-   * density including emitter selection. A two-sided emitter samples either hemisphere with
-   * equal probability. */
+  /* Emission uses the fixed emitter CDF and uniform area at the shutter time.
+   * NEE instead follows the conditional triangle sampler. A two-sided emitter
+   * samples either hemisphere with equal probability. */
   const float side_pdf = (front && back) ? 0.5f : 1.0f;
-  const float direct_pdf_a = kernel_data.integrator.distribution_pdf_triangles;
-  const float cos_at_light = max(fabsf(dot(sd->N, sd->wi)), 1.0e-8f);
+  float flat_selection;
+  const float direct_pdf_a = triangle_light_emission_pdf(
+      kg, sd->object, sd->prim, sd->time, &flat_selection);
+  const float cos_at_light = max(fabsf(dot(sd->Ng, sd->wi)), 1.0e-8f);
   const float emission_pdf_w = direct_pdf_a * side_pdf * cos_at_light * M_1_PI_F;
-  float3 V[3];
-  triangle_world_space_vertices(kg, sd->object, sd->prim, -1.0f, V);
-  const float flat_selection = triangle_area(V[0], V[1], V[2]) * direct_pdf_a;
+  float nee_pdf_w = triangle_light_pdf(kg, sd, sd->ray_length);
+  if (kernel_data.integrator.use_light_tree) {
+    nee_pdf_w *= flat_selection;
+  }
+  const float nee_pdf_a = nee_pdf_w * cos_at_light / sqr(sd->ray_length);
   const float selection_ratio = bdpt_forward_selection_pdf(
       kg, state, sd->object, sd->prim, flat_selection) / bdpt_safe_pdf(flat_selection);
-  const float w_camera = direct_pdf_a * selection_ratio *
-                             INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
-                         emission_pdf_w * INTEGRATOR_STATE(state, path, bdpt_d_vc);
-  return 1.0f / (1.0f + w_camera);
+  const BDPTMISWeight w_camera =
+      BDPTMISWeight(nee_pdf_a) * selection_ratio *
+          BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
+      BDPTMISWeight(emission_pdf_w) *
+          BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
+  return (BDPTMISWeight(1.0f) + w_camera).inverse();
 }
 
 ccl_device_inline float bdpt_emission_mis_weight_lamp(KernelGlobals kg,
@@ -292,7 +368,8 @@ ccl_device_inline float bdpt_emission_mis_weight_lamp(KernelGlobals kg,
                                                       const ccl_global KernelLight *klight,
                                                       const float3 ray_P,
                                                       const float3 ray_D,
-                                                      const float distance)
+                                                      const float distance,
+                                                      const float nee_pdf_w)
 {
   if (INTEGRATOR_STATE(state, path, bounce) == 0 ||
       (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_MIS_SKIP))
@@ -326,32 +403,80 @@ ccl_device_inline float bdpt_emission_mis_weight_lamp(KernelGlobals kg,
 
   const float direct_pdf_a = kernel_data.integrator.distribution_pdf_lights / area;
   const float emission_pdf_w = direct_pdf_a * cos_at_light * M_1_PI_F;
-  const float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm) * sqr(distance) / cos_at_light;
-  const float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc) / cos_at_light;
+  const BDPTMISWeight d_vcm = BDPTMISWeight::from_encoded(
+                                  INTEGRATOR_STATE(state, path, bdpt_d_vcm)) *
+                              sqr(distance) / cos_at_light;
+  const BDPTMISWeight d_vc = BDPTMISWeight::from_encoded(
+                                 INTEGRATOR_STATE(state, path, bdpt_d_vc)) /
+                             cos_at_light;
   const float selection_ratio = bdpt_forward_selection_pdf(
       kg, state, klight->object_id, -1, kernel_data.integrator.distribution_pdf_lights) /
       bdpt_safe_pdf(kernel_data.integrator.distribution_pdf_lights);
-  return 1.0f / (1.0f + direct_pdf_a * selection_ratio * d_vcm + emission_pdf_w * d_vc);
+  const float nee_pdf_a = kernel_data.integrator.distribution_pdf_lights * nee_pdf_w *
+                          cos_at_light / sqr(distance);
+  return (BDPTMISWeight(1.0f) + BDPTMISWeight(nee_pdf_a) * selection_ratio * d_vcm +
+          BDPTMISWeight(emission_pdf_w) * d_vc)
+      .inverse();
 }
 
-/* Evaluate the compact reverse density used by recursive MIS. Actual endpoint contributions do a
- * full reciprocal shader reconstruction; duplicating an arbitrary shader graph at every recursive
- * PDF query causes pathological Metal compile time and register pressure. Swapping the fixed
- * direction here is exact for reciprocal closures with direction-independent mixture weights and
- * remains a variance-only approximation for layered directional selection weights. */
-ccl_device_inline float bdpt_reverse_pdf(KernelGlobals kg,
-                                         IntegratorState state,
-                                         ccl_private ShaderData *sd,
-                                         const float3 sampled_wo)
+/* Reconstruct the reciprocal shader before evaluating a reverse density. Cycles closures are
+ * prepared for an incoming upper-hemisphere direction: swapping wi alone returns zero for
+ * microfacet transmission and also retains the wrong relative IOR and layered mixture weights.
+ * An inconsistent reverse PDF breaks the partition of the bidirectional MIS weights. */
+/* Keep the full shader graph in one callable body. Replicating it at every MIS query makes
+ * Metal compilation and the caller's live register set unnecessarily large. */
+ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
+    KernelGlobals kg,
+    IntegratorState state,
+    ccl_private ShaderData *sd,
+    const float3 sampled_wo,
+    const bool light_path = false,
+    ccl_private Spectrum *reciprocal_eval = nullptr)
 {
-  const float3 original_wi = sd->wi;
-  sd->wi = normalize(sampled_wo);
+  Ray reverse_ray ccl_optional_struct_init;
+  reverse_ray.D = -normalize(sampled_wo);
+  reverse_ray.P = sd->P - reverse_ray.D;
+  reverse_ray.tmin = 0.0f;
+  reverse_ray.tmax = 1.0f;
+  reverse_ray.time = sd->time;
+#ifdef __RAY_DIFFERENTIALS__
+  reverse_ray.dP = differential_zero_compact();
+  reverse_ray.dD = differential_zero_compact();
+#endif
+  Intersection reverse_isect;
+  reverse_isect.t = 1.0f;
+  reverse_isect.u = sd->u;
+  reverse_isect.v = sd->v;
+  reverse_isect.prim = sd->prim;
+  reverse_isect.object = sd->object;
+  reverse_isect.type = sd->type;
+  ShaderData reverse_sd;
+  shader_setup_from_ray(kg, &reverse_sd, &reverse_ray, &reverse_isect);
+#ifdef __SPECTRAL__
+  reverse_sd.rand_wavelength = sd->rand_wavelength;
+#endif
+  const PathRayVisibility visibility = path_state_ray_visibility(state);
+  surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+      kg, state, &reverse_sd, nullptr, visibility, INTEGRATOR_STATE(state, path, flag));
+  if (reverse_sd.runtime_flag & SR_CACHE_MISS) {
+    sd->runtime_flag |= SR_CACHE_MISS;
+    return 0.0f;
+  }
+  surface_shader_prepare_closures(kg, state, &reverse_sd, visibility);
   BsdfEval reverse_eval;
   float roughness_squared = 0.0f;
-  const float reverse_pdf = surface_shader_bsdf_eval(
-      kg, state, sd, original_wi, &reverse_eval, SHADER_USE_MIS, roughness_squared);
-  sd->wi = original_wi;
-  return reverse_pdf;
+  const float pdf = surface_shader_bsdf_eval(kg,
+                                             state,
+                                             &reverse_sd,
+                                             sd->wi,
+                                             &reverse_eval,
+                                             SHADER_USE_MIS,
+                                             roughness_squared,
+                                             !light_path);
+  if (reciprocal_eval) {
+    *reciprocal_eval = bsdf_eval_sum(&reverse_eval);
+  }
+  return pdf;
 }
 
 /* Balance-heuristic weight for the next-event strategy in the presence of light tracing and
@@ -366,13 +491,15 @@ ccl_device_inline float bdpt_nee_mis_weight(KernelGlobals kg,
                                             const float bsdf_pdf)
 {
   const float direct_pdf = bdpt_safe_pdf(ls->pdf);
-  float w_light = bsdf_pdf / direct_pdf;
+  BDPTMISWeight w_light = BDPTMISWeight(bsdf_pdf) / direct_pdf;
 
   float emission_position_pdf = 0.0f;
   float emission_side_pdf = 1.0f;
-  float w_camera = 0.0f;
+  BDPTMISWeight w_camera = 0.0f;
   if (ls->type == LIGHT_TRIANGLE) {
-    emission_position_pdf = kernel_data.integrator.distribution_pdf_triangles;
+    float flat_selection;
+    emission_position_pdf = triangle_light_emission_pdf(
+        kg, ls->object, ls->prim, sd->time, &flat_selection);
     const int shader_flags = kernel_data_fetch(shaders, ls->shader & SHADER_MASK).flags;
     if ((shader_flags & SD_MIS_FRONT) && (shader_flags & SD_MIS_BACK)) {
       emission_side_pdf = 0.5f;
@@ -395,12 +522,13 @@ ccl_device_inline float bdpt_nee_mis_weight(KernelGlobals kg,
     }
     const float position_pdf = bdpt_infinite_position_pdf(sd->P, -ls->D);
     const float reverse_pdf = bdpt_reverse_pdf(kg, state, sd, ls->D);
-    const float cos_camera = max(fabsf(dot(sd->N, ls->D)), 1.0e-8f);
+    const float cos_camera = max(fabsf(dot(sd->Ng, ls->D)), 1.0e-8f);
     const float emission_selection_ratio = kernel_data.integrator.distribution_pdf_lights /
                                            bdpt_safe_pdf(ls->pdf_selection);
-    w_camera = emission_selection_ratio * position_pdf * cos_camera *
-               (INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
-                INTEGRATOR_STATE(state, path, bdpt_d_vc) * reverse_pdf);
+    w_camera = BDPTMISWeight(emission_selection_ratio) * position_pdf * cos_camera *
+               (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
+                BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
+                    reverse_pdf);
   }
   else if (ls->type == LIGHT_POINT || ls->type == LIGHT_SPOT) {
     const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
@@ -422,58 +550,91 @@ ccl_device_inline float bdpt_nee_mis_weight(KernelGlobals kg,
                                         bdpt_spot_emission_direction_pdf(kg, klight, -ls->D) :
                                         bdpt_point_emission_direction_pdf(klight->co, -ls->D));
       const float reverse_pdf = bdpt_reverse_pdf(kg, state, sd, ls->D);
-      const float cos_camera = max(fabsf(dot(sd->N, ls->D)), 1.0e-8f);
-      w_camera = emission_pdf_w * cos_camera / direct_pdf *
-                 (INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
-                  INTEGRATOR_STATE(state, path, bdpt_d_vc) * reverse_pdf);
+      const float cos_camera = max(fabsf(dot(sd->Ng, ls->D)), 1.0e-8f);
+      w_camera = BDPTMISWeight(emission_pdf_w) * cos_camera / direct_pdf *
+                 (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
+                  BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
+                      reverse_pdf);
     }
   }
 
   if (emission_position_pdf > 0.0f) {
     const float reverse_pdf = bdpt_reverse_pdf(kg, state, sd, ls->D);
-    const float cos_camera = max(fabsf(dot(sd->N, ls->D)), 1.0e-8f);
-    const float emission_to_direct = emission_position_pdf * emission_side_pdf * cos_camera /
-                                     (M_PI_F * direct_pdf);
+    const float cos_camera = max(fabsf(dot(sd->Ng, ls->D)), 1.0e-8f);
+    const BDPTMISWeight emission_to_direct = BDPTMISWeight(emission_position_pdf) *
+                                             emission_side_pdf * cos_camera / M_PI_F / direct_pdf;
     w_camera = emission_to_direct *
-               (INTEGRATOR_STATE(state, path, bdpt_d_vcm) +
-                INTEGRATOR_STATE(state, path, bdpt_d_vc) * reverse_pdf);
+               (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
+                BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
+                    reverse_pdf);
   }
 
-  return 1.0f / (1.0f + w_light + w_camera);
+  return (BDPTMISWeight(1.0f) + w_light + w_camera).inverse();
+}
+
+/* Match camera_sample_perspective()'s time interpolation in camera space. */
+ccl_device_inline float3 bdpt_perspective_image_point(const float3 raster, const float time)
+{
+  const ProjectionTransform raster_to_camera = kernel_data.cam.rastertocamera;
+  float3 image_P = transform_perspective(&raster_to_camera, raster);
+  if (kernel_data.cam.have_perspective_motion) {
+    if (time < 0.5f) {
+      const ProjectionTransform raster_to_camera_pre = kernel_data.cam.perspective_pre;
+      const float3 image_pre = transform_perspective(&raster_to_camera_pre, raster);
+      image_P = interp(image_pre, image_P, time * 2.0f);
+    }
+    else {
+      const ProjectionTransform raster_to_camera_post = kernel_data.cam.perspective_post;
+      const float3 image_post = transform_perspective(&raster_to_camera_post, raster);
+      image_P = interp(image_P, image_post, (time - 0.5f) * 2.0f);
+    }
+  }
+  return image_P;
 }
 
 ccl_device_inline void bdpt_recursive_mis_before_measure_conversion(
+    KernelGlobals kg,
     IntegratorState state,
     const ccl_private ShaderData *sd,
-    ccl_private float *d_vcm_out,
-    ccl_private float *d_vc_out)
+    ccl_private BDPTMISWeight *d_vcm_out,
+    ccl_private BDPTMISWeight *d_vc_out)
 {
-  float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm);
-  float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc);
+  BDPTMISWeight d_vcm = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm));
+  BDPTMISWeight d_vc = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
 
   if (INTEGRATOR_STATE(state, path, bounce) == 0 && d_vcm == 0.0f) {
     float inverse_camera_pdf_w = 0.0f;
-    if (kernel_data.cam.type == CAMERA_PERSPECTIVE && kernel_data.cam.aperturesize == 0.0f &&
-        kernel_data.cam.interocular_offset == 0.0f && kernel_data.cam.num_motion_steps == 0 &&
-        !kernel_data.cam.have_perspective_motion)
-    {
-      const ProjectionTransform raster_to_camera = kernel_data.cam.rastertocamera;
-      const float3 image_origin = transform_perspective(
-          &raster_to_camera, make_float3(0.0f, 0.0f, 0.0f));
-      const float3 image_x = transform_perspective(
-          &raster_to_camera, make_float3(1.0f, 0.0f, 0.0f));
-      const float3 image_y = transform_perspective(
-          &raster_to_camera, make_float3(0.0f, 1.0f, 0.0f));
-      const float image_pixel_area = len(cross(image_x - image_origin, image_y - image_origin));
-      const Transform world_to_camera = kernel_data.cam.worldtocamera;
+    if (kernel_data.cam.type == CAMERA_PERSPECTIVE) {
+      Transform camera_to_world = kernel_data.cam.cameratoworld;
+      if (kernel_data.cam.num_motion_steps) {
+        transform_motion_array_interpolate(&camera_to_world,
+                                           kernel_data_array(camera_motion),
+                                           kernel_data.cam.num_motion_steps,
+                                           sd->time);
+      }
+      const Transform world_to_camera = transform_inverse(camera_to_world);
       const float3 camera_D = normalize(
           transform_direction(&world_to_camera, INTEGRATOR_STATE(state, ray, D)));
-      const float scale = image_origin.z / camera_D.z;
-      const float3 image_P = camera_D * scale;
-      const float image_distance2 = len_squared(image_P);
-      const float cos_at_camera = fabsf(camera_D.z);
-      inverse_camera_pdf_w = cos_at_camera * image_pixel_area /
-                             max(image_distance2, 1.0e-20f);
+      const float3 clipped_P = transform_point(&world_to_camera, INTEGRATOR_STATE(state, ray, P));
+      /* Recover the actual aperture sample from the ray, including its near-plane shift.
+       * This is the conditional camera density for that lens sample, not a differential
+       * footprint approximation. Camera and light strategies use the same aperture measure. */
+      const float3 lens_P = clipped_P - camera_D * (clipped_P.z / camera_D.z);
+      const float3 image_origin = bdpt_perspective_image_point(zero_float3(), sd->time);
+      const float3 image_dx = bdpt_perspective_image_point(make_float3(1, 0, 0), sd->time) -
+                              image_origin;
+      const float3 image_dy = bdpt_perspective_image_point(make_float3(0, 1, 0), sd->time) -
+                              image_origin;
+      const float plane_scale = kernel_data.cam.aperturesize > 0.0f ?
+                                    kernel_data.cam.focaldistance / image_origin.z :
+                                    1.0f;
+      const float3 sensor_to_plane = camera_D *
+                                     ((image_origin.z * plane_scale - lens_P.z) / camera_D.z);
+      inverse_camera_pdf_w = bdpt_camera_plane_inverse_pdf(
+          sensor_to_plane, image_dx * plane_scale, image_dy * plane_scale);
+      const float3 sensor_P = transform_point(&camera_to_world, lens_P);
+      inverse_camera_pdf_w = bdpt_camera_clip_measure(
+          inverse_camera_pdf_w, len_squared(sd->P - sensor_P), sd->ray_length);
     }
     else if (kernel_data.cam.type == CAMERA_ORTHOGRAPHIC &&
              kernel_data.cam.aperturesize == 0.0f && kernel_data.cam.num_motion_steps == 0)
@@ -504,12 +665,17 @@ ccl_device_inline void bdpt_recursive_mis_before_measure_conversion(
       const float3 dy1 = camera_panorama_direction(&kernel_data.cam, raster_x, raster_y + h);
       inverse_camera_pdf_w = len(cross((dx1 - dx0) * (0.5f / h),
                                        (dy1 - dy0) * (0.5f / h)));
+      const Transform camera_to_world = kernel_data.cam.cameratoworld;
+      const float3 sensor_P = transform_point(&camera_to_world, zero_float3());
+      inverse_camera_pdf_w = bdpt_camera_clip_measure(
+          inverse_camera_pdf_w, len_squared(sd->P - sensor_P), sd->ray_length);
     }
     else {
       const float camera_footprint = max(INTEGRATOR_STATE(state, ray, dD), 1.0e-8f);
       inverse_camera_pdf_w = sqr(camera_footprint);
     }
-    d_vcm = kernel_integrator_state.bdpt_light_path_sample_ratio * inverse_camera_pdf_w;
+    d_vcm = BDPTMISWeight(kernel_integrator_state.bdpt_light_path_sample_ratio) *
+            inverse_camera_pdf_w;
     d_vc = 0.0f;
   }
 
@@ -530,31 +696,33 @@ ccl_device_inline float bdpt_volume_nee_mis_weight(
     const float phase_pdf)
 {
   const float direct_pdf = bdpt_safe_pdf(ls->pdf);
-  float w_light = phase_pdf / direct_pdf;
+  BDPTMISWeight w_light = BDPTMISWeight(phase_pdf) / direct_pdf;
 
   const float3 original_wi = sd->wi;
   sd->wi = ls->D;
   BsdfEval reverse_eval;
   const float reverse_pdf = volume_shader_phase_eval(
-      kg, state, sd, phases, original_wi, &reverse_eval, SHADER_USE_MIS);
+      kg, state, sd, phases, original_wi, &reverse_eval, SHADER_USE_MIS, true, &P);
   sd->wi = original_wi;
 
   const float3 original_P = sd->P;
   const float original_ray_length = sd->ray_length;
   sd->P = P;
   sd->ray_length = len(P - sd->ray_P);
-  float d_vcm;
-  float d_vc;
-  bdpt_recursive_mis_before_measure_conversion(state, sd, &d_vcm, &d_vc);
+  BDPTMISWeight d_vcm;
+  BDPTMISWeight d_vc;
+  bdpt_recursive_mis_before_measure_conversion(kg, state, sd, &d_vcm, &d_vc);
   d_vcm *= sqr(max(sd->ray_length, 1.0e-10f));
   sd->P = original_P;
   sd->ray_length = original_ray_length;
 
   float emission_position_pdf = 0.0f;
   float emission_side_pdf = 1.0f;
-  float w_camera = 0.0f;
+  BDPTMISWeight w_camera = 0.0f;
   if (ls->type == LIGHT_TRIANGLE) {
-    emission_position_pdf = kernel_data.integrator.distribution_pdf_triangles;
+    float flat_selection;
+    emission_position_pdf = triangle_light_emission_pdf(
+        kg, ls->object, ls->prim, sd->time, &flat_selection);
     const int shader_flags = kernel_data_fetch(shaders, ls->shader & SHADER_MASK).flags;
     if ((shader_flags & SD_MIS_FRONT) && (shader_flags & SD_MIS_BACK)) {
       emission_side_pdf = 0.5f;
@@ -577,7 +745,7 @@ ccl_device_inline float bdpt_volume_nee_mis_weight(
     }
     const float emission_selection_ratio = kernel_data.integrator.distribution_pdf_lights /
                                            bdpt_safe_pdf(ls->pdf_selection);
-    w_camera = emission_selection_ratio * bdpt_infinite_position_pdf(P, -ls->D) *
+    w_camera = BDPTMISWeight(emission_selection_ratio) * bdpt_infinite_position_pdf(P, -ls->D) *
                (d_vcm + d_vc * reverse_pdf);
   }
   else if (ls->type == LIGHT_POINT || ls->type == LIGHT_SPOT) {
@@ -596,33 +764,58 @@ ccl_device_inline float bdpt_volume_nee_mis_weight(
                                    ((ls->type == LIGHT_SPOT) ?
                                         bdpt_spot_emission_direction_pdf(kg, klight, -ls->D) :
                                         bdpt_point_emission_direction_pdf(klight->co, -ls->D));
-      w_camera = emission_pdf_w / direct_pdf * (d_vcm + d_vc * reverse_pdf);
+      w_camera = BDPTMISWeight(emission_pdf_w) / direct_pdf * (d_vcm + d_vc * reverse_pdf);
     }
   }
 
   if (emission_position_pdf > 0.0f) {
-    const float emission_to_direct = emission_position_pdf * emission_side_pdf /
-                                     (M_PI_F * direct_pdf);
+    const BDPTMISWeight emission_to_direct = BDPTMISWeight(emission_position_pdf) *
+                                             emission_side_pdf / M_PI_F / direct_pdf;
     w_camera = emission_to_direct * (d_vcm + d_vc * reverse_pdf);
   }
-  return 1.0f / (1.0f + w_light + w_camera);
+  return (BDPTMISWeight(1.0f) + w_light + w_camera).inverse();
 }
 #endif
 
-ccl_device_inline void bdpt_recursive_mis_after_hit(IntegratorState state,
+ccl_device_inline void bdpt_recursive_mis_after_hit(KernelGlobals kg,
+                                                    IntegratorState state,
                                                     const ccl_private ShaderData *sd)
 {
-  float d_vcm;
-  float d_vc;
-  bdpt_recursive_mis_before_measure_conversion(state, sd, &d_vcm, &d_vc);
+  BDPTMISWeight d_vcm;
+  BDPTMISWeight d_vc;
+  bdpt_recursive_mis_before_measure_conversion(kg, state, sd, &d_vcm, &d_vc);
 
   const float distance2 = sqr(max(sd->ray_length, 1.0e-10f));
-  const float cos_fixed = max(fabsf(dot(sd->N, sd->wi)), 1.0e-8f);
-  d_vcm *= distance2 / cos_fixed;
+  const float cos_fixed = max(fabsf(dot(sd->Ng, sd->wi)), 1.0e-8f);
+  d_vcm = d_vcm * distance2 / cos_fixed;
   d_vc /= cos_fixed;
 
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm;
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
+}
+
+ccl_device_inline void bdpt_recursive_mis_undo_transparent_hit(IntegratorState state,
+                                                               const ccl_private ShaderData *sd)
+{
+  /* A null event keeps the original ray origin and does not introduce a vertex
+   * in the MIS path. Restore the directional measure before tracing the rest
+   * of that same edge. A primary ray must recompute its camera/clip conversion
+   * at the eventual scattering vertex. */
+  if (INTEGRATOR_STATE(state, path, bounce) == 0) {
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
+  }
+  else {
+    const float cosine = max(fabsf(dot(sd->Ng, sd->wi)), 1.0e-8f);
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) =
+        (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) *
+         (BDPTMISWeight(cosine) / sqr(max(sd->ray_length, 1.0e-10f))))
+            .encoded();
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(
+                                                          state, path, bdpt_d_vc)) *
+                                                      BDPTMISWeight(cosine))
+                                                         .encoded();
+  }
 }
 
 ccl_device_inline void bdpt_recursive_mis_after_scatter(IntegratorState state,
@@ -631,20 +824,24 @@ ccl_device_inline void bdpt_recursive_mis_after_scatter(IntegratorState state,
                                                         const float forward_pdf,
                                                         const float reverse_pdf)
 {
-  float d_vcm = INTEGRATOR_STATE(state, path, bdpt_d_vcm);
-  float d_vc = INTEGRATOR_STATE(state, path, bdpt_d_vc);
+  BDPTMISWeight d_vcm = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm));
+  BDPTMISWeight d_vc = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
 
   if (label & LABEL_SINGULAR) {
     d_vcm = 0.0f;
     d_vc *= cos_out;
   }
   else {
-    d_vc = cos_out / bdpt_safe_pdf(forward_pdf) * (d_vc * reverse_pdf + d_vcm);
-    d_vcm = 1.0f / bdpt_safe_pdf(forward_pdf);
+    const float2 next = BDPTMISWeight::Log::scatter(make_float2(d_vcm.encoded(), d_vc.encoded()),
+                                                    cos_out,
+                                                    bdpt_safe_pdf(forward_pdf),
+                                                    reverse_pdf);
+    d_vcm = BDPTMISWeight::from_encoded(next.x);
+    d_vc = BDPTMISWeight::from_encoded(next.y);
   }
 
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm;
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
 }
 
 ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stored_vertex,
@@ -654,10 +851,11 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
                                               const int emitter_object,
                                               const int emitter_distribution,
                                               const int light_group,
-                                              const float d_vcm,
-                                              const float d_vc,
+                                              const BDPTMISWeight d_vcm,
+                                              const BDPTMISWeight d_vc,
                                               const uint path_length,
                                               const uint selection_count,
+                                              const uint transparent_bounce,
                                               const uint flag,
                                               const uint emitter_shader_flags,
                                               const float wavelength_rand)
@@ -674,31 +872,35 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
   stored_vertex->type = sd->type;
   stored_vertex->emitter_object = emitter_object;
   stored_vertex->emitter_distribution = emitter_distribution;
+  stored_vertex->emitter_P = ray->P;
   stored_vertex->light_group = light_group;
-  stored_vertex->d_vcm = d_vcm;
-  stored_vertex->d_vc = d_vc;
-  stored_vertex->path_length = bdpt_pack_vertex_support(path_length, selection_count);
+  stored_vertex->d_vcm = d_vcm.encoded();
+  stored_vertex->d_vc = d_vc.encoded();
+  stored_vertex->path_length = bdpt_pack_vertex_support(
+      path_length, selection_count, transparent_bounce);
   stored_vertex->flag = flag;
   stored_vertex->emitter_shader_flags = emitter_shader_flags;
+  stored_vertex->sensor_complete = 0;
 }
 
-ccl_device_inline void bdpt_reservoir_store_light_vertex(
-    KernelGlobals kg,
-    const ccl_private ShaderData *sd,
-    const ccl_private Ray *ray,
-    const Spectrum throughput,
-    const int emitter_object,
-    const int emitter_distribution,
-    const int light_group,
-    const float d_vcm,
-    const float d_vc,
-    const uint path_length,
-    const uint flag,
-    const uint emitter_shader_flags,
-    const float wavelength_rand,
-    ccl_private uint *reservoir_rng,
-    ccl_private uint *reservoir_slot,
-    ccl_private uint *selection_count)
+ccl_device_inline void bdpt_reservoir_store_light_vertex(KernelGlobals kg,
+                                                         const ccl_private ShaderData *sd,
+                                                         const ccl_private Ray *ray,
+                                                         const Spectrum throughput,
+                                                         const int emitter_object,
+                                                         const int emitter_distribution,
+                                                         const int light_group,
+                                                         const BDPTMISWeight d_vcm,
+                                                         const BDPTMISWeight d_vc,
+                                                         const uint path_length,
+                                                         const uint transparent_bounce,
+                                                         const uint flag,
+                                                         const uint emitter_shader_flags,
+                                                         const float wavelength_rand,
+                                                         ccl_private uint *reservoir_rng,
+                                                         ccl_private uint *reservoir_slot,
+                                                         ccl_private uint *selection_count,
+                                                         const uint light_path_index)
 {
   *selection_count += 1u;
   const bool replace = *selection_count == 1u ||
@@ -711,6 +913,7 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(
     return;
   }
 
+  kernel_integrator_state.bdpt_vertex_indices[light_path_index] = *reservoir_slot;
   ccl_global KernelBDPTVertex *stored_vertex =
       &kernel_integrator_state.bdpt_vertices[*reservoir_slot];
   if (replace) {
@@ -726,14 +929,15 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(
                            d_vc,
                            path_length,
                            *selection_count,
+                           transparent_bounce,
                            flag,
                            emitter_shader_flags,
                            wavelength_rand);
     *stored_vertex = local_vertex;
   }
   else {
-    stored_vertex->path_length = bdpt_pack_vertex_support(stored_vertex->path_length & 0xffu,
-                                                          *selection_count);
+    stored_vertex->path_length = bdpt_pack_vertex_support(
+        stored_vertex->path_length & 0xffu, *selection_count, stored_vertex->path_length >> 20u);
   }
 }
 
@@ -798,26 +1002,6 @@ ccl_device_inline bool bdpt_setup_light_vertex(KernelGlobals kg,
   return true;
 }
 
-/* Match camera_sample_perspective()'s time interpolation in camera space. */
-ccl_device_inline float3 bdpt_perspective_image_point(const float3 raster, const float time)
-{
-  const ProjectionTransform raster_to_camera = kernel_data.cam.rastertocamera;
-  float3 image_P = transform_perspective(&raster_to_camera, raster);
-  if (kernel_data.cam.have_perspective_motion) {
-    if (time < 0.5f) {
-      const ProjectionTransform raster_to_camera_pre = kernel_data.cam.perspective_pre;
-      const float3 image_pre = transform_perspective(&raster_to_camera_pre, raster);
-      image_P = interp(image_pre, image_P, time * 2.0f);
-    }
-    else {
-      const ProjectionTransform raster_to_camera_post = kernel_data.cam.perspective_post;
-      const float3 image_post = transform_perspective(&raster_to_camera_post, raster);
-      image_P = interp(image_P, image_post, (time - 0.5f) * 2.0f);
-    }
-  }
-  return image_P;
-}
-
 /* Sample/invert a built-in camera endpoint and return the measurement Jacobian which multiplies
  * Cycles' f*cos BSDF value when splatting to one raster pixel. */
 ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
@@ -857,6 +1041,17 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
       lens_P = make_float3(lens_uv);
       const float focus_t = kernel_data.cam.focaldistance / camera_space_P.z;
       projection_camera = lens_P + (camera_space_P - lens_P) * focus_t;
+    }
+
+    /* Match the clipping interval of camera_sample_perspective(), including its
+     * pinhole-projection scale for aperture rays. A sensor strategy cannot see
+     * geometry that the corresponding camera ray clips away. */
+    const float clip_scale = len(projection_camera) / projection_camera.z;
+    const float camera_distance = len(camera_space_P - lens_P);
+    if (camera_distance <= kernel_data.cam.nearclip * clip_scale ||
+        camera_distance >= (kernel_data.cam.nearclip + kernel_data.cam.cliplength) * clip_scale)
+    {
+      return false;
     }
 
     const float3 image_origin = bdpt_perspective_image_point(zero_float3(), vertex_time);
@@ -934,9 +1129,24 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
         return false;
       }
       *sensor_P = transform_point(&camera_to_world, image_P);
+      const Transform world_to_camera = kernel_data.cam.worldtocamera;
+      const float camera_distance = transform_point(&world_to_camera, light_vertex->P).z -
+                                    image_P.z;
+      if (camera_distance <= kernel_data.cam.nearclip ||
+          camera_distance >= kernel_data.cam.nearclip + kernel_data.cam.cliplength)
+      {
+        return false;
+      }
       *connection_jacobian = 1.0f / image_pixel_area;
     }
     else if (camera_type == CAMERA_PANORAMA) {
+      const float camera_distance = len(light_vertex->P -
+                                        transform_point(&camera_to_world, zero_float3()));
+      if (camera_distance <= kernel_data.cam.nearclip ||
+          camera_distance >= kernel_data.cam.nearclip + kernel_data.cam.cliplength)
+      {
+        return false;
+      }
       constexpr float h = 0.01f;
       const float3 D = camera_panorama_direction(&kernel_data.cam, raster->x, raster->y);
       const float3 Dx0 = camera_panorama_direction(
@@ -1137,6 +1347,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
                                                                          light_vertex
                                                                              ->time_wavelength));
     if (manifold_result == SHADER_EVAL_CACHE_MISS) {
+      light_sd->runtime_flag |= SR_CACHE_MISS;
       return;
     }
     float3 manifold_raster;
@@ -1287,10 +1498,8 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   const float reverse_pdf = light_pdf;
 
   const float cos_at_surface = volume_vertex ? 1.0f :
-                                               max(fabsf(dot(light_sd->N, direction)), 1.0e-8f);
+                                               max(fabsf(dot(light_sd->Ng, direction)), 1.0e-8f);
   const float camera_pdf_area = connection_jacobian * cos_at_surface;
-  const float cos_to_light = volume_vertex ? 1.0f :
-                                             max(fabsf(dot(light_sd->N, light_incoming)), 1.0e-8f);
 
   const float light_path_count = float(kernel_integrator_state.bdpt_light_path_count);
   const float light_path_sample_ratio = max(
@@ -1343,21 +1552,29 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   const float selection_ratio = bdpt_vertex_path_length(light_vertex) == 2u ?
       bdpt_light_selection_ratio(kg,
                                  light_vertex->emitter_distribution,
+                                 light_vertex->emitter_P,
+                                 light_sd->P,
+                                 light_sd->time,
                                  selection_P,
                                  selection_N,
                                  volume_vertex ? SR_BSDF_HAS_TRANSMISSION : light_sd->runtime_flag,
                                  light_sd->object,
                                  volume_vertex,
                                  selection_dt) : 1.0f;
-  const float w_light = (camera_pdf_area / light_path_sample_ratio) *
-                        (light_vertex->d_vcm * selection_ratio + light_vertex->d_vc * reverse_pdf);
-  const float mis_weight = 1.0f / (1.0f + w_light);
+  const BDPTMISWeight w_light = (BDPTMISWeight(camera_pdf_area) / light_path_sample_ratio) *
+                                (BDPTMISWeight::from_encoded(light_vertex->d_vcm) *
+                                     selection_ratio +
+                                 BDPTMISWeight::from_encoded(light_vertex->d_vc) * reverse_pdf);
+  const float mis_weight = (BDPTMISWeight(1.0f) + w_light).inverse();
 
-  /* BsdfEval is f*cos(outgoing). The reciprocal evaluation above points toward the previous light
-   * vertex and therefore carries cos_to_light; convert it to the camera-outgoing measure required
-   * by this sensor splat. One cached map is reused for a camera batch, so its splat must represent
-   * every sample in that batch. */
-  const Spectrum sensor_eval = bsdf_eval_sum(&light_eval) * (cos_at_surface / cos_to_light);
+  /* Transpose the reciprocal camera evaluation in geometric projected-area measure.
+   * One cached map serves a camera batch, so its splat represents every sample in that batch. */
+  const Spectrum sensor_eval = volume_vertex ?
+                                   bsdf_eval_sum(&light_eval) :
+                                   bdpt_transpose_surface_eval(bsdf_eval_sum(&light_eval),
+                                                               light_sd->Ng,
+                                                               light_incoming,
+                                                               direction);
   const float normalization = float(candidate_count) * float(batch_samples) /
                               max(light_path_count, 1.0f);
   const Spectrum spectral_weight = bdpt_light_vertex_spectral_weight(
@@ -1401,7 +1618,8 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, rng_pixel) = hash_uint2(
       uint(pixel_x), uint(pixel_y));
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, rng_offset) = 0;
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = 0;
+  INTEGRATOR_STATE_WRITE(
+      shadow_state, shadow_path, transparent_bounce) = light_vertex->path_length >> 20u;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, volume_bounds_bounce) = 0;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, diffuse_bounce) = 1;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, glossy_bounce) = 0;
@@ -1437,6 +1655,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                                const uint iteration,
                                                const uint batch_samples)
 {
+  kernel_integrator_state.bdpt_vertex_indices[light_path_index] = ~0u;
   if (!bdpt_camera_supported()) {
     return;
   }
@@ -1452,11 +1671,12 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 #else
   const float light_wavelength_rand = 0.0f;
 #endif
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 1.0f;
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = 0.0f;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 0.0f;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
 
   Ray ray ccl_optional_struct_init;
   Spectrum throughput;
+  Spectrum unguided_factor = one_spectrum();
   int emitter_object = OBJECT_NONE;
   int emitter_distribution = -1;
   int light_group = LIGHTGROUP_NONE;
@@ -1468,6 +1688,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   uint emitter_shader_flags = 0u;
   float emitter_max_bounces = FLT_MAX;
   const float time = lcg_step_float(&rng);
+  bool emitter_cache_miss = false;
   if (!photon_sample_emitter(kg,
                              state,
                              &rng,
@@ -1483,8 +1704,12 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                              &is_finite_emitter,
                              &emitter_shader_flags,
                              &emitter_max_bounces,
-                             &emitter_distribution))
+                             &emitter_distribution,
+                             &emitter_cache_miss))
   {
+    if (emitter_cache_miss) {
+      kernel_integrator_state.queue_counter->cache_miss = true;
+    }
     return;
   }
 
@@ -1497,12 +1722,13 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   }
 #endif
 
-  float d_vcm = direct_pdf / bdpt_safe_pdf(emission_pdf);
-  float d_vc = is_delta_emitter ? 0.0f :
-                                  (is_finite_emitter ? emission_cosine : 1.0f) /
-                                      bdpt_safe_pdf(emission_pdf);
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm;
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc;
+  BDPTMISWeight d_vcm = BDPTMISWeight(direct_pdf) / bdpt_safe_pdf(emission_pdf);
+  BDPTMISWeight d_vc = is_delta_emitter ?
+                           0.0f :
+                           BDPTMISWeight(is_finite_emitter ? emission_cosine : 1.0f) /
+                               bdpt_safe_pdf(emission_pdf);
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
 
 #ifdef __VOLUME__
   if (kernel_data.integrator.use_volumes) {
@@ -1537,6 +1763,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       const PhotonVolumeSampleEvent volume_event = photon_volume_sample_segment(
           kg, state, &ray, &throughput, &scatter_P, &receiver_object);
       if (volume_event == PHOTON_VOLUME_CACHE_MISS) {
+        kernel_integrator_state.queue_counter->cache_miss = true;
         return;
       }
       if (volume_event == PHOTON_VOLUME_SCATTERED) {
@@ -1568,12 +1795,13 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                           d_vcm,
                                           d_vc,
                                           uint(bounce + 2),
+                                          INTEGRATOR_STATE(state, path, transparent_bounce),
                                           INTEGRATOR_STATE(state, path, flag),
                                           emitter_shader_flags,
                                           light_wavelength_rand,
                                           &reservoir_rng,
                                           &reservoir_slot,
-                                          &selection_count);
+                                          &selection_count, light_path_index);
 
         return;
       }
@@ -1591,6 +1819,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
         kg, state, &sd, nullptr, path_visibility, INTEGRATOR_STATE(state, path, flag));
     if (sd.runtime_flag & SR_CACHE_MISS) {
+      kernel_integrator_state.queue_counter->cache_miss = true;
       return;
     }
     if (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_TERMINATE) {
@@ -1630,7 +1859,9 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
     surface_shader_prepare_closures(kg, state, &sd, path_visibility);
 
-    const float cos_fixed = max(fabsf(dot(sd.N, sd.wi)), 1.0e-8f);
+    const BDPTMISWeight d_vcm_before_hit = d_vcm;
+    const BDPTMISWeight d_vc_before_hit = d_vc;
+    const float cos_fixed = max(fabsf(dot(sd.Ng, sd.wi)), 1.0e-8f);
     if (bounce == 0 && !is_finite_emitter) {
       /* Infinite emitters sample a launch disk perpendicular to the ray. Its position density is
        * already in projected-area measure, so the first surface conversion has no distance term
@@ -1638,7 +1869,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       d_vcm /= cos_fixed;
     }
     else {
-      d_vcm *= sqr(max(sd.ray_length, 1.0e-10f)) / cos_fixed;
+      d_vcm = d_vcm * sqr(max(sd.ray_length, 1.0e-10f)) / cos_fixed;
     }
     d_vc /= cos_fixed;
 
@@ -1655,13 +1886,13 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                         d_vcm,
                                         d_vc,
                                         uint(bounce + 2),
+                                        INTEGRATOR_STATE(state, path, transparent_bounce),
                                         INTEGRATOR_STATE(state, path, flag),
                                         emitter_shader_flags,
                                         light_wavelength_rand,
                                         &reservoir_rng,
                                         &reservoir_slot,
-                                        &selection_count);
-
+                                        &selection_count, light_path_index);
     }
 
     if (float(bounce) >= emitter_max_bounces) {
@@ -1709,11 +1940,49 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     BsdfEval eval;
     float3 wo;
     float pdf;
+    float mis_pdf;
+    float unguided_pdf;
     float2 sampled_roughness = one_float2();
     float eta = 1.0f;
     float avg_roughness_squared = 0.0f;
-    const int label = surface_shader_bsdf_sample_closure(
-        kg, &sd, sc, rand_bsdf, &eval, &wo, &pdf, &sampled_roughness, &eta, avg_roughness_squared);
+    int label;
+    if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0)
+    {
+      const float rand_guiding = hash_uint3_to_float(
+          light_path_index, iteration, uint(bounce) ^ 0x67756964u);
+      uint resampling_rng = lcg_init(
+          hash_uint3(light_path_index, iteration, uint(bounce) ^ 0x72697330u));
+      const float3 rand_resampling = lcg_step_float3(&resampling_rng);
+      label = surface_shader_bsdf_gpu_guided_sample_closure(kg,
+                                                            &sd,
+                                                            sc,
+                                                            rand_bsdf,
+                                                            rand_guiding,
+                                                            rand_resampling,
+                                                            &eval,
+                                                            &wo,
+                                                            &pdf,
+                                                            &mis_pdf,
+                                                            &unguided_pdf,
+                                                            &sampled_roughness,
+                                                            &eta,
+                                                            avg_roughness_squared,
+                                                            true);
+    }
+    else {
+      label = surface_shader_bsdf_sample_closure(kg,
+                                                 &sd,
+                                                 sc,
+                                                 rand_bsdf,
+                                                 &eval,
+                                                 &wo,
+                                                 &pdf,
+                                                 &sampled_roughness,
+                                                 &eta,
+                                                 avg_roughness_squared);
+      mis_pdf = pdf;
+      unguided_pdf = pdf;
+    }
     if (!(pdf > 0.0f) || bsdf_eval_is_zero(&eval)) {
       break;
     }
@@ -1723,27 +1992,49 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
      * will become a caustic. Honor the scene controls explicitly, as photon tracing does. The
      * vertex at the current surface was cached above, preserving direct glossy visibility; only
      * continuation into the disabled caustic transport class is stopped. */
-    if (((label & LABEL_REFLECT) && !kernel_data.integrator.caustics_reflective) ||
-        ((label & LABEL_TRANSMIT) && !kernel_data.integrator.caustics_refractive))
+    if (!bdpt_caustic_event_enabled(label,
+                                    kernel_data.integrator.caustics_reflective,
+                                    kernel_data.integrator.caustics_refractive))
     {
       break;
     }
 
-    throughput *= bsdf_eval_sum(&eval) / pdf;
-    if (label & LABEL_TRANSMIT) {
-      /* Cycles evaluates transmissive closures in radiance transport mode. A light subpath is
-       * transported in the adjoint (importance) direction, whose refractive BSDF differs by the
-       * squared relative IOR. This cancels over entry/exit pairs, while remaining essential for
-       * nested dielectrics and connections whose endpoints lie in different media. */
-      throughput *= sqr(eta);
+    float reverse_pdf = mis_pdf;
+    Spectrum adjoint_eval = bsdf_eval_sum(&eval);
+    if (!(label & LABEL_TRANSPARENT)) {
+      if (label & LABEL_SINGULAR) {
+        adjoint_eval = bdpt_transpose_delta_eval(
+            adjoint_eval, sc->N, sd.Ng, sd.wi, wo, eta, label & LABEL_TRANSMIT);
+      }
+      else {
+        Spectrum reciprocal_eval;
+        reverse_pdf = bdpt_reverse_pdf(kg, state, &sd, wo, true, &reciprocal_eval);
+        if (sd.runtime_flag & SR_CACHE_MISS) {
+          kernel_integrator_state.queue_counter->cache_miss = true;
+          return;
+        }
+        /* Reuse the complete reciprocal shader evaluation. An eta-only correction is not
+         * sufficient for direction-dependent layered shaders or distinct shading normals. */
+        adjoint_eval = bdpt_transpose_surface_eval(reciprocal_eval, sd.Ng, sd.wi, wo);
+      }
     }
-    if (!isfinite_safe(throughput)) {
+    throughput *= adjoint_eval / pdf;
+    unguided_factor *= safe_divide(pdf, unguided_pdf);
+    if (!isfinite_safe(throughput) || is_zero(throughput)) {
       break;
     }
 
     if (label & LABEL_TRANSPARENT) {
       path_state_next(kg, state, label, sd.runtime_flag);
-      ray.P = sd.P;
+      if (INTEGRATOR_STATE(state, path, transparent_bounce) >=
+          kernel_data.integrator.transparent_max_bounce)
+      {
+        break;
+      }
+      d_vcm = d_vcm_before_hit;
+      d_vc = d_vc_before_hit;
+      /* Keep the emitter/previous-scattering origin so the next area conversion
+       * uses the complete edge length across all null surfaces. */
       ray.D = normalize(wo);
       ray.tmin = intersection_t_offset(sd.ray_length);
       ray.tmax = FLT_MAX;
@@ -1755,9 +2046,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       continue;
     }
 
-    const float reverse_pdf = (label & LABEL_SINGULAR) ? pdf :
-                                                           bdpt_reverse_pdf(kg, state, &sd, wo);
-    const float cos_out = max(fabsf(dot(sd.N, normalize(wo))), 1.0e-8f);
+    const float cos_out = max(fabsf(dot(sd.Ng, normalize(wo))), 1.0e-8f);
     if (label & LABEL_SINGULAR) {
       d_vcm = 0.0f;
       d_vc *= cos_out;
@@ -1766,13 +2055,20 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       const float selection_ratio = bounce == 0 ?
           bdpt_light_selection_ratio(kg,
                                      emitter_distribution,
+                                     ray.P,
+                                     sd.P,
+                                     sd.time,
                                      sd.P,
                                      dot(sd.N, wo) >= 0.0f ? sd.N : -sd.N,
                                      sd.runtime_flag,
                                      sd.object) : 1.0f;
-      d_vc = cos_out / bdpt_safe_pdf(pdf) *
-             (d_vc * reverse_pdf + d_vcm * selection_ratio);
-      d_vcm = 1.0f / bdpt_safe_pdf(pdf);
+      const float2 next = BDPTMISWeight::Log::scatter(make_float2(d_vcm.encoded(), d_vc.encoded()),
+                                                      cos_out,
+                                                      bdpt_safe_pdf(mis_pdf),
+                                                      reverse_pdf,
+                                                      selection_ratio);
+      d_vcm = BDPTMISWeight::from_encoded(next.x);
+      d_vc = BDPTMISWeight::from_encoded(next.y);
     }
 
     path_state_next(kg, state, label, sd.runtime_flag);
@@ -1792,13 +2088,16 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     ray.self.light_object = OBJECT_NONE;
 
     if (bounce >= 3) {
-      const float continuation = min(saturatef(reduce_max(throughput)), 0.95f);
+      /* RIS contribution weights depend on rejected candidates. Keep roulette a function
+       * of the selected path, so bidirectional MIS remains a deterministic partition. */
+      const float continuation = bdpt_light_path_continuation_probability(throughput,
+                                                                          unguided_factor);
       if (lcg_step_float(&rng) >= continuation) {
         break;
       }
       throughput /= continuation;
-      d_vcm /= continuation;
-      d_vc /= continuation;
+      /* Camera MIS omits roulette probabilities. Use the same directional densities here;
+       * survival compensation belongs in throughput, preserving a common MIS partition. */
     }
   }
 
@@ -1808,6 +2107,18 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
  * large live working set; keeping it in a separate Metal kernel avoids inflating compile time and
  * register pressure for every emitted light path. The compact cache already contains one
  * reservoir-selected connectible vertex per path, so it is also an unbiased sensor reservoir. */
+ccl_device void integrator_bdpt_cache_order(const uint num_light_paths)
+{
+  uint count = 0;
+  for (uint path = 0; path < num_light_paths; ++path) {
+    const uint slot = kernel_integrator_state.bdpt_vertex_indices[path];
+    if (slot != ~0u) {
+      kernel_integrator_state.bdpt_vertex_indices[count++] = slot;
+    }
+  }
+  *kernel_integrator_state.bdpt_vertex_count = count;
+}
+
 ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                                IntegratorState state,
                                                const uint vertex_index,
@@ -1824,7 +2135,12 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
     return;
   }
 
-  KernelBDPTVertex light_vertex = kernel_integrator_state.bdpt_vertices[vertex_index];
+  const uint storage_index = kernel_integrator_state.bdpt_vertex_indices[vertex_index];
+  KernelBDPTVertex light_vertex = kernel_integrator_state.bdpt_vertices[storage_index];
+  if (light_vertex.sensor_complete) {
+    return;
+  }
+  kernel_integrator_state.bdpt_vertices[storage_index].sensor_complete = 1;
   uint rng = lcg_init(
       hash_uint3(vertex_index, iteration, uint(kernel_data.integrator.seed) ^ 0x73656e73u));
   photon_state_init(state, rng, iteration);
@@ -1835,6 +2151,7 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
     return;
   }
   INTEGRATOR_STATE_WRITE(state, path, bounce) = path_length - 2u;
+  INTEGRATOR_STATE_WRITE(state, path, transparent_bounce) = light_vertex.path_length >> 20u;
 
 #ifdef __VOLUME__
   /* Dedicated sensor work does not inherit the generating light path's medium stack. Rebuild the
@@ -1853,7 +2170,12 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
 #endif
 
   ShaderData light_sd;
+  light_sd.runtime_flag = 0;
   if (!bdpt_setup_light_vertex(kg, state, &light_vertex, &light_sd)) {
+    if (light_sd.runtime_flag & SR_CACHE_MISS) {
+      kernel_integrator_state.bdpt_vertices[storage_index].sensor_complete = 0;
+      kernel_integrator_state.queue_counter->cache_miss = true;
+    }
     return;
   }
   const float2 rand_lens = make_float2(lcg_step_float(&rng), lcg_step_float(&rng));
@@ -1866,6 +2188,10 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                       batch_samples,
                                       render_buffer,
                                       rand_lens);
+  if (light_sd.runtime_flag & SR_CACHE_MISS) {
+    kernel_integrator_state.bdpt_vertices[storage_index].sensor_complete = 0;
+    kernel_integrator_state.queue_counter->cache_miss = true;
+  }
 }
 
 CCL_NAMESPACE_END
