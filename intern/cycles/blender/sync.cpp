@@ -608,24 +608,27 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_use_surface_guiding(get_boolean(cscene, "use_surface_guiding"));
   integrator->set_use_volume_guiding(get_boolean(cscene, "use_volume_guiding"));
   integrator->set_guiding_training_samples(get_int(cscene, "guiding_training_samples"));
+  integrator->set_guiding_gpu_memory_mb(get_int(cscene, "guiding_gpu_memory_mb"));
+  integrator->set_guiding_gpu_history_memory_mb(get_int(cscene, "guiding_gpu_history_memory_mb"));
+  integrator->set_surface_guiding_probability(get_float(cscene, "surface_guiding_probability"));
+  integrator->set_volume_guiding_probability(get_float(cscene, "volume_guiding_probability"));
+  integrator->set_guiding_roughness_threshold(get_float(cscene, "guiding_roughness_threshold"));
 
   if (use_developer_ui) {
     integrator->set_deterministic_guiding(get_boolean(cscene, "use_deterministic_guiding"));
-    integrator->set_surface_guiding_probability(get_float(cscene, "surface_guiding_probability"));
-    integrator->set_volume_guiding_probability(get_float(cscene, "volume_guiding_probability"));
     integrator->set_use_guiding_direct_light(get_boolean(cscene, "use_guiding_direct_light"));
     integrator->set_use_guiding_mis_weights(get_boolean(cscene, "use_guiding_mis_weights"));
     const GuidingDistributionType guiding_distribution_type = (GuidingDistributionType)get_enum(
         cscene, "guiding_distribution_type", GUIDING_NUM_TYPES, GUIDING_TYPE_PARALLAX_AWARE_VMM);
     integrator->set_guiding_distribution_type(guiding_distribution_type);
-    const GuidingDirectionalSamplingType guiding_directional_sampling_type =
-        (GuidingDirectionalSamplingType)get_enum(cscene,
-                                                 "guiding_directional_sampling_type",
-                                                 GUIDING_DIRECTIONAL_SAMPLING_NUM_TYPES,
-                                                 GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS);
-    integrator->set_guiding_directional_sampling_type(guiding_directional_sampling_type);
-    integrator->set_guiding_roughness_threshold(get_float(cscene, "guiding_roughness_threshold"));
   }
+  /* This sampling control is exposed in the Metal panel, independently of developer UI. */
+  const GuidingDirectionalSamplingType guiding_directional_sampling_type =
+      (GuidingDirectionalSamplingType)get_enum(cscene,
+                                               "guiding_directional_sampling_type",
+                                               GUIDING_DIRECTIONAL_SAMPLING_NUM_TYPES,
+                                               GUIDING_DIRECTIONAL_SAMPLING_TYPE_RIS);
+  integrator->set_guiding_directional_sampling_type(guiding_directional_sampling_type);
 
   DenoiseParams denoise_params = get_denoise_params(
       *b_scene, &b_view_layer, background, denoise_device_info);

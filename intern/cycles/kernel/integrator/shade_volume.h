@@ -2553,7 +2553,10 @@ ccl_device_forceinline void integrate_volume_direct_light(
   /* Evaluate BSDF. */
   BsdfEval phase_eval ccl_optional_struct_init;
   const float phase_pdf = volume_shader_phase_eval(
-      kg, state, sd, phases, ls.D, &phase_eval, ls.shader);
+      kg, state, sd, phases, ls.D, &phase_eval, ls.shader, false, &P);
+#  ifdef __KERNEL_METAL__
+  const Spectrum guiding_scattering_throughput = throughput * bsdf_eval_sum(&phase_eval);
+#  endif
   float mis_weight;
 #  ifdef __KERNEL_METAL__
   mis_weight = bdpt_enabled_for_surface_path(state) ?
@@ -2600,6 +2603,17 @@ ccl_device_forceinline void integrate_volume_direct_light(
   uint32_t shadow_flag = INTEGRATOR_STATE(state, path, flag);
   const Spectrum phase_sum = bsdf_eval_sum(&phase_eval);
   const Spectrum throughput_phase = throughput * phase_sum;
+#  ifdef __KERNEL_METAL__
+  guiding_gpu_record_direct(shadow_state,
+                            state,
+                            P,
+                            ls.D,
+                            guiding_scattering_throughput,
+                            true,
+                            zero_float3(),
+                            false,
+                            ls.t);
+#  endif
 
   if (!(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_TREE)) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bsdf_eval_average) = average(phase_sum);
@@ -2920,6 +2934,9 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
     const ccl_private ShaderVolumePhases *phases)
 {
   PROFILING_INIT(kg, PROFILING_SHADE_VOLUME_INDIRECT_LIGHT);
+#  ifdef __KERNEL_METAL__
+  guiding_gpu_record_importance(state, sd->P, sd->wi, 1.0f, true);
+#  endif
 
   float2 rand_phase = path_state_rng_2D(kg, rng_state, PRNG_VOLUME_PHASE);
 
@@ -2933,9 +2950,30 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   float sampled_roughness = 1.0f;
   int label;
 
+#  ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_volume_guiding && kernel_integrator_state.guiding_capacity > 0) {
+    const float rand_guiding = path_state_rng_1D(
+        kg, rng_state, PRNG_VOLUME_PHASE_GUIDING_DISTANCE);
+    label = volume_shader_phase_gpu_guided_sample(sd,
+                                                  phases,
+                                                  svc,
+                                                  rand_phase,
+                                                  rand_guiding,
+                                                  &phase_eval,
+                                                  &phase_wo,
+                                                  &phase_pdf,
+                                                  &unguided_phase_pdf,
+                                                  &sampled_roughness);
+    if (!(phase_pdf > 0.0f) || !(unguided_phase_pdf > 0.0f) || bsdf_eval_is_zero(&phase_eval)) {
+      return false;
+    }
+    INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) *= phase_pdf / unguided_phase_pdf;
+  }
+  else
+#  endif
 #  if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
-  if (kernel_data.integrator.use_guiding &&
-      (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING))
+      if (kernel_data.integrator.use_guiding &&
+          (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING))
   {
     label = volume_shader_phase_guided_sample(kg,
                                               state,
@@ -2997,6 +3035,17 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
   const Spectrum throughput_phase = throughput * phase_weight;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput_phase;
+#  ifdef __KERNEL_METAL__
+  GuidingVirtualDistance source_distance;
+  guiding_gpu_record_bounce(state,
+                            sd->P,
+                            normalize(phase_wo),
+                            phase_pdf,
+                            label,
+                            true,
+                            zero_float3(),
+                            source_distance.scatter_scale(false, sampled_roughness, 1, 1, 1));
+#  endif
 
   if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) {
     if (INTEGRATOR_STATE(state, path, bounce) == 0) {

@@ -28,6 +28,7 @@ set(SRC_KERNEL_CLOSURE_HEADERS
   closure/bsdf_diffuse.h
   closure/bsdf_diffuse_ramp.h
   closure/bsdf_microfacet.h
+  closure/bsdf_microfacet_manifold.h
   closure/bsdf_oren_nayar.h
   closure/bsdf_phong_ramp.h
   closure/bsdf_ray_portal.h
@@ -192,11 +193,14 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/intersect_subsurface.h
   integrator/intersect_volume_stack.h
   integrator/guiding.h
+  integrator/guiding_gpu.h
   integrator/megakernel.h
   integrator/mnee.h
   integrator/path_state.h
   integrator/photon_mapping.h
   integrator/bidirectional.h
+  integrator/bidirectional_transport.h
+  integrator/bidirectional_volume.h
   integrator/shade_background.h
   integrator/shade_light.h
   integrator/shade_shadow.h
@@ -234,7 +238,19 @@ set(SRC_KERNEL_LIGHT_HEADERS
 
 set(SRC_KERNEL_SAMPLE_HEADERS
   sample/lcg.h
+  sample/manifold.h
   sample/mapping.h
+  sample/guiding_distribution.h
+  sample/guiding_resampling.h
+  sample/guiding_field.h
+  sample/guiding_history.h
+  sample/guiding_mixture_conditional.h
+  sample/guiding_mixture_fit.h
+  sample/guiding_mixture_statistics.h
+  sample/guiding_observation_range.h
+  sample/guiding_position.h
+  sample/guiding_parallax.h
+  sample/guiding_spherical_gaussian.h
   sample/mis.h
   sample/pattern.h
   sample/sobol_burley.h
@@ -262,6 +278,7 @@ set(SRC_KERNEL_TYPES_HEADERS
   image.h
   tables.h
   types.h
+  types_guiding.h
 )
 
 set(SRC_KERNEL_HEADERS

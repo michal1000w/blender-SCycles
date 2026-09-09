@@ -223,7 +223,7 @@ class PathTrace {
   /* Updates/initializes the guiding structures after a rendering iteration.
    * The structures are updated using the training data/samples generated during the previous
    * rendering iteration */
-  void guiding_update_structures();
+  void guiding_update_structures(const RenderWork &render_work);
 
   /* Prepares the per-kernel thread related guiding structures (e.g., PathSegmentStorage,
    * pointers to the global Field and SegmentStorage)*/

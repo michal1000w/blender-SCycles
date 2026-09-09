@@ -362,7 +362,7 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         from . import engine
-        return use_cpu(context) and engine.with_path_guiding()
+        return use_metal(context) or (use_cpu(context) and engine.with_path_guiding())
 
     def draw_header(self, context):
         scene = context.scene
@@ -380,11 +380,24 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
         layout.use_property_decorate = False
         layout.active = cscene.use_guiding
 
-        layout.prop(cscene, "guiding_training_samples")
+        layout.prop(cscene, "guiding_training_samples",
+                    text="Training Camera Samples" if use_metal(context) else "Training Updates")
 
         col = layout.column(align=True)
         col.prop(cscene, "use_surface_guiding", text="Surface")
         col.prop(cscene, "use_volume_guiding", text="Volume", text_ctxt=i18n_contexts.id_id)
+
+        if use_metal(context):
+            layout.prop(cscene, "guiding_gpu_memory_mb", text="Field Memory (MiB)")
+            layout.prop(cscene, "guiding_gpu_history_memory_mb", text="Training Memory (MiB)")
+            col = layout.column(align=True)
+            col.prop_enum(cscene, "guiding_directional_sampling_type", 'MIS', text="Product MIS")
+            col.prop_enum(cscene, "guiding_directional_sampling_type", 'RIS', text="Product Resampling")
+            col.prop_enum(cscene, "guiding_directional_sampling_type", 'ROUGHNESS', text="Roughness Weighted")
+            col = layout.column(align=True)
+            col.prop(cscene, "surface_guiding_probability", text="Surface Probability")
+            col.prop(cscene, "volume_guiding_probability", text="Volume Probability")
+            layout.prop(cscene, "guiding_roughness_threshold", text="Minimum Roughness")
 
         if cscene.use_guiding and cscene.use_auto_tile:
             # Calculation matches TileManager::compute_render_tile_size and
@@ -409,6 +422,10 @@ class CYCLES_RENDER_PT_sampling_path_guiding_debug(CyclesDebugButtonsPanel, Pane
     bl_label = "Debug"
     bl_parent_id = "CYCLES_RENDER_PT_sampling_path_guiding"
     bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return use_cpu(context) and super().poll(context)
 
     def draw(self, context):
         scene = context.scene

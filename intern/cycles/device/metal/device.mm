@@ -77,6 +77,7 @@ void device_metal_info(vector<DeviceInfo> &devices)
 #  endif
 
     info.has_nanovdb = true;
+    info.has_guiding = true;
 
     /* MNEE caused "Compute function exceeds available temporary registers" in macOS < 13 due to a
      * bug in spill buffer allocation sizing. */

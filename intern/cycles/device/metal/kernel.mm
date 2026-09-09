@@ -17,6 +17,7 @@
 #  include "kernel/device/metal/function_constants.h"
 
 #  include "util/debug.h"
+#  include "util/log.h"
 #  include "util/md5.h"
 #  include "util/path.h"
 #  include "util/tbb.h"
@@ -250,7 +251,7 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
     return false;
   }
 
-  if (!device_kernel_has_gpu_function(device_kernel)) {
+  if (!device_kernel_has_gpu_function(device_kernel, true)) {
     /* Skip megakernel and other markers without a GPU function. */
     return false;
   }
@@ -274,7 +275,20 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
   {
     return false;
   }
+  if ((device_kernel == DEVICE_KERNEL_GUIDING_BEGIN_UPDATE ||
+       device_kernel == DEVICE_KERNEL_GUIDING_REFINE ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PUBLISH ||
+       device_kernel == DEVICE_KERNEL_GUIDING_FLUSH_HISTORY ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
+       device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
+       device_kernel == DEVICE_KERNEL_GUIDING_FIT) &&
+      !(device->kernel_features & KERNEL_FEATURE_PATH_GUIDING))
+  {
+    return false;
+  }
   if ((device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT) &&
       (!(device->kernel_features & KERNEL_FEATURE_BDPT) ||
        (device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER)))
@@ -438,9 +452,15 @@ MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const M
   while (running && !device->has_error) {
     /* Search all loaded pipelines with matching kernels_md5 checksums. */
     MetalKernelPipeline *best_match = nullptr;
+    bool generic_failed = false;
     {
       thread_scoped_lock lock(cache_mutex);
       for (auto &candidate : pipelines[kernel]) {
+        /* Only completed requests enter this collection. A matching failed generic
+         * entry cannot become ready by waiting; optional specializations may still
+         * provide a usable replacement, so finish the search before reporting it. */
+        generic_failed |= candidate->pso_type == PSO_GENERIC && !candidate->loaded &&
+                          candidate->kernels_md5 == device->kernels_md5[PSO_GENERIC];
         if (requires_displacement) {
           if (candidate->pso_type != required_type ||
               candidate->kernels_md5 != device->kernels_md5[required_type])
@@ -472,6 +492,10 @@ MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const M
       }
       best_match->usage_count += 1;
       return best_match;
+    }
+
+    if (generic_failed) {
+      return nullptr;
     }
 
     /* Spin until a matching kernel is loaded, or we're shutting down. */
@@ -902,6 +926,7 @@ void MetalKernelPipeline::compile()
   }
 
   bool recreate_archive = false;
+  string compilation_error;
 
   /* Lambda to do the actual pipeline compilation. */
   auto do_compilation = [&]() {
@@ -950,6 +975,7 @@ void MetalKernelPipeline::compile()
       }
     }
 
+    compilation_error = error_str;
     if (creating_new_archive && pipeline) {
       /* Add pipeline into the new archive. */
       NSError *error;
@@ -969,7 +995,7 @@ void MetalKernelPipeline::compile()
           (archive && !recreate_archive) ? " Archive may be incomplete or corrupt - attempting "
                                            "recreation.." :
                                            "",
-          error_str.c_str());
+          compilation_error.c_str());
     }
   };
 
@@ -990,6 +1016,8 @@ void MetalKernelPipeline::compile()
   double duration = time_dt() - starttime;
 
   if (pipeline == nil) {
+    LOG_ERROR << "Metal pipeline compilation failed for " << device_kernel_as_string(device_kernel)
+              << " (" << kernel_type_as_string(pso_type) << "): " << compilation_error;
     metal_printf("%16s | %2d | %-55s | %7.2fs | FAILED!",
                  kernel_type_as_string(pso_type),
                  device_kernel,
@@ -1099,7 +1127,9 @@ bool MetalDeviceKernels::is_benchmark_warmup()
   NSArray *args = [[NSProcessInfo processInfo] arguments];
   for (int i = 0; i < args.count; i++) {
     if (const char *arg = [[args objectAtIndex:i] cStringUsingEncoding:NSASCIIStringEncoding]) {
-      if (!strcmp(arg, "--warm-up")) {
+      /* Also recognize the spelling used by the Cycles scene benchmark runner.
+       * Its discarded warmup must finish specialization before measured renders. */
+      if (!strcmp(arg, "--warm-up") || !strcmp(arg, "--warmup")) {
         return true;
       }
     }

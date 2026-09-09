@@ -219,6 +219,8 @@ NODE_DEFINE(Integrator)
   SOCKET_BOOLEAN(use_volume_guiding, "Volume Guiding", true);
   SOCKET_FLOAT(volume_guiding_probability, "Volume Guiding Probability", 0.5f);
   SOCKET_INT(guiding_training_samples, "Training Samples", 128);
+  SOCKET_INT(guiding_gpu_memory_mb, "GPU Guiding Memory", 256);
+  SOCKET_INT(guiding_gpu_history_memory_mb, "GPU Guiding Training Memory", 128);
   SOCKET_BOOLEAN(use_guiding_direct_light, "Guide Direct Light", true);
   SOCKET_BOOLEAN(use_guiding_mis_weights, "Use MIS Weights", true);
   SOCKET_ENUM(guiding_distribution_type,
@@ -494,6 +496,14 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   const GuidingParams guiding_params = get_guiding_params(device);
   kintegrator->use_guiding = guiding_params.use;
+  kintegrator->guiding_training_samples = max(guiding_training_samples, 0);
+  kintegrator->guiding_gpu_memory_mb = clamp(guiding_gpu_memory_mb, 16, 1024);
+  kintegrator->guiding_gpu_history_memory_mb = clamp(guiding_gpu_history_memory_mb, 16, 1024);
+  const float3 guiding_lower = photon_bounds.valid() ? photon_bounds.min : make_float3(-1.0f);
+  const float3 guiding_upper = photon_bounds.valid() ? photon_bounds.max : make_float3(1.0f);
+  const float3 guiding_padding = max((guiding_upper - guiding_lower) * 1e-4f, make_float3(1e-4f));
+  kintegrator->guiding_bounds_min = make_float4(guiding_lower - guiding_padding, 0.0f);
+  kintegrator->guiding_bounds_max = make_float4(guiding_upper + guiding_padding, 0.0f);
   kintegrator->train_guiding = kintegrator->use_guiding;
   kintegrator->use_surface_guiding = guiding_params.use_surface_guiding;
   kintegrator->use_volume_guiding = guiding_params.use_volume_guiding;

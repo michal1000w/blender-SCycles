@@ -123,6 +123,15 @@ ccl_device_forceinline IntegratorShadowState integrator_shadow_path_init(
       &kernel_integrator_state.next_shadow_path_index[0], 1);
   atomic_fetch_and_add_uint32(&kernel_integrator_state.queue_counter->num_queued[next_kernel], 1);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, queued_kernel) = next_kernel;
+#  ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_guiding && kernel_integrator_state.guiding_training) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_gpu_guiding, history_head) =
+        is_ao ? ~0u : INTEGRATOR_STATE(state, gpu_guiding, history_head);
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_gpu_guiding, direct_record_index) = ~0u;
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_gpu_guiding, history_endpoint) = make_float3(
+        FLT_MAX);
+  }
+#  endif
 #  if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
     INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, path_segment) = nullptr;

@@ -55,6 +55,7 @@ PathTrace::PathTrace(Device *device,
     unique_ptr<PathTraceWork> work = PathTraceWork::create(
         path_trace_device, film, device_scene, &render_cancel_.is_requested);
     if (work) {
+      work->set_cancel_callback([this] { return is_cancel_requested(); });
       path_trace_works_.emplace_back(std::move(work));
     }
   });
@@ -224,7 +225,7 @@ void PathTrace::render_pipeline(RenderWork render_work)
    * iteration/progression. */
   const bool train_guiding = device_scene_->data.integrator.train_guiding;
   if (use_guiding && train_guiding) {
-    guiding_update_structures();
+    guiding_update_structures(render_work);
   }
 
   adaptive_sample(render_work);
@@ -1447,12 +1448,18 @@ void PathTrace::set_guiding_params(const GuidingParams &guiding_params, const bo
 #if defined(WITH_PATH_GUIDING)
   if (guiding_params_.modified(guiding_params)) {
     guiding_params_ = guiding_params;
+    Device *cpu_guiding_device = nullptr;
+    device_->foreach_device([&](Device *subdevice) {
+      if (subdevice->info.type == DEVICE_CPU) {
+        cpu_guiding_device = subdevice;
+      }
+    });
 
 #  if !(OPENPGL_VERSION_MAJOR == 0 && OPENPGL_VERSION_MINOR <= 5)
 #    define OPENPGL_USE_FIELD_CONFIG
 #  endif
 
-    if (guiding_params_.use) {
+    if (guiding_params_.use && cpu_guiding_device) {
 #  ifdef OPENPGL_USE_FIELD_CONFIG
       openpgl::cpp::FieldConfig field_config;
 #  else
@@ -1512,7 +1519,7 @@ void PathTrace::set_guiding_params(const GuidingParams &guiding_params, const bo
       reinterpret_cast<PGLKDTreeArguments *>(field_args.spatialSturctureArguments)->maxDepth = 16;
 #  endif
       openpgl::cpp::Device *guiding_device = static_cast<openpgl::cpp::Device *>(
-          device_->get_guiding_device());
+          cpu_guiding_device->get_guiding_device());
       if (guiding_device) {
         guiding_sample_data_storage_ = make_unique<openpgl::cpp::SampleStorage>();
 #  ifdef OPENPGL_USE_FIELD_CONFIG
@@ -1545,6 +1552,10 @@ void PathTrace::set_guiding_params(const GuidingParams &guiding_params, const bo
 void PathTrace::guiding_prepare_structures()
 {
 #if defined(WITH_PATH_GUIDING)
+  /* GPU fields are owned and updated by their wavefront work instances. */
+  if (!guiding_field_) {
+    return;
+  }
   const bool train = (guiding_params_.training_samples == 0) ||
                      (guiding_field_->GetIteration() < guiding_params_.training_samples);
 
@@ -1567,9 +1578,12 @@ void PathTrace::guiding_prepare_structures()
 #endif
 }
 
-void PathTrace::guiding_update_structures()
+void PathTrace::guiding_update_structures(const RenderWork &render_work)
 {
 #if defined(WITH_PATH_GUIDING)
+  if (!guiding_field_ || !guiding_sample_data_storage_) {
+    return;
+  }
   LOG_DEBUG << "Update path guiding structures";
 
   LOG_TRACE << "Number of surface samples: " << guiding_sample_data_storage_->GetSizeSurface();
@@ -1577,6 +1591,8 @@ void PathTrace::guiding_update_structures()
 
   const size_t num_valid_samples = guiding_sample_data_storage_->GetSizeSurface() +
                                    guiding_sample_data_storage_->GetSizeVolume();
+
+  const int iteration_before = guiding_field_->GetIteration();
 
   /* we wait until we have at least 1024 samples */
   if (num_valid_samples >= 1024) {
@@ -1587,6 +1603,14 @@ void PathTrace::guiding_update_structures()
 
     guiding_sample_data_storage_->Clear();
   }
+  LOG_DEBUG << "CPU guiding training: sample_start=" << render_work.path_trace.start_sample
+            << " camera_samples=" << render_work.path_trace.num_samples
+            << " iteration_before=" << iteration_before
+            << " iteration_after=" << guiding_field_->GetIteration()
+            << " limit=" << guiding_params_.training_samples
+            << " observations=" << num_valid_samples;
+#else
+  (void)render_work;
 #endif
 }
 

@@ -769,18 +769,51 @@ void MetalDeviceQueue::copy_from_device(device_memory & /*mem*/)
   /* No need to copy - Apple Silicon has Unified Memory Architecture. */
 }
 
-void *MetalDeviceQueue::copy_from_device_synchronized(device_memory &mem,
-                                                      vector<uint8_t> & /*storage*/)
+void *MetalDeviceQueue::copy_from_device_synchronized(device_memory &mem, vector<uint8_t> &storage)
 {
   if (mem.memory_size() == 0) {
     return nullptr;
   }
 
   /* Wait until kernels have finished before returning from unified memory. */
-  synchronize();
+  if (!synchronize()) {
+    return nullptr;
+  }
 
   device_ptr d_ptr = mem.device->mem_device_ptr(mem, metal_device_);
-  return (d_ptr) ? reinterpret_cast<MetalDevice::MetalMem *>(d_ptr)->hostPtr : nullptr;
+  if (!d_ptr) {
+    return nullptr;
+  }
+  const MetalDevice::MetalMem &mmem = *reinterpret_cast<MetalDevice::MetalMem *>(d_ptr);
+  if (mmem.hostPtr) {
+    return mmem.hostPtr;
+  }
+  /* Device-only allocations can use private storage even on unified-memory hardware. */
+  if (!mmem.mtlBuffer) {
+    return nullptr;
+  }
+  @autoreleasepool {
+    id<MTLBuffer> readback = [metal_device_->mtlDevice
+        newBufferWithLength:mem.memory_size()
+                    options:MTLResourceStorageModeShared];
+    if (!readback) {
+      metal_device_->set_error("Unable to allocate Metal readback buffer");
+      return nullptr;
+    }
+    id<MTLBlitCommandEncoder> encoder = get_blit_encoder();
+    [encoder copyFromBuffer:mmem.mtlBuffer
+               sourceOffset:mmem.offset
+                   toBuffer:readback
+          destinationOffset:0
+                       size:mem.memory_size()];
+    const bool success = synchronize();
+    if (success) {
+      storage.resize(mem.memory_size());
+      memcpy(storage.data(), [readback contents], mem.memory_size());
+    }
+    [readback release];
+    return success ? storage.data() : nullptr;
+  }
 }
 
 void MetalDeviceQueue::prepare_resources()

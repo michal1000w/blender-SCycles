@@ -364,6 +364,12 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
 {
   string global_defines;
 
+  /* Overrides must compile their own source. Also separate their pipeline cache from entries
+   * which older versions could populate with an installed precompiled library. */
+  if (getenv("CYCLES_KERNEL_PATH") != nullptr) {
+    global_defines += "#define __KERNEL_METAL_SOURCE_OVERRIDE__\n";
+  }
+
   const bool source_specialize_guiding =
       pso_type == PSO_SPECIALIZED_SHADE && scene_use_pixel_displacement &&
       launch_params->data.integrator.use_bidirectional_path_tracing &&
@@ -651,7 +657,8 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
        * on every cold start. Only use it when every source-affecting option matches; otherwise the
        * existing runtime path below remains the quality-preserving fallback. */
       if (pso_type == PSO_GENERIC && !instance->use_adaptive_compilation() &&
-          instance->use_local_atomic_sort() && !instance->use_metalrt_extended_limits)
+          instance->use_local_atomic_sort() && !instance->use_metalrt_extended_limits &&
+          getenv("CYCLES_KERNEL_PATH") == nullptr)
       {
 #  ifdef WITH_NANOVDB
         const bool nanovdb_matches = DebugFlags().metal.use_nanovdb;
@@ -1251,6 +1258,8 @@ void MetalDevice::const_copy_to(const char *name, void *host, const size_t size)
   if (strcmp(name, "integrator_state") == 0) {
     /* IntegratorStateGPU is contiguous pointers up until sort_partition_divisor. */
     const size_t pointer_block_size = offsetof(IntegratorStateGPU, sort_partition_divisor);
+    static_assert(offsetof(IntegratorStateGPU, guiding_fit_counts) + sizeof(device_ptr) ==
+                  offsetof(IntegratorStateGPU, sort_partition_divisor));
     update_launch_pointers(
         offsetof(KernelParamsMetal, integrator_state), host, pointer_block_size);
 

@@ -71,7 +71,7 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
       (klight->type == LIGHT_POINT || klight->type == LIGHT_SPOT) && !klight->spot.is_sphere &&
       klight->spot.radius > 0.0f);
   mis_weight = (bdpt_enabled_for_surface_path(state) && bdpt_emitter_supported) ?
-                   bdpt_emission_mis_weight_lamp(kg, state, klight, ray_P, ray_D, isect.t) :
+                   bdpt_emission_mis_weight_lamp(kg, state, klight, ray_P, ray_D, isect.t, light_eval.pdf) :
                    light_sample_mis_weight_forward_lamp(
                        kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
 #else
@@ -84,8 +84,13 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
 #ifndef __KERNEL_METAL__
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
 #endif
-  film_write_surface_emission(
-      kg, state, eval, mis_weight, render_buffer, object_lightgroup(kg, klight->object_id));
+  film_write_surface_emission(kg,
+                              state,
+                              eval,
+                              mis_weight,
+                              render_buffer,
+                              object_lightgroup(kg, klight->object_id),
+                              ray_P + ray_D * isect.t);
   return SHADER_EVAL_OK;
 }
 

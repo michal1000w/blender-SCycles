@@ -1615,19 +1615,25 @@ struct ccl_align(16) KernelBDPTVertex {
   int type;
   int emitter_object;
   int light_group;
+  /* Logarithmic MIS terms; negative infinity represents an empty alternative sum. */
   float d_vcm;
   float d_vc;
-  /* Low byte: path length. Next byte: number of connectible vertices represented by this
-   * per-light-path reservoir sample. Both are bounded by bdpt_max_bounces <= 64. */
+  /* Low 8 bits: path length (at most 65). Next 12: reservoir candidate count,
+   * including mixed transparent surfaces. High 12: transparent prefix crossings.
+   * The latter two cover up to 64 scattering plus 1024 transparent interactions. */
   uint path_length;
   uint flag;
   uint emitter_shader_flags;
   /* Emission CDF entry, retained for the receiver-dependent NEE alternative at the first vertex. */
   int emitter_distribution;
+  /* Exact previous edge origin for the conditional emitter-position PDF at the first vertex. */
+  packed_float3 emitter_P;
+  /* Sensor connection completion, so a tile-cache retry cannot duplicate a queued shadow. */
+  uint sensor_complete;
 };
 static_assert_align(KernelBDPTVertex, 16);
-static_assert(sizeof(KernelBDPTVertex) == 96,
-              "KernelBDPTVertex must remain a compact 96-byte record");
+static_assert(sizeof(KernelBDPTVertex) == 112,
+              "KernelBDPTVertex includes the exact emitter endpoint");
 
 /* Bounding box. */
 struct KernelBoundingBox {
@@ -1888,6 +1894,7 @@ enum DeviceKernel : int {
   DEVICE_KERNEL_INTEGRATOR_RESET,
   DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT,
   DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE,
+  DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER,
   DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT,
   DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS,
 
@@ -1932,6 +1939,15 @@ enum DeviceKernel : int {
   DEVICE_KERNEL_CRYPTOMATTE_POSTPROCESS,
 
   DEVICE_KERNEL_PREFIX_SUM,
+
+  DEVICE_KERNEL_GUIDING_BEGIN_UPDATE,
+  DEVICE_KERNEL_GUIDING_REFINE,
+  DEVICE_KERNEL_GUIDING_PUBLISH,
+  DEVICE_KERNEL_GUIDING_FLUSH_HISTORY,
+  DEVICE_KERNEL_GUIDING_PARTITION_COUNT,
+  DEVICE_KERNEL_GUIDING_PARTITION_PREFIX,
+  DEVICE_KERNEL_GUIDING_PARTITION_SCATTER,
+  DEVICE_KERNEL_GUIDING_FIT,
 
   DEVICE_KERNEL_NUM,
 };

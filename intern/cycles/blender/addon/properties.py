@@ -841,12 +841,25 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     guiding_training_samples: IntProperty(
         name="Training Samples",
-        description="The maximum number of samples used for training path guiding. "
-        "Higher samples lead to more accurate guiding, however may also unnecessarily slow "
-        "down rendering once guiding is accurate enough. "
-        "A value of 0 will continue training until the last sample",
+        description="Maximum training field updates on CPU, or training camera samples on Metal. "
+        "A CPU update can contain several camera samples. More training may improve guiding "
+        "but adds rendering cost. A value of 0 continues training until the last sample",
         min=0,
         soft_min=1,
+        default=128,
+    )
+
+    guiding_gpu_memory_mb: IntProperty(
+        name="Guiding Memory",
+        description="Maximum memory in MiB for the Metal spatial and directional guiding fields",
+        min=16, max=1024,
+        default=256,
+    )
+
+    guiding_gpu_history_memory_mb: IntProperty(
+        name="Guiding Training Memory",
+        description="Maximum memory in MiB for Metal path training histories. Larger budgets allow more paths to train concurrently",
+        min=16, max=1024,
         default=128,
     )
 

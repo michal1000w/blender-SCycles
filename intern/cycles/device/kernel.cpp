@@ -44,8 +44,19 @@ bool device_kernel_has_intersection(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE);
 }
 
-bool device_kernel_has_gpu_function(DeviceKernel kernel)
+bool device_kernel_has_gpu_function(DeviceKernel kernel, const bool metal)
 {
+  if (!metal &&
+      (kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
+       kernel == DEVICE_KERNEL_GUIDING_BEGIN_UPDATE || kernel == DEVICE_KERNEL_GUIDING_REFINE ||
+       kernel == DEVICE_KERNEL_GUIDING_PUBLISH || kernel == DEVICE_KERNEL_GUIDING_FLUSH_HISTORY ||
+       kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
+       kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
+       kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
+       kernel == DEVICE_KERNEL_GUIDING_FIT))
+  {
+    return false;
+  }
   return !(kernel == DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL ||
            kernel == DEVICE_KERNEL_INTEGRATOR_SHADOW_PATH_MNEE_PENDING);
 }
@@ -118,10 +129,28 @@ const char *device_kernel_as_string(DeviceKernel kernel)
       return "integrator_compact_shadow_states";
     case DEVICE_KERNEL_INTEGRATOR_RESET:
       return "integrator_reset";
+    case DEVICE_KERNEL_GUIDING_BEGIN_UPDATE:
+      return "guiding_begin_update";
+    case DEVICE_KERNEL_GUIDING_REFINE:
+      return "guiding_refine";
+    case DEVICE_KERNEL_GUIDING_PUBLISH:
+      return "guiding_publish";
+    case DEVICE_KERNEL_GUIDING_FLUSH_HISTORY:
+      return "guiding_flush_history";
+    case DEVICE_KERNEL_GUIDING_PARTITION_COUNT:
+      return "guiding_partition_count";
+    case DEVICE_KERNEL_GUIDING_PARTITION_PREFIX:
+      return "guiding_partition_prefix";
+    case DEVICE_KERNEL_GUIDING_PARTITION_SCATTER:
+      return "guiding_partition_scatter";
+    case DEVICE_KERNEL_GUIDING_FIT:
+      return "guiding_fit";
     case DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT:
       return "integrator_photon_emit";
     case DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE:
       return "integrator_bdpt_light_generate";
+    case DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER:
+      return "integrator_bdpt_cache_order";
     case DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT:
       return "integrator_bdpt_sensor_connect";
     case DEVICE_KERNEL_INTEGRATOR_SHADOW_CATCHER_COUNT_POSSIBLE_SPLITS:

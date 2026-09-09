@@ -14,6 +14,11 @@
 #include "kernel/tables.h"
 
 #ifdef __KERNEL_METAL__
+/* Field methods and their math/atomic dependencies must precede the Metal context class. */
+#  include "kernel/sample/guiding_field.h"
+#endif
+
+#ifdef __KERNEL_METAL__
 #  include "kernel/device/metal/context_begin.h"
 #elif defined(__KERNEL_ONEAPI__)
 #  include "kernel/device/oneapi/context_begin.h"
@@ -35,6 +40,7 @@
 #include "kernel/integrator/intersect_volume_stack.h"
 #ifdef __KERNEL_METAL__
 #  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
 #  include "kernel/integrator/photon_mapping.h"
 #endif
 #include "kernel/integrator/shade_background.h"
@@ -79,6 +85,78 @@ ccl_gpu_kernel_postfix
 
 #ifdef __KERNEL_METAL__
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_begin_update, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() == 0 && work_size > 0) {
+    ccl_gpu_kernel_call(guiding_gpu_begin_update());
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_refine, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_refine(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_publish, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_publish(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_partition_count, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_partition_count(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_partition_prefix, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_partition_prefix(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_partition_scatter, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_partition_scatter(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_fit, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_fit(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_flush_history, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_flush_history(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_photon_emit, const int num_photons, const int iteration)
 {
   const uint photon_index = ccl_gpu_global_id_x();
@@ -99,6 +177,17 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   if (light_path_index < uint(num_light_paths)) {
     ccl_gpu_kernel_call(integrator_bdpt_light_generate(
         nullptr, light_path_index, light_path_index, uint(iteration), uint(batch_samples)));
+  }
+}
+ccl_gpu_kernel_postfix
+
+/* Stable compaction of path-indexed slots. Writes only precede the current
+ * read position, so one index array suffices and reservoir data stays untouched. */
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(integrator_bdpt_cache_order, const int num_light_paths)
+{
+  if (ccl_gpu_global_id_x() == 0) {
+    ccl_gpu_kernel_call(integrator_bdpt_cache_order(uint(num_light_paths)));
   }
 }
 ccl_gpu_kernel_postfix
