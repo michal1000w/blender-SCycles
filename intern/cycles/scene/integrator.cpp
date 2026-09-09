@@ -689,6 +689,10 @@ uint64_t Integrator::get_kernel_features() const
      * user-facing shadow-caustics caster/receiver annotations. */
     kernel_features |= KERNEL_FEATURE_BDPT | KERNEL_FEATURE_MNEE;
   }
+  else if (get_use_photon_mapping()) {
+    /* Make photon pipeline demand visible before Metal starts compiling generic kernels. */
+    kernel_features |= KERNEL_FEATURE_PHOTON_MAPPING;
+  }
 
   return kernel_features;
 }

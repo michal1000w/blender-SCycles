@@ -88,7 +88,12 @@
 
 CCL_NAMESPACE_BEGIN
 
-#ifdef __KERNEL_USE_DATA_CONSTANTS__
+#ifdef __KERNEL_METAL_SVM_USAGE__
+#  define SVM_CASE(node) \
+    case node: \
+      if (!__KERNEL_METAL_SVM_##node) \
+        break;
+#elif defined(__KERNEL_USE_DATA_CONSTANTS__)
 #  define SVM_CASE(node) \
     case node: \
       if (!kernel_data_svm_usage_##node) \

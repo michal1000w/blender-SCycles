@@ -31,12 +31,15 @@ enum AppleGPUArchitecture {
 
 /* Contains static Metal helper functions. */
 struct MetalInfo {
+  static bool use_low_memory_compilation();
   static const vector<id<MTLDevice>> &get_usable_devices();
   static int get_apple_gpu_core_count(id<MTLDevice> device);
   static AppleGPUArchitecture get_apple_gpu_architecture(id<MTLDevice> device);
   static int optimal_sort_partition_elements();
   static string get_device_name(id<MTLDevice> device);
 };
+
+thread_mutex &metal_compilation_mutex();
 
 void metal_gpu_address_helper_init(id<MTLDevice> device);
 

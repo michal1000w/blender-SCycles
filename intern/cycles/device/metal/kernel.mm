@@ -35,10 +35,28 @@ const char *kernel_type_as_string(MetalPipelineType pso_type)
       return "PSO_SPECIALIZED_INTERSECT";
     case PSO_SPECIALIZED_SHADE:
       return "PSO_SPECIALIZED_SHADE";
+    case PSO_SPECIALIZED_LIGHT_CACHE:
+      return "PSO_SPECIALIZED_LIGHT_CACHE";
+    case PSO_SPECIALIZED_EVAL:
+      return "PSO_SPECIALIZED_EVAL";
     default:
       assert(0);
   }
   return "";
+}
+
+static bool is_light_cache_kernel(const DeviceKernel kernel)
+{
+  return kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT;
+}
+
+static bool is_shader_eval_kernel(const DeviceKernel kernel)
+{
+  return kernel >= DEVICE_KERNEL_SHADER_EVAL_DISPLACE &&
+         kernel <= DEVICE_KERNEL_SHADER_EVAL_VOLUME_DENSITY;
 }
 
 struct ShaderCache {
@@ -101,7 +119,8 @@ struct ShaderCache {
   ~ShaderCache();
 
   /* Get the fastest available pipeline for the specified kernel. */
-  MetalKernelPipeline *get_best_pipeline(DeviceKernel kernel, const MetalDevice *device);
+  std::shared_ptr<const MetalKernelPipeline> get_best_pipeline(DeviceKernel kernel,
+                                                             const MetalDevice *device);
 
   /* Non-blocking request for a kernel, optionally specialized to the scene being rendered by
    * device. */
@@ -117,7 +136,7 @@ struct ShaderCache {
 
   void compile_thread_func();
 
-  using PipelineCollection = std::vector<unique_ptr<MetalKernelPipeline>>;
+  using PipelineCollection = std::vector<std::shared_ptr<MetalKernelPipeline>>;
 
   struct OccupancyTuningParameters {
     int threads_per_threadgroup = 0;
@@ -212,10 +231,21 @@ void ShaderCache::compile_thread_func()
       metal_printf("Cancelling compilation of %s (%s)",
                    device_kernel_as_string(device_kernel),
                    kernel_type_as_string(pso_type));
+      [pipeline->mtlLibrary release];
+      pipeline->mtlLibrary = nil;
     }
     else {
-      /* Do the actual compilation. */
-      pipeline->compile();
+      /* Drain temporary compiler objects after each job. This worker lives for the entire
+       * session; archives and descriptors must not accumulate across scene specializations. */
+      @autoreleasepool {
+        pipeline->compile();
+        /* Completed PSOs do not need the source library or their creation function. Keep only
+         * the intersection functions used when constructing dispatch tables. */
+        [pipeline->function release];
+        pipeline->function = nil;
+        [pipeline->mtlLibrary release];
+        pipeline->mtlLibrary = nil;
+      }
 
       thread_scoped_lock lock(cache_mutex);
       auto &collection = pipelines[device_kernel];
@@ -256,6 +286,26 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
     return false;
   }
 
+  if (pso_type == PSO_GENERIC && MetalInfo::use_low_memory_compilation() &&
+      (is_light_cache_kernel(device_kernel) || is_shader_eval_kernel(device_kernel) ||
+       (device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
+        device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT)))
+  {
+    return false;
+  }
+
+  /* Small-memory devices require the specialized integrator set. Displacement also requires
+   * it on larger devices. Do not compile an unused generic set before the required pipelines. */
+  if (pso_type == PSO_GENERIC &&
+      (MetalInfo::use_low_memory_compilation() ||
+       (device->scene_use_pixel_displacement && device->scene_pixel_displacement_scale != 0.0f &&
+        device->scene_pixel_displacement_max_distance > 0.0f)) &&
+      device_kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+      device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT)
+  {
+    return false;
+  }
+
   /* Avoid materializing pipelines that the current scene cannot enqueue. If a scene edit enables
    * one of these feature bits, load_kernels() is called again and requests the newly required
    * pipeline. Besides reducing cold-start work, this is particularly important for the mutually
@@ -265,13 +315,32 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
   {
     return false;
   }
+  if (device_kernel == DEVICE_KERNEL_SHADER_EVAL_CURVE_SHADOW_TRANSPARENCY &&
+      !(device->kernel_features & KERNEL_FEATURE_HAIR))
+  {
+    return false;
+  }
+  if ((device_kernel == DEVICE_KERNEL_SHADER_EVAL_VOLUME_DENSITY ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING) &&
+      !(device->kernel_features & KERNEL_FEATURE_VOLUME))
+  {
+    return false;
+  }
   if (device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE &&
       !(device->kernel_features & KERNEL_FEATURE_SUBSURFACE))
   {
     return false;
   }
+  if ((device_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT ||
+       device_kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT) &&
+      !(device->kernel_features & KERNEL_FEATURE_SHADOW_LINKING))
+  {
+    return false;
+  }
   if (device_kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT &&
-      (device->kernel_features & KERNEL_FEATURE_BDPT))
+      !(device->scene_kernel_features & KERNEL_FEATURE_PHOTON_MAPPING))
   {
     return false;
   }
@@ -283,15 +352,15 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
        device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
        device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
        device_kernel == DEVICE_KERNEL_GUIDING_FIT) &&
-      !(device->kernel_features & KERNEL_FEATURE_PATH_GUIDING))
+      !(device->scene_kernel_features & KERNEL_FEATURE_PATH_GUIDING))
   {
     return false;
   }
   if ((device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
        device_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT) &&
-      (!(device->kernel_features & KERNEL_FEATURE_BDPT) ||
-       (device->kernel_features & KERNEL_FEATURE_SHADOW_CATCHER)))
+      (!(device->scene_kernel_features & KERNEL_FEATURE_BDPT) ||
+       (device->scene_kernel_features & KERNEL_FEATURE_SHADOW_CATCHER)))
   {
     return false;
   }
@@ -313,9 +382,24 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
       /* Skip the MNEE kernel if the scene doesn't require it. */
       return false;
     }
+    /* BDPT needs the manifold solver inside its light tracer even when regular camera-path
+     * shadow caustics are disabled. Only the latter can enqueue this standalone kernel. */
+    if (pso_type != PSO_GENERIC && !device->launch_params->data.integrator.use_caustics) {
+      return false;
+    }
   }
 
-  if (pso_type != PSO_GENERIC) {
+  if (pso_type == PSO_SPECIALIZED_EVAL) {
+    if (!MetalInfo::use_low_memory_compilation() || !is_shader_eval_kernel(device_kernel)) {
+      return false;
+    }
+  }
+  else if (pso_type == PSO_SPECIALIZED_LIGHT_CACHE) {
+    if (!MetalInfo::use_low_memory_compilation() || !is_light_cache_kernel(device_kernel)) {
+      return false;
+    }
+  }
+  else if (pso_type != PSO_GENERIC) {
     /* Only specialize kernels where it can make an impact. */
     if (device_kernel < DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST ||
         device_kernel > DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL)
@@ -364,6 +448,10 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
       }
 #  endif
 
+      if (MetalInfo::use_low_memory_compilation()) {
+        max_mtlcompiler_threads = 1;
+      }
+
       metal_printf("Spawning %d Cycles kernel compilation threads", max_mtlcompiler_threads);
       for (int i = 0; i < max_mtlcompiler_threads; i++) {
         compile_threads.emplace_back([this] { this->compile_thread_func(); });
@@ -390,7 +478,8 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
   pipeline->pso_type = pso_type;
   pipeline->mtlDevice = mtlDevice;
   pipeline->kernels_md5 = device->kernels_md5[pso_type];
-  pipeline->mtlLibrary = device->mtlLibrary[pso_type];
+  /* A scene edit may replace the device's library while this request is queued. */
+  pipeline->mtlLibrary = [device->mtlLibrary[pso_type] retain];
   pipeline->device_kernel = device_kernel;
   pipeline->threads_per_threadgroup = device->max_threads_per_threadgroup;
 
@@ -438,7 +527,8 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
   cond_var.notify_one();
 }
 
-MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const MetalDevice *device)
+std::shared_ptr<const MetalKernelPipeline> ShaderCache::get_best_pipeline(
+    DeviceKernel kernel, const MetalDevice *device)
 {
   /* Generic kernels omit pixel displacement. These specializations are required for
    * correctness, so pending or failed compilation must never select the generic fallback. */
@@ -447,11 +537,21 @@ MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const M
                                      device->scene_pixel_displacement_max_distance > 0.0f &&
                                      kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
                                      kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT;
-  const MetalPipelineType required_type = kernel < DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND ?
-                                             PSO_SPECIALIZED_INTERSECT : PSO_SPECIALIZED_SHADE;
+  const bool requires_scene_integrator = MetalInfo::use_low_memory_compilation() &&
+                                        kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+                                        kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT;
+  const bool requires_light_cache = MetalInfo::use_low_memory_compilation() &&
+                                    is_light_cache_kernel(kernel);
+  const bool requires_shader_eval = MetalInfo::use_low_memory_compilation() &&
+                                    is_shader_eval_kernel(kernel);
+  const MetalPipelineType required_type = requires_shader_eval ? PSO_SPECIALIZED_EVAL :
+                                          requires_light_cache ? PSO_SPECIALIZED_LIGHT_CACHE :
+                                          kernel < DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND ?
+                                                                 PSO_SPECIALIZED_INTERSECT :
+                                                                 PSO_SPECIALIZED_SHADE;
   while (running && !device->has_error) {
     /* Search all loaded pipelines with matching kernels_md5 checksums. */
-    MetalKernelPipeline *best_match = nullptr;
+    std::shared_ptr<MetalKernelPipeline> best_match;
     bool generic_failed = false;
     {
       thread_scoped_lock lock(cache_mutex);
@@ -461,7 +561,9 @@ MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const M
          * provide a usable replacement, so finish the search before reporting it. */
         generic_failed |= candidate->pso_type == PSO_GENERIC && !candidate->loaded &&
                           candidate->kernels_md5 == device->kernels_md5[PSO_GENERIC];
-        if (requires_displacement) {
+        if (requires_displacement || requires_scene_integrator || requires_light_cache ||
+            requires_shader_eval)
+        {
           if (candidate->pso_type != required_type ||
               candidate->kernels_md5 != device->kernels_md5[required_type])
           {
@@ -478,7 +580,7 @@ MetalKernelPipeline *ShaderCache::get_best_pipeline(DeviceKernel kernel, const M
         {
           /* Replace existing match if candidate is more specialized. */
           if (!best_match || candidate->pso_type > best_match->pso_type) {
-            best_match = candidate.get();
+            best_match = candidate;
           }
         }
       }
@@ -525,7 +627,7 @@ bool MetalKernelPipeline::should_use_binary_archive() const
       return true;
     }
 
-    if (pso_type == PSO_SPECIALIZED_INTERSECT ||
+    if (pso_type == PSO_SPECIALIZED_INTERSECT || pso_type == PSO_SPECIALIZED_LIGHT_CACHE ||
         (device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
          device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW) ||
         (device_kernel >= DEVICE_KERNEL_SHADER_EVAL_DISPLACE &&
@@ -593,7 +695,7 @@ static MTLFunctionConstantValues *GetConstantValues(
                               atIndex:KernelData_kernel_features_64bit];
   }
 
-  return constant_values;
+  return [constant_values autorelease];
 }
 
 void MetalDispatchPipeline::free_intersection_function_tables()
@@ -607,16 +709,29 @@ void MetalDispatchPipeline::free_intersection_function_tables()
   }
 }
 
+MetalKernelPipeline::~MetalKernelPipeline()
+{
+  [function release];
+  [mtlLibrary release];
+  [pipeline release];
+  for (NSArray *functions : table_functions) {
+    [functions release];
+  }
+}
+
 MetalDispatchPipeline::~MetalDispatchPipeline()
 {
   free_intersection_function_tables();
+  [pipeline release];
 }
 
 bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kernel)
 {
   this->metal_device = metal_device;
-  const MetalKernelPipeline *best_pipeline = MetalDeviceKernels::get_best_pipeline(metal_device,
-                                                                                   kernel);
+  /* Keep the cache entry alive while constructing dispatch tables, even if another worker
+   * evicts it. The dispatch instance then owns its own PSO reference. Command buffers retain
+   * resources already encoded for GPU execution. */
+  const auto best_pipeline = MetalDeviceKernels::get_best_pipeline(metal_device, kernel);
   if (!best_pipeline) {
     if (!metal_device->have_error()) {
       metal_device->set_error(string_printf(
@@ -631,7 +746,8 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
     return true;
   }
   pipeline_id = best_pipeline->pipeline_id;
-  pipeline = best_pipeline->pipeline;
+  [pipeline release];
+  pipeline = [best_pipeline->pipeline retain];
   pso_type = best_pipeline->pso_type;
   num_threads_per_block = best_pipeline->num_threads_per_block;
   use_metalrt = best_pipeline->use_metalrt;
@@ -643,7 +759,7 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
     for (int table = 0; table < METALRT_TABLE_NUM; table++) {
       @autoreleasepool {
         MTLIntersectionFunctionTableDescriptor *ift_desc =
-            [[MTLIntersectionFunctionTableDescriptor alloc] init];
+            [[[MTLIntersectionFunctionTableDescriptor alloc] init] autorelease];
         ift_desc.functionCount = best_pipeline->table_functions[table].count;
         intersection_func_table[table] = [this->pipeline
             newIntersectionFunctionTableWithDescriptor:ift_desc];
@@ -681,7 +797,7 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
 id<MTLFunction> MetalKernelPipeline::make_intersection_function(const char *function_name)
 {
   MTLFunctionDescriptor *desc = [MTLIntersectionFunctionDescriptor functionDescriptor];
-  desc.name = [@(function_name) copy];
+  desc.name = @(function_name);
 
   if (pso_type != PSO_GENERIC) {
     desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
@@ -709,13 +825,18 @@ id<MTLFunction> MetalKernelPipeline::make_intersection_function(const char *func
 
 void MetalKernelPipeline::compile()
 {
+  thread_scoped_lock compilation_lock(metal_compilation_mutex(), std::defer_lock);
+  if (MetalInfo::use_low_memory_compilation()) {
+    compilation_lock.lock();
+  }
+
   const std::string function_name = std::string("cycles_metal_") +
                                     device_kernel_as_string(device_kernel);
 
   NSError *error = nullptr;
 
   MTLFunctionDescriptor *func_desc = [MTLIntersectionFunctionDescriptor functionDescriptor];
-  func_desc.name = [@(function_name.c_str()) copy];
+  func_desc.name = @(function_name.c_str());
 
   if (pso_type != PSO_GENERIC) {
     func_desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
@@ -733,13 +854,13 @@ void MetalKernelPipeline::compile()
     return;
   }
 
-  function.label = [@(function_name.c_str()) copy];
+  function.label = @(function_name.c_str());
 
   NSArray *linked_functions = nil;
 
   if (use_metalrt && device_kernel_has_intersection(device_kernel)) {
 
-    NSMutableSet *unique_functions = [[NSMutableSet alloc] init];
+    NSMutableSet *unique_functions = [[[NSMutableSet alloc] init] autorelease];
     bool required_intersection_function_missing = false;
 
     auto add_intersection_functions = [&](int table_index,
@@ -760,6 +881,7 @@ void MetalKernelPipeline::compile()
           if (intersection_function) {
             [functions addObject:intersection_function];
             [unique_functions addObject:intersection_function];
+            [intersection_function release];
           }
           else {
             /* Adaptive compilation can remove an intersection function for a geometry feature
@@ -779,7 +901,8 @@ void MetalKernelPipeline::compile()
           [functions addObject:[NSNull null]];
         }
       }
-      table_functions[table_index] = functions;
+      /* The pipeline cache uses these tables after the worker's autorelease pool drains. */
+      table_functions[table_index] = [functions retain];
     };
 
     add_intersection_functions(METALRT_TABLE_DEFAULT,
@@ -847,7 +970,7 @@ void MetalKernelPipeline::compile()
   }
 
   MTLComputePipelineDescriptor *computePipelineStateDescriptor =
-      [[MTLComputePipelineDescriptor alloc] init];
+      [[[MTLComputePipelineDescriptor alloc] init] autorelease];
 
   computePipelineStateDescriptor.buffers[0].mutability = MTLMutabilityImmutable;
   computePipelineStateDescriptor.buffers[1].mutability = MTLMutabilityImmutable;
@@ -860,7 +983,8 @@ void MetalKernelPipeline::compile()
 
   /* Attach the additional functions to an MTLLinkedFunctions object */
   if (linked_functions) {
-    computePipelineStateDescriptor.linkedFunctions = [[MTLLinkedFunctions alloc] init];
+    computePipelineStateDescriptor.linkedFunctions = [[[MTLLinkedFunctions alloc] init]
+        autorelease];
     computePipelineStateDescriptor.linkedFunctions.functions = linked_functions;
   }
   computePipelineStateDescriptor.maxCallStackDepth = 1;
@@ -913,6 +1037,7 @@ void MetalKernelPipeline::compile()
     }
     NSError *error = nil;
     archive = [mtlDevice newBinaryArchiveWithDescriptor:archiveDesc error:&error];
+    [archive autorelease];
     if (!archive) {
       const char *err = error ? [[error localizedDescription] UTF8String] : nullptr;
       metal_printf("newBinaryArchiveWithDescriptor failed: %s", err ? err : "nil");
@@ -1061,7 +1186,6 @@ void MetalKernelPipeline::compile()
   }
 
   this->loaded = true;
-  [computePipelineStateDescriptor release];
   computePipelineStateDescriptor = nil;
 
   if (!use_binary_archive) {
@@ -1127,8 +1251,8 @@ bool MetalDeviceKernels::should_load_kernels(const MetalDevice *device, MetalPip
   return get_loaded_kernel_count(device, pso_type) != DEVICE_KERNEL_NUM;
 }
 
-const MetalKernelPipeline *MetalDeviceKernels::get_best_pipeline(const MetalDevice *device,
-                                                                 DeviceKernel kernel)
+std::shared_ptr<const MetalKernelPipeline> MetalDeviceKernels::get_best_pipeline(
+    const MetalDevice *device, DeviceKernel kernel)
 {
   return get_shader_cache(device->mtlDevice)->get_best_pipeline(kernel, device);
 }

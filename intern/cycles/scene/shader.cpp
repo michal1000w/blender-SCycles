@@ -614,6 +614,7 @@ void ShaderManager::device_update_post(Device *device,
   /* This runs after kernels have been loaded, so can copy to device. */
   dscene->shaders.copy_to_device_if_modified();
   dscene->svm_nodes.copy_to_device_if_modified();
+  device->foreach_device([scene](Device *subdevice) { subdevice->prepare_shader_eval(scene); });
 }
 
 void ShaderManager::device_update_displacement_bounds(DeviceScene *dscene,

@@ -263,6 +263,9 @@ class Device {
   /* Called after kernel texture setup, and prior to integrator state setup. */
   virtual void optimize_for_scene(Scene * /*scene*/) {}
 
+  /* Called after material bytecode is ready, before geometry and light shader evaluation. */
+  virtual void prepare_shader_eval(Scene * /*scene*/) {}
+
   virtual bool is_resident(device_ptr /*key*/, Device *sub_device)
   {
     /* Memory is always resident if this is not a multi device, regardless of whether the pointer

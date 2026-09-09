@@ -18,6 +18,21 @@
 
 CCL_NAMESPACE_BEGIN
 
+bool MetalInfo::use_low_memory_compilation()
+{
+  /* Leave room for Blender, the scene and the OS on unified-memory machines. A single
+   * compiler job can itself require gigabytes; the device's task count is not a RAM budget. */
+  static const bool low_memory = [[NSProcessInfo processInfo] physicalMemory] <=
+                                 (uint64_t(16) << 30);
+  return low_memory;
+}
+
+thread_mutex &metal_compilation_mutex()
+{
+  static thread_mutex mutex;
+  return mutex;
+}
+
 /* Comment this out to test workaround for getting gpuAddress and gpuResourceID on macOS < 13.0. */
 #  define CYCLES_USE_TIER2D_BINDLESS
 

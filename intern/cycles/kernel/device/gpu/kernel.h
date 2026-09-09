@@ -71,6 +71,10 @@
  * Integrator.
  */
 
+#if !defined(__KERNEL_METAL_INTERSECT_ONLY__) && !defined(__KERNEL_METAL_SHADE_ONLY__) && \
+    !defined(__KERNEL_METAL_EVAL_ONLY__)
+
+#  ifndef __KERNEL_METAL_LIGHT_CACHE_ONLY__
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_reset, const int num_states)
 {
@@ -83,7 +87,11 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 }
 ccl_gpu_kernel_postfix
 
+#  endif
 #ifdef __KERNEL_METAL__
+#  if !defined(__KERNEL_METAL_LIGHT_CACHE_ONLY__) && \
+      (!defined(__KERNEL_METAL_TRANSPORT_FEATURES__) || \
+      (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_PATH_GUIDING))
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(guiding_begin_update, const uint work_size)
 {
@@ -156,6 +164,10 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 }
 ccl_gpu_kernel_postfix
 
+#  endif
+#  if !defined(__KERNEL_METAL_GENERIC_NO_LIGHT_CACHE__) && \
+      (!defined(__KERNEL_METAL_TRANSPORT_FEATURES__) || \
+       (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_PHOTON_MAPPING))
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_photon_emit, const int num_photons, const int iteration)
 {
@@ -167,6 +179,10 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 }
 ccl_gpu_kernel_postfix
 
+#  endif
+#  if !defined(__KERNEL_METAL_GENERIC_NO_LIGHT_CACHE__) && \
+      (!defined(__KERNEL_METAL_TRANSPORT_FEATURES__) || \
+       (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_BDPT))
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_bdpt_light_generate,
                              const int num_light_paths,
@@ -211,8 +227,10 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   }
 }
 ccl_gpu_kernel_postfix
+#  endif
 #endif
 
+#  ifndef __KERNEL_METAL_LIGHT_CACHE_ONLY__
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_init_from_camera,
                              ccl_global KernelWorkTile *tiles,
@@ -291,7 +309,12 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 }
 ccl_gpu_kernel_postfix
 
-#if !defined(__KERNEL_HIPRT__)
+#  endif
+#endif /* Generic initialization and light-cache kernels. */
+
+#if !defined(__KERNEL_HIPRT__) && !defined(__KERNEL_METAL_SHADE_ONLY__) && \
+    !defined(__KERNEL_METAL_GENERIC_NO_INTEGRATOR__) && \
+    !defined(__KERNEL_METAL_LIGHT_CACHE_ONLY__) && !defined(__KERNEL_METAL_EVAL_ONLY__)
 
 /* Intersection kernels need access to the kernel handler for specialization constants to work
  * properly. */
@@ -393,6 +416,10 @@ ccl_gpu_kernel_postfix
 #  endif
 
 #endif
+
+#if !defined(__KERNEL_METAL_INTERSECT_ONLY__) && !defined(__KERNEL_METAL_GENERIC_NO_INTEGRATOR__) && \
+    !defined(__KERNEL_METAL_GENERIC_NO_SHADE__) && !defined(__KERNEL_METAL_LIGHT_CACHE_ONLY__) && \
+    !defined(__KERNEL_METAL_EVAL_ONLY__)
 
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_shade_background,
@@ -555,6 +582,12 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   }
 }
 ccl_gpu_kernel_postfix
+
+#endif /* Shading kernels. */
+
+#if !defined(__KERNEL_METAL_INTERSECT_ONLY__) && !defined(__KERNEL_METAL_SHADE_ONLY__) && \
+    !defined(__KERNEL_METAL_LIGHT_CACHE_ONLY__)
+#  ifndef __KERNEL_METAL_EVAL_ONLY__
 
 ccl_gpu_kernel_threads(GPU_PARALLEL_ACTIVE_INDEX_DEFAULT_BLOCK_SIZE)
     ccl_gpu_kernel_signature(integrator_queued_paths_array,
@@ -1107,6 +1140,8 @@ KERNEL_FILM_CONVERT_VARIANT(float4, 4)
 
 /* Displacement */
 
+#  endif
+#  ifndef __KERNEL_METAL_GENERIC_NO_EVAL__
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(shader_eval_displace,
                              ccl_global KernelShaderEvalInput *input,
@@ -1175,6 +1210,9 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   }
 }
 ccl_gpu_kernel_postfix
+
+#  endif
+#  ifndef __KERNEL_METAL_EVAL_ONLY__
 
 /* --------------------------------------------------------------------
  * Denoising.
@@ -1508,3 +1546,6 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
   }
 }
 ccl_gpu_kernel_postfix
+
+#  endif
+#endif /* Generic queue, film, evaluation and filter kernels. */
