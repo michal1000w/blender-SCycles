@@ -535,7 +535,14 @@ void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
   queue_->enqueue(DEVICE_KERNEL_GUIDING_BEGIN_UPDATE, one, DeviceKernelArguments(&one));
   queue_->enqueue(
       DEVICE_KERNEL_GUIDING_PUBLISH, distributions, DeviceKernelArguments(&distributions));
-  queue_->enqueue(DEVICE_KERNEL_GUIDING_REFINE, capacity, DeviceKernelArguments(&capacity));
+  /* Additional drained rounds resolve populated cells without adding fitting updates
+   * or camera samples. Snapshot each preceding round's child allocations in order. */
+  for (int refinement_round = 0; refinement_round < 4; ++refinement_round) {
+    if (refinement_round != 0) {
+      queue_->enqueue(DEVICE_KERNEL_GUIDING_BEGIN_UPDATE, one, DeviceKernelArguments(&one));
+    }
+    queue_->enqueue(DEVICE_KERNEL_GUIDING_REFINE, capacity, DeviceKernelArguments(&capacity));
+  }
   queue_->zero_to_device(guiding_fit_);
   queue_->zero_to_device(guiding_fit_counts_);
   queue_->copy_from_device(guiding_partition_);
