@@ -17,8 +17,8 @@ also corrected, with executable regressions.
 Build the existing configured Release tree and install its runtime resources:
 
 ```sh
-cmake --build build/macos_arm64_Release --target blender -j 4
-cmake --install build/macos_arm64_Release
+cmake --build build/macos_arm 64_Release --target blender -j 4
+cmake --install build/macos_arm 64_Release
 ```
 
 Launch `install/Blender.app`. In Preferences, select Metal and your Apple GPU.
@@ -79,81 +79,90 @@ The fork's pre-existing incomplete BDPT medium traversal also remains: light pat
 stop at the first volume collision. Component tests for signed volume event weights
 do not establish a full multiple-scattering BDPT implementation.
 
-The tested implementation does **not** establish the requested universal minimum
-quality of CPU guiding. Equal-SPP regressions are reported below; improved BDPT
-results do not excuse worse PT results. Broad production readiness and a speed gain
-must not be inferred from successful compilation or these limited scenes.
+The implementation does not establish universal CPU quality parity. The user
+accepted the measured results on 2026-09-09; remaining differences are reported
+below. Broad scene coverage and a universal speed gain are not inferred from
+successful compilation or these limited fixtures.
 
-## Results
+## Accepted results — 2026-09-09
 
-Final installed-build checks and equal-SPP numerical results are recorded below.
-The earlier research and experiment history is in `cycles_metal_path_guiding.md`
-and the linked audit documents. Rejected and invalidated runs remain identified
-there; they are not included as passing final evidence.
+The user explicitly accepted the current best results as good enough and requested
+completion. Four drained refinement rounds per publication are the final choice.
+The remaining CPU error differences below are accepted limitations, not claims of
+CPU parity. Further training-duration and RIS-prior experiments were prepared but
+not run; they are not part of this implementation.
 
-At **512 camera SPP**, three independent seeds, using the original two-seed,
-8192-SPP CPU-guided references:
+The refinement uses the existing memory budget more fully before training freezes.
+It changes neither camera sample counts nor model-publication cadence. No image
+normalization, denoising, clamping, or reference replacement was used to improve
+the comparisons.
 
-| Scene / integrator | MSE ratio to previous Metal guided | MSE ratio to CPU guided at 512 SPP |
+At **512 camera SPP**, on held-out seeds 401/503, against fresh CPU-guided controls:
+
+| Scene | Metal PT / CPU MSE | Metal BDPT / CPU MSE |
 | --- | ---: | ---: |
-| Rough glass / PT | 0.9921 | 1.2672 |
-| Transmission / PT | 0.9386 | 1.2603 |
-| Rough glass / BDPT | 0.8911 | 0.8172 |
-| Transmission / BDPT | 0.9439 | 0.9050 |
-| Spherical point light / BDPT | 0.9083 | 1.1950 |
+| Rough glass | 0.9815 | 0.7595 |
+| Transmission | 1.0731 | 0.7994 |
 
-Lower is better. The material BDPT images improve on both controls, but ordinary
-PT and point-light BDPT still miss the equal-SPP CPU quality target. Each BDPT
-render also traced exactly 2,097,152 auxiliary light paths, checked against
-contiguous camera-sample coverage. Training publications were checked separately.
-These particular runs do not establish warmed runtime gains.
+At **4096 camera SPP**, seeds 101/211, against matching CPU-guided controls:
 
-Local raw evidence: `build/metal-guiding-tests/spatial-moment-verified-loader`,
-`spatial-moment-bdpt`, and `spatial-moment-point`, each with `comparison.json`,
-image files, metadata and logs. The CPU references were not exposure-adjusted,
-clamped or replaced to improve the ratios.
-
-At **4096 camera SPP**, two independent seeds, with the same CPU-guided references:
-
-| Scene / integrator | MSE ratio to previous Metal guided | MSE ratio to CPU guided at 4096 SPP |
+| Scene | Metal PT / CPU MSE | Metal BDPT / CPU MSE |
 | --- | ---: | ---: |
-| rough glass / PT | 0.9044 | 1.2951 |
-| rough glass / BDPT | 0.9307 | 0.9556 |
-| transmission / PT | 0.9536 | 1.3758 |
-| transmission / BDPT | 0.9340 | 1.0159 |
+| Rough glass | 1.1652 | 0.9466 |
+| Transmission | 1.2193 | 1.0053 |
 
-All eight GPU renders passed actual 4096-SPP and publication checks. Each BDPT
-render traced exactly 16,777,216 auxiliary light paths with contiguous sample
-coverage. Raw evidence is in `build/metal-guiding-tests/spatial-moment-4096`.
-These measurements support adopting observed-spread refinement over the previous
-Metal implementation. They do not meet the CPU-guided quality target in every case.
+Lower is better. Relative to the previous committed one-round refinement, the
+4096-SPP PT MSE fell 10.0% and 11.4%; BDPT MSE fell0.9% and1.0%. The point-light
+BDPT test at 512 SPP over three seeds improved4.4% over that same Metal baseline,
+while remaining 14.2% above CPU-guided MSE. These are measured mean errors over
+specific fixtures, not universal quality guarantees.
 
-## Final verification record
+The material reference is the unchanged mean of two independent 8192-SPP
+CPU-guided renders. The point-light fixture uses its original 8192-SPP CPU-guided
+reference. Each BDPT image traced2,097,152 auxiliary light paths at 512 SPP or
+16,777,216 at 4096 SPP, verified against contiguous camera-sample coverage. Equal
+camera SPP therefore does not imply equal total tracing work. These quality runs
+do not establish a universal end-to-end speedup; cold pipeline compilation and
+warmed rendering must be distinguished.
 
-- Release build and installation succeeded. Installed guiding-field, mixture and
-  manifold BSDF headers were compared byte-for-byte with the delivery source.
-- 45 host guiding tests and 21 host transport tests passed.
-- The complete actual-Metal suite passed, including spatial root selection,
-  normalization, fitting, history retention, conditional queries, and transport
-  component checks. The 24-case manifold BSDF check has maximum relative error
-  2.2054e-6 across 10,000 samples per case.
-- Python syntax and staged whitespace checks passed.
+Machine-readable results are in `cycles_metal_guiding_results.json`. Local raw
+images, commands, source provenance and work-count logs are preserved under:
 
-The first incremental packaging attempt retained an older spatial header because
-an archive restore preserved its timestamp. It is excluded as final-package
-validation. The corrected build refreshed the inputs, regenerated the three Metal
-libraries, and verified the installed header bytes. The earlier sequential-fit
-Metal watchdog failure is retained in the capacity audit; the final full suite
-passed all original iterations and tolerances without reducing work.
+- `build/metal-guiding-tests/refinement-four-heldout`
+- `build/metal-guiding-tests/refinement-four-4096`
+- `build/metal-guiding-tests/refinement-four-point`
 
-The verified installed build passed all **19 persistent-session renderer cases**
-(`/tmp/cycles-guiding-final-regression-verified.log`). This includes restoring the
-unguided image after disabling guiding, zero probability, all three public sampling
-modes, memory resizing, unlimited training, lighting reset, and mixed CPU/Metal use.
+## Verification
 
-The final installed BDPT volume smoke also passed: 32 actual camera SPP,
-131,072 auxiliary light paths, contiguous sample coverage, publications at
-1/2/4/8/16 camera samples, and finite nonempty output. Its saved scene is
-`build/metal-guiding-tests/final-delivery/bdpt_volume.blend`. This checks guiding
-within the existing volume transport; it does not remove the medium-traversal
-limitation described above.
+The Release build and installation succeeded. Packaged guiding-field, mixture and
+manifold BSDF headers were compared byte-for-byte with the source. The shared
+kernel code passed 45 host guiding tests,21 host transport tests, and the complete
+actual-Metal suite. The final refinement change only adds ordered host dispatches;
+the tested kernel code remains unchanged. The manifold BSDF check covers 24 cases
+with 10,000 samples per case and maximum relative error2.2054e-6.
+
+All final 512/4096 SPP benchmark renders passed actual sample and auxiliary-work
+checks. The installed BDPT volume smoke passed 32 SPP with 131,072 auxiliary light
+paths and the expected training publications. Its saved scene is
+`build/metal-guiding-tests/final-delivery/bdpt_volume.blend`. This exercises guiding
+within the fork's existing volume transport, not full light-side medium traversal.
+
+The earlier archive-restore timestamp problem was corrected by rebuilding the
+inputs, regenerating Metal libraries, and verifying installed header bytes. The
+old sequential-fit watchdog failure remains in the audit; the final component
+suite passed the original workload and tolerances. Rejected and invalidated
+experiments are retained in the research notes, not counted as passing evidence.
+
+The accepted four-round implementation passed all **19 final integration cases**,
+including UI modes, memory changes, persistent resets and CPU coexistence. BDPT
+cancellation and same-session restart passed with 0.0997-second cancel latency.
+An optional shader compilation interrupted by application shutdown no longer reads
+an unfinished error result, retries an archive, or reports a false compilation
+failure. The rebuilt package passed the integration suite without that shutdown
+error. Actual compile failures while the application is running retain their
+error reporting and generic-pipeline failure handling.
+
+Final logs: `/tmp/cycles-guiding-accepted-final-build2.log`,
+`/tmp/cycles-guiding-accepted-final-install.log`,
+`/tmp/cycles-guiding-accepted-final-regression.log`, and
+`/tmp/cycles-guiding-accepted-four-cancel.log`.
