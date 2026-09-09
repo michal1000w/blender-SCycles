@@ -443,6 +443,10 @@ CMAKE_ARGS=(
   -DWITH_CYCLES_PARALLEL_DEVICE_KERNEL_BUILD=ON
   -DWITH_NINJA_POOL_JOBS=ON
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+  # Xcode 26's Metal headers reference newer macOS APIs without guarding their
+  # declarations. Keep Blender's macOS 11.2 deployment target, but do not
+  # promote those SDK-header warnings to errors.
+  -DCMAKE_CXX_FLAGS=-Wno-error=unguarded-availability-new
 )
 
 if [ "${#EXTRA_CMAKE_ARGS[@]}" -gt 0 ]; then
