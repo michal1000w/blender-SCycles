@@ -1427,7 +1427,9 @@ ccl_device int surface_shader_bsdf_gpu_resampled_closure(
   return candidate.label;
 }
 
-ccl_device int surface_shader_bsdf_gpu_guided_sample_closure(
+/* Keep the guided proposal/BSDF call graph separate from the bidirectional light tracer and
+ * camera integrator. Inlining it duplicates all proposal modes in their optimization units. */
+ccl_device __attribute__((noinline)) int surface_shader_bsdf_gpu_guided_sample_closure(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const ccl_private ShaderClosure *sc,
@@ -1761,7 +1763,14 @@ ccl_device Spectrum surface_shader_apply_holdout(ccl_private ShaderData *sd)
 
 /* Surface Evaluation */
 
+/* The generic integrator calls the complete shader interpreter at several sites. Duplicating
+ * that call graph makes cold Metal pipeline optimization consume gigabytes. The same applies to
+ * specialized bidirectional/photon shading. Ordinary specialized PT keeps its inlining policy. */
 template<uint64_t node_feature_mask, typename ConstIntegratorGenericState>
+#if defined(__KERNEL_METAL_APPLE__) && \
+    (!defined(__KERNEL_USE_DATA_CONSTANTS__) || defined(__KERNEL_METAL_OUTLINE_SURFACE_EVAL__))
+__attribute__((noinline))
+#endif
 ccl_device void surface_shader_eval(KernelGlobals kg,
                                     ConstIntegratorGenericState state,
                                     ccl_private ShaderData *ccl_restrict sd,

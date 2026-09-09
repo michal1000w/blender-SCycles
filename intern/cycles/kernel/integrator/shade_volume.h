@@ -886,9 +886,8 @@ struct VolumeIntegrateState {
 
   /* Extra fields for path guiding and denoising. */
   PackedSpectrum emission;
-#  ifdef __DENOISING_FEATURES__
+  /* Homogeneous scattering also uses albedo when denoising is disabled. */
   PackedSpectrum albedo;
-#  endif
 
   /* The distance between the current and the last sample position. */
   float dt;

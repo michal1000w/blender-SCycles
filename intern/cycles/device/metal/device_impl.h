@@ -43,6 +43,7 @@ class MetalDevice : public Device {
   bool motion_blur = false;
   bool use_pcmi = false;
   bool scene_use_pixel_displacement = false;
+  bool generic_displacement_kernels_skipped = false;
   bool scene_pixel_displacement_metalrt_compatible = false;
   float scene_pixel_displacement_scale = 1.0f;
   float scene_pixel_displacement_max_distance = 0.0f;
@@ -78,6 +79,8 @@ class MetalDevice : public Device {
 #  endif
 
   uint64_t kernel_features = 0;
+  uint64_t scene_kernel_features = 0;
+  KernelSVMUsage shader_eval_svm_usage = {};
   bool using_nanovdb = false;
   int max_threads_per_threadgroup;
 
@@ -169,6 +172,7 @@ class MetalDevice : public Device {
   bool set_bvh_limits(size_t instance_count, size_t max_prim_count) override;
 
   void optimize_for_scene(Scene *scene) override;
+  void prepare_shader_eval(Scene *scene) override;
 
   static void compile_and_load(const int device_id, MetalPipelineType pso_type);
 
