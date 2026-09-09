@@ -19,6 +19,42 @@
 
 CCL_NAMESPACE_BEGIN
 
+TEST(BidirectionalPDF, PrimaryVolumeEmissionSharesThreeStrategyPartition)
+{
+  std::mt19937 rng(70319);
+  std::uniform_real_distribution<float> uniform(0.01f, 20.0f);
+  for (int trial = 0; trial < 10000; ++trial) {
+    const float phase = uniform(rng);
+    const float nee = uniform(rng);
+    const float camera_inverse_density = uniform(rng);
+    const float emission = uniform(rng);
+    const double light = double(camera_inverse_density) * emission;
+    const double denominator = double(phase) * phase + double(nee) * nee + light * light;
+
+    const float2 after_volume = BDPTMISWeight::Log::scatter(
+        make_float2(BDPTMISWeight(camera_inverse_density).encoded(), -INFINITY),
+        1.0f,
+        phase,
+        0.0f);
+    const float phase_weight =
+        (BDPTMISWeight(1.0f) +
+         BDPTMISWeight(nee) * BDPTMISWeight::from_encoded(after_volume.x) +
+         BDPTMISWeight(emission) * BDPTMISWeight::from_encoded(after_volume.y))
+            .inverse();
+    const double nee_weight = double(nee) * nee / denominator;
+    const double sensor_weight = light * light / denominator;
+    EXPECT_NEAR(phase_weight, double(phase) * phase / denominator, 2e-6);
+    EXPECT_NEAR(phase_weight + nee_weight + sensor_weight, 1.0, 2e-6);
+  }
+  /* Ordinary two-strategy PT weighting is not a valid replacement for the
+   * phase-hit term while the light-to-sensor strategy still contributes. */
+  const double phase = 0.3, nee = 0.7, light = 0.2;
+  const double all = phase * phase + nee * nee + light * light;
+  EXPECT_GT(phase * phase / (phase * phase + nee * nee) +
+                (nee * nee + light * light) / all,
+            1.0);
+}
+
 template<int Exponent> static void check_mis_recurrence_expansion()
 {
   std::mt19937 rng(52171);
