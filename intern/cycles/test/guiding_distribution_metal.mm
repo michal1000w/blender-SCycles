@@ -23,6 +23,7 @@
 #include "kernel/sample/guiding_parallax.h"
 #include "kernel/sample/guiding_position.h"
 #include "kernel/sample/guiding_spherical_gaussian.h"
+#include "kernel/util/compact_indices.h"
 
 using Tree = ccl::GuidingDirectionalTree<5>;
 
@@ -1424,6 +1425,55 @@ static void test_manifold_bsdf_consistency(id<MTLDevice> device,
               maximum_error);
 }
 
+static void test_compact_indices(id<MTLDevice> device,
+                                 id<MTLLibrary> library,
+                                 id<MTLCommandQueue> queue)
+{
+  NSError *error = nil;
+  id<MTLFunction> function = [library newFunctionWithName:@"compact_indices_test"];
+  id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function
+                                                                               error:&error];
+  require(pipeline != nil && pipeline.threadExecutionWidth == 32,
+          "Compaction needs a 32-lane SIMD group");
+  std::mt19937 rng(93241);
+  for (const uint size : {0u, 1u, 31u, 32u, 33u, 257u, 163840u}) {
+    for (uint pattern = 0; pattern < 5; ++pattern) {
+      std::vector<uint> expected(size + 32, 0xdeadbeefu);
+      for (uint i = 0; i < size; ++i) {
+        const bool keep = pattern == 0 || (pattern == 2 && i % 2 == 0) ||
+                          (pattern == 3 && i >= size / 2) || (pattern == 4 && rng() % 7 != 0);
+        expected[16 + i] = keep ? (i * 997u) ^ 0x21345678u : ~0u;
+      }
+      id<MTLBuffer> indices = [device newBufferWithBytes:expected.data()
+                                                  length:expected.size() * sizeof(uint)
+                                                 options:MTLResourceStorageModeShared];
+      id<MTLBuffer> counts = [device newBufferWithLength:32 * sizeof(uint)
+                                                 options:MTLResourceStorageModeShared];
+      const uint expected_count = ccl::compact_indices(expected.data() + 16, size);
+      id<MTLCommandBuffer> command = [queue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:pipeline];
+      [encoder setBuffer:indices offset:0 atIndex:0];
+      [encoder setBuffer:counts offset:0 atIndex:1];
+      [encoder setBytes:&size length:sizeof(size) atIndex:2];
+      [encoder dispatchThreads:MTLSizeMake(32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+      [encoder endEncoding];
+      [command commit];
+      [command waitUntilCompleted];
+      require(command.status == MTLCommandBufferStatusCompleted, "Compaction command failed");
+      require(std::memcmp(indices.contents, expected.data(), expected.size() * sizeof(uint)) == 0,
+              "SIMD compaction changed order, tail, or guard values");
+      for (uint lane = 0; lane < 32; ++lane) {
+        require(static_cast<uint *>(counts.contents)[lane] == expected_count,
+                "SIMD compaction count mismatch");
+      }
+    }
+  }
+  printf(
+      "BDPT_COMPACT_METAL sizes=7 patterns=5 stable_order=passed guards=passed "
+      "all_lane_counts=passed\n");
+}
+
 int main(int argc, char **argv)
 {
   @autoreleasepool {
@@ -1445,6 +1495,7 @@ int main(int argc, char **argv)
                                         error:&error];
       require(sample != nil, "Cannot build sampling pipeline");
       id<MTLCommandQueue> queue = [device newCommandQueue];
+      test_compact_indices(device, library, queue);
       constexpr int samples = 1000000;
       id<MTLBuffer> weights = [device newBufferWithLength:Tree::node_count * sizeof(float)
                                                   options:MTLResourceStorageModeShared];
@@ -1584,7 +1635,22 @@ int main(int argc, char **argv)
       ccl::GuidingGaussianMixture mixture;
       auto *smooth_values = static_cast<float *>(smooth_storage.contents);
       mixture.build(smooth_values, smooth_tree.data());
-      for (uint test = 0; test < 11; ++test) {
+      for (uint test = 0; test < 12; ++test) {
+        if (test == 11) {
+          mixture.build(smooth_values, smooth_tree.data());
+          for (int i = 0; i < ccl::GuidingGaussianMixture::components; ++i) {
+            float *entry = smooth_values + i * ccl::GuidingGaussianMixture::component_stride;
+            for (int j = 0; j < 3; ++j) {
+              entry[5 + j] = 2 * entry[2 + j];
+              entry[14 + j] = 1;
+            }
+            for (int j = 8; j < 14; ++j) {
+              entry[j] = j == 8 || j == 11 || j == 13 ? .03f : 0;
+            }
+            entry[17] = 2;
+            entry[18] = .02f;
+          }
+        }
         if (test == 9) {
           for (int i = 0; i < ccl::GuidingGaussianMixture::components; ++i) {
             float *entry = smooth_values + i * ccl::GuidingGaussianMixture::component_stride;
@@ -1602,9 +1668,9 @@ int main(int argc, char **argv)
                                      test == 10 ? ccl::make_float3(.8f, .7f, .6f) :
                                                   ccl::zero_float3();
         const ccl::GuidingGaussianProduct profile{
-            {{ccl::normalize(ccl::make_float3(1, 2, 3)), test != 8 ? 5.0f : 16384.0f},
+            {{ccl::normalize(ccl::make_float3(1, 2, 3)), test == 8 ? 16384.0f : 5.0f},
              {ccl::normalize(ccl::make_float3(-2, 1, -3)), 30.0f}},
-            {test != 8 ? 0.3f : 1.0f, test != 8 ? 0.7f : 0.0f}};
+            {test == 8 ? 1.0f : 0.3f, test == 8 ? 0.0f : 0.7f}};
         ccl::GuidingSphericalGaussian distribution{ccl::normalize(ccl::make_float3(1, -2, 3)),
                                                    concentrations[std::min(test, 5u)]};
         if (test == 6) {
@@ -1641,6 +1707,19 @@ int main(int argc, char **argv)
                                              distribution.pdf(direction);
           require(std::abs(pdf - host_pdf) <= 0.01f * std::max(pdf, host_pdf),
                   "Gaussian host/device PDF mismatch");
+          if (test >= 7) {
+            const auto other = ccl::normalize(ccl::make_float3(1, -2, 1));
+            const float expected[3] = {
+                mixture.pdf_product(smooth_values, profile, other, position),
+                mixture.pdf(smooth_values, other, position),
+                mixture.pdf(smooth_values, direction, position)};
+            for (int j = 0; j < 3; ++j) {
+              const float actual = output[2 * i + 1][j + 1];
+              require(std::isfinite(actual) &&
+                          std::abs(actual - expected[j]) <= .01f * std::max(expected[j], 1e-7f),
+                      "Fused guiding PDF disagrees with independent CPU query");
+            }
+          }
           mean_cosine += ccl::dot(distribution.axis, direction);
         }
         const double k = distribution.concentration;
