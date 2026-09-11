@@ -26,6 +26,7 @@
 #  include "kernel/integrator/mnee.h"
 #endif
 #include "kernel/sample/lcg.h"
+#include "kernel/util/compact_indices.h"
 #include "util/atomic.h"
 
 CCL_NAMESPACE_BEGIN
@@ -924,9 +925,13 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(KernelGlobals kg,
                        lcg_step_float(reservoir_rng) < 1.0f / float(*selection_count);
 
   if (*selection_count == 1u) {
-    *reservoir_slot = atomic_fetch_and_add_uint32(kernel_integrator_state.bdpt_vertex_count, 1);
+    /* Each path owns exactly one reservoir. Its path-indexed slot avoids a
+     * contended allocation counter; stable ordering later removes empty paths. */
+    *reservoir_slot = light_path_index;
   }
-  if (*reservoir_slot >= kernel_integrator_state.bdpt_vertex_capacity) {
+  if (*reservoir_slot >=
+      kernel_integrator_state.bdpt_vertex_capacity * kernel_integrator_state.bdpt_cache_count)
+  {
     return;
   }
 
@@ -1679,16 +1684,20 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
  * conventions as camera paths. */
 ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                                IntegratorState state,
-                                               const uint light_path_index,
-                                               const uint iteration,
+                                               const uint storage_path_index,
+                                               const uint start_iteration,
                                                const uint batch_samples)
 {
-  kernel_integrator_state.bdpt_vertex_indices[light_path_index] = ~0u;
+  const uint paths_per_cache = kernel_integrator_state.bdpt_light_path_count;
+  const uint cache = storage_path_index / paths_per_cache;
+  const uint light_path_index = storage_path_index % paths_per_cache;
+  const uint iteration = start_iteration + cache;
+  kernel_integrator_state.bdpt_vertex_indices[storage_path_index] = ~0u;
   if (!bdpt_camera_supported()) {
     return;
   }
-  uint rng = lcg_init(hash_uint3(
-      light_path_index, iteration, uint(kernel_data.integrator.seed) ^ 0x62647074u));
+  uint rng = lcg_init(
+      hash_uint3(light_path_index, iteration, uint(kernel_data.integrator.seed) ^ 0x62647074u));
   photon_state_init(state, rng, iteration);
 #ifdef __SPECTRAL__
   /* Keep one immutable wavelength sample for the complete light subpath. Cached vertices must
@@ -1829,7 +1838,8 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                           light_wavelength_rand,
                                           &reservoir_rng,
                                           &reservoir_slot,
-                                          &selection_count, light_path_index);
+                                          &selection_count,
+                                          storage_path_index);
 
         return;
       }
@@ -1920,7 +1930,8 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                         light_wavelength_rand,
                                         &reservoir_rng,
                                         &reservoir_slot,
-                                        &selection_count, light_path_index);
+                                        &selection_count,
+                                        storage_path_index);
     }
 
     if (float(bounce) >= emitter_max_bounces) {
@@ -2128,42 +2139,52 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
        * survival compensation belongs in throughput, preserving a common MIS partition. */
     }
   }
-
 }
 
 /* Sensor connections are deliberately isolated from light generation. The manifold solver has a
  * large live working set; keeping it in a separate Metal kernel avoids inflating compile time and
  * register pressure for every emitted light path. The compact cache already contains one
  * reservoir-selected connectible vertex per path, so it is also an unbiased sensor reservoir. */
-ccl_device void integrator_bdpt_cache_order(const uint num_light_paths)
+ccl_device void integrator_bdpt_cache_order(const uint num_light_paths,
+                                            const uint lane = 0,
+                                            const uint width = 32,
+                                            const uint cache = 0)
 {
-  uint count = 0;
-  for (uint path = 0; path < num_light_paths; ++path) {
-    const uint slot = kernel_integrator_state.bdpt_vertex_indices[path];
-    if (slot != ~0u) {
-      kernel_integrator_state.bdpt_vertex_indices[count++] = slot;
-    }
+  const uint count = compact_indices(kernel_integrator_state.bdpt_vertex_indices +
+                                         cache * kernel_integrator_state.bdpt_vertex_capacity,
+                                     kernel_integrator_state.bdpt_light_path_count,
+                                     lane,
+                                     width);
+  if (lane == 0) {
+    kernel_integrator_state.bdpt_vertex_count[cache] = count;
   }
-  *kernel_integrator_state.bdpt_vertex_count = count;
 }
 
 ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                                IntegratorState state,
-                                               const uint vertex_index,
-                                               const uint iteration,
+                                               const uint dispatch_index,
+                                               const uint start_iteration,
                                                const uint batch_samples,
                                                ccl_global float *render_buffer)
 {
   if (!kernel_integrator_state.bdpt_vertex_count || !kernel_integrator_state.bdpt_vertices) {
     return;
   }
-  const uint vertex_count = min(*kernel_integrator_state.bdpt_vertex_count,
+  const uint paths_per_cache = kernel_integrator_state.bdpt_light_path_count;
+  const uint cache = dispatch_index / paths_per_cache;
+  const uint vertex_index = dispatch_index % paths_per_cache;
+  const uint iteration = start_iteration + cache;
+  const uint samples_per_cache = batch_samples / kernel_integrator_state.bdpt_cache_count;
+  const uint vertex_count = min(kernel_integrator_state.bdpt_vertex_count[cache],
                                 kernel_integrator_state.bdpt_vertex_capacity);
   if (vertex_index >= vertex_count) {
     return;
   }
 
-  const uint storage_index = kernel_integrator_state.bdpt_vertex_indices[vertex_index];
+  const uint storage_index =
+      kernel_integrator_state
+          .bdpt_vertex_indices[cache * kernel_integrator_state.bdpt_vertex_capacity +
+                               vertex_index];
   KernelBDPTVertex light_vertex = kernel_integrator_state.bdpt_vertices[storage_index];
   if (light_vertex.sensor_complete) {
     return;
@@ -2213,7 +2234,7 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                       &light_sd,
                                       selection_count,
                                       iteration,
-                                      batch_samples,
+                                      samples_per_cache,
                                       render_buffer,
                                       rand_lens);
   if (light_sd.runtime_flag & SR_CACHE_MISS) {

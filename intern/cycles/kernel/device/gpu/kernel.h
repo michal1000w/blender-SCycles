@@ -156,6 +156,15 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 ccl_gpu_kernel_postfix
 
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
+    ccl_gpu_kernel_signature(guiding_fit_reduce, const uint work_size)
+{
+  if (ccl_gpu_global_id_x() < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_fit_reduce(ccl_gpu_global_id_x()));
+  }
+}
+ccl_gpu_kernel_postfix
+
+ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(guiding_flush_history, const uint work_size)
 {
   if (ccl_gpu_global_id_x() < work_size) {
@@ -202,9 +211,18 @@ ccl_gpu_kernel_postfix
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_bdpt_cache_order, const int num_light_paths)
 {
+#      ifdef __KERNEL_METAL__
+  const uint lane = ccl_gpu_global_id_x() % ccl_gpu_warp_size;
+  const uint cache = ccl_gpu_global_id_x() / ccl_gpu_warp_size;
+  if (cache < kernel_integrator_state.bdpt_cache_count) {
+    ccl_gpu_kernel_call(
+        integrator_bdpt_cache_order(uint(num_light_paths), lane, ccl_gpu_warp_size, cache));
+  }
+#      else
   if (ccl_gpu_global_id_x() == 0) {
     ccl_gpu_kernel_call(integrator_bdpt_cache_order(uint(num_light_paths)));
   }
+#      endif
 }
 ccl_gpu_kernel_postfix
 

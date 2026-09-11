@@ -307,8 +307,28 @@ TEST(GuidingSphericalGaussian, FittedProductMixture)
   double z = 0.0, z2 = 0.0;
   for (int i = 0; i < samples; ++i) {
     float pdf;
-    const float3 direction = mixture.sample_product(
-        storage.data(), profile, make_float2(random_open(rng), random_open(rng)), &pdf);
+    const float2 random = make_float2(random_open(rng), random_open(rng));
+    const float3 direction = mixture.sample_product(storage.data(), profile, random, &pdf);
+    if (i < 1024) {
+      const float3 other = directional.square_to_direction(random);
+      float fused_pdf, other_pdf, other_incident, incident;
+      const float3 fused = mixture.sample_product(storage.data(),
+                                                  profile,
+                                                  random,
+                                                  &fused_pdf,
+                                                  zero_float3(),
+                                                  &other,
+                                                  &other_pdf,
+                                                  &other_incident,
+                                                  &incident);
+      EXPECT_EQ(direction.x, fused.x);
+      EXPECT_EQ(direction.y, fused.y);
+      EXPECT_EQ(direction.z, fused.z);
+      EXPECT_EQ(pdf, fused_pdf);
+      EXPECT_NEAR(other_pdf, mixture.pdf_product(storage.data(), profile, other), 1e-6f);
+      EXPECT_NEAR(other_incident, mixture.pdf(storage.data(), other), 1e-6f);
+      EXPECT_NEAR(incident, mixture.pdf(storage.data(), direction), 1e-6f);
+    }
     ASSERT_TRUE(isfinite_safe(direction));
     ASSERT_GT(pdf, 0.0f);
     EXPECT_NEAR(len(direction), 1.0f, 2e-6f);
@@ -317,6 +337,47 @@ TEST(GuidingSphericalGaussian, FittedProductMixture)
   }
   const double variance = z2 / samples - sqr(z / samples);
   EXPECT_NEAR(z / samples, expected_z * cell_area, 6.0 * std::sqrt(variance / samples));
+}
+
+TEST(GuidingSphericalGaussian, ProductDensityIndependentLobeSum)
+{
+  std::array<float, GuidingGaussianMixture::storage_size> storage{};
+  GuidingGaussianMixture mixture;
+  std::mt19937 rng(77129);
+  for (const float concentration : {0.0f, 1.0f, 32.0f, 512.0f, 16384.0f}) {
+    for (int i = 0; i < GuidingGaussianMixture::components; ++i) {
+      float *entry = storage.data() + i * GuidingGaussianMixture::component_stride;
+      const float3 axis = normalize(make_float3(float(i % 3) - 1, float(i % 5) - 2, 3));
+      entry[0] = 1.0f / GuidingGaussianMixture::components;
+      entry[1] = concentration;
+      entry[2] = axis.x;
+      entry[3] = axis.y;
+      entry[4] = axis.z;
+    }
+    const GuidingGaussianProduct profile{{{normalize(make_float3(1, 2, 3)), concentration},
+                                          {normalize(make_float3(-2, 1, 3)), 5.0f}},
+                                         {.3f, .7f}};
+    for (int sample = 0; sample < 2048; ++sample) {
+      float pdf;
+      const float3 direction = mixture.sample_product(
+          storage.data(), profile, make_float2(random_open(rng), random_open(rng)), &pdf);
+      float mass = 0, density = 0;
+      for (int i = 0; i < GuidingGaussianMixture::components; ++i) {
+        const auto illumination = mixture.component(storage.data(), i);
+        for (int j = 0; j < 2; ++j) {
+          float integral;
+          const auto product = illumination.product(profile.lobes[j], &integral);
+          const float weight = storage[i * GuidingGaussianMixture::component_stride] *
+                               profile.weights[j] * integral;
+          mass += weight;
+          density += weight * product.pdf(direction);
+        }
+      }
+      const float reference = mass > 0 ? .95f * density / mass + .05f * M_1_4PI_F : M_1_4PI_F;
+      ASSERT_NEAR(pdf, reference, 2e-5f * max(reference, 1.0f))
+          << "concentration=" << concentration << " sample=" << sample;
+    }
+  }
 }
 
 TEST(GuidingDistribution, EqualAreaMapping)
@@ -696,6 +757,56 @@ TEST(GuidingField, RefinementRespectsMemoryBudgetAndAncestry)
   EXPECT_EQ(nodes[2].split, 2.0f);
   EXPECT_EQ(nodes[3].axis, 1u);
   EXPECT_EQ(nodes[3].split, 0.0f);
+}
+
+TEST(GuidingField, CooperativeRefinementPreservesEveryInheritedValue)
+{
+  constexpr uint capacity = 3;
+  std::array<GuidingSpatialNode, capacity> nodes{};
+  std::array<GuidingSpatialNode, capacity> cooperative_nodes{};
+  std::vector<float> accumulation(capacity * GUIDING_FIELD_TYPES *
+                                  GuidingField::accumulation_size);
+  std::vector<float> sampling(capacity * GUIDING_FIELD_TYPES * GuidingField::sampling_size);
+  for (size_t i = 0; i < accumulation.size(); ++i) {
+    accumulation[i] = float(i % 137) * 0.125f;
+  }
+  for (size_t i = 0; i < sampling.size(); ++i) {
+    sampling[i] = float(i % 53) * 0.0625f;
+  }
+  auto cooperative_accumulation = accumulation;
+  auto cooperative_sampling = sampling;
+  std::array<uint, 2> counts = {1, 1}, cooperative_counts = counts;
+  nodes[0].visits = cooperative_nodes[0].visits = 1024;
+  GuidingField scalar{nodes.data(),
+                      accumulation.data(),
+                      sampling.data(),
+                      counts.data(),
+                      capacity,
+                      make_float3(-1),
+                      make_float3(1)};
+  GuidingField cooperative{cooperative_nodes.data(),
+                           cooperative_accumulation.data(),
+                           cooperative_sampling.data(),
+                           cooperative_counts.data(),
+                           capacity,
+                           make_float3(-1),
+                           make_float3(1)};
+  scalar.refine(0, 64);
+  const uint first = cooperative.refine_allocate(0, 64);
+  ASSERT_EQ(first, 1u);
+  for (uint lane = 0; lane < 32; ++lane) {
+    cooperative.refine_copy(0, first, lane, 32);
+  }
+  EXPECT_EQ(accumulation, cooperative_accumulation);
+  EXPECT_EQ(sampling, cooperative_sampling);
+  EXPECT_EQ(counts, cooperative_counts);
+  for (uint i = 0; i < capacity; ++i) {
+    EXPECT_EQ(nodes[i].children, cooperative_nodes[i].children);
+    EXPECT_EQ(nodes[i].parent, cooperative_nodes[i].parent);
+    EXPECT_EQ(nodes[i].axis, cooperative_nodes[i].axis);
+    EXPECT_EQ(nodes[i].split, cooperative_nodes[i].split);
+    EXPECT_EQ(nodes[i].visits, cooperative_nodes[i].visits);
+  }
 }
 
 TEST(GuidingDistribution, SpatialSplitUsesObservedSurfaceSpread)

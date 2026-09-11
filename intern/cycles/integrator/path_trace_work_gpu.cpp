@@ -22,6 +22,7 @@
 #include "kernel/device/gpu/block_sizes.h"
 #include "kernel/sample/guiding_field.h"
 #include "kernel/sample/guiding_mixture_statistics.h"
+#include "kernel/sample/guiding_observation_range.h"
 #include "kernel/types.h"
 
 CCL_NAMESPACE_BEGIN
@@ -139,6 +140,8 @@ PathTraceWorkGPU::PathTraceWorkGPU(Device *device,
       guiding_partition_(device, "guiding_partition", MEM_READ_WRITE),
       guiding_indices_(device, "guiding_indices"),
       guiding_fit_(device, "guiding_working_fit"),
+      guiding_fit_partials_(device, "guiding_partial_fits"),
+      guiding_fit_tasks_(device, "guiding_fit_tasks"),
       guiding_fit_counts_(device, "guiding_fit_counts", MEM_READ_WRITE),
       display_rgba_half_(device, "display buffer half", MEM_READ_WRITE),
       max_num_paths_(0),
@@ -383,6 +386,11 @@ void PathTraceWorkGPU::alloc_gpu_guiding()
     guiding_partition_.free();
     guiding_indices_.free();
     guiding_fit_.free();
+    guiding_fit_partials_.free();
+    guiding_fit_tasks_.free();
+    integrator_state_gpu_.guiding_fit_partials = nullptr;
+    integrator_state_gpu_.guiding_fit_tasks = nullptr;
+    integrator_state_gpu_.guiding_fit_task_capacity = 0;
     guiding_fit_counts_.free();
     integrator_state_gpu_.guiding_partition = nullptr;
     integrator_state_gpu_.guiding_indices = nullptr;
@@ -462,7 +470,27 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
   if (integrator_state_gpu_.guiding_training) {
     const size_t budget = size_t(device_scene_->data.integrator.guiding_gpu_history_memory_mb) *
                           1024 * 1024;
-    const size_t capacity = (budget - sizeof(uint)) / (sizeof(GuidingHistoryRecord) + sizeof(uint));
+    /* Large fields are fitted in independent bounded chunks. Reserve their scratch
+     * space inside the history budget, without reducing spatial field capacity. */
+    const size_t fields = size_t(integrator_state_gpu_.guiding_capacity) * GUIDING_FIELD_TYPES;
+    const size_t task_bytes = GuidingMixtureStatistics::working_size * sizeof(float) +
+                              2 * sizeof(uint);
+    const size_t chunk_size = GuidingObservationTasks::chunk_size;
+    const size_t fixed_bytes = sizeof(uint) * (fields + 2);
+    const size_t capacity = (budget - fixed_bytes) /
+                            (sizeof(GuidingHistoryRecord) + sizeof(uint) +
+                             (2 * task_bytes + chunk_size - 1) / chunk_size);
+    const size_t tasks = 2 * (capacity / chunk_size);
+    if (guiding_fit_partials_.memory_size() !=
+            tasks * GuidingMixtureStatistics::working_size * sizeof(float) ||
+        guiding_fit_tasks_.memory_size() != (fields + 2 * tasks + 1) * sizeof(uint))
+    {
+      guiding_fit_partials_.alloc_to_device(tasks * GuidingMixtureStatistics::working_size);
+      guiding_fit_tasks_.alloc_to_device(fields + 2 * tasks + 1);
+    }
+    integrator_state_gpu_.guiding_fit_partials = (float *)guiding_fit_partials_.device_pointer;
+    integrator_state_gpu_.guiding_fit_tasks = (uint *)guiding_fit_tasks_.device_pointer;
+    integrator_state_gpu_.guiding_fit_task_capacity = uint(tasks);
     if (guiding_history_.memory_size() != capacity * sizeof(GuidingHistoryRecord)) {
       guiding_history_.alloc_to_device(capacity);
       guiding_indices_.alloc_to_device(capacity);
@@ -478,6 +506,11 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
     integrator_state_gpu_.guiding_indices = (uint *)guiding_indices_.device_pointer;
   }
   else {
+    guiding_fit_partials_.free();
+    guiding_fit_tasks_.free();
+    integrator_state_gpu_.guiding_fit_partials = nullptr;
+    integrator_state_gpu_.guiding_fit_tasks = nullptr;
+    integrator_state_gpu_.guiding_fit_task_capacity = 0;
     guiding_indices_.free();
     integrator_state_gpu_.guiding_indices = nullptr;
     guiding_history_.free();
@@ -541,7 +574,9 @@ void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
     if (refinement_round != 0) {
       queue_->enqueue(DEVICE_KERNEL_GUIDING_BEGIN_UPDATE, one, DeviceKernelArguments(&one));
     }
-    queue_->enqueue(DEVICE_KERNEL_GUIDING_REFINE, capacity, DeviceKernelArguments(&capacity));
+    const int refine_threads = capacity * 32;
+    queue_->enqueue(
+        DEVICE_KERNEL_GUIDING_REFINE, refine_threads, DeviceKernelArguments(&refine_threads));
   }
   queue_->zero_to_device(guiding_fit_);
   queue_->zero_to_device(guiding_fit_counts_);
@@ -564,6 +599,9 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
     integrator_state_gpu_.bdpt_vertex_indices = nullptr;
     integrator_state_gpu_.bdpt_vertex_count = nullptr;
     integrator_state_gpu_.bdpt_vertex_capacity = 0;
+    integrator_state_gpu_.bdpt_cache_capacity = 0;
+    integrator_state_gpu_.bdpt_cache_count = 0;
+    integrator_state_gpu_.bdpt_cache_start_sample = 0;
     integrator_state_gpu_.bdpt_light_path_count = 0;
     integrator_state_gpu_.bdpt_light_path_sample_ratio = 0.0f;
     return;
@@ -583,14 +621,26 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
   /* Each emitted light path reservoir-selects one potential surface bounce. The connection
    * estimator carries the selection support explicitly, keeping memory linear in path count. */
   const uint capacity = light_paths;
+  uint cache_capacity = 1;
+  if (device_->info.type == DEVICE_METAL && capacity > 0 &&
+      device_scene_->data.integrator.bdpt_update_samples == 1)
+  {
+    /* Keep an override for controlled single-cache comparisons. Normal renders
+     * batch independent caches within the existing path-state and memory bounds. */
+    const char *value = std::getenv("CYCLES_METAL_BDPT_BATCH_SIZE");
+    const uint requested = value ? uint(clamp(std::atoi(value), 1, 4)) : 4u;
+    const uint64_t cache_bytes = uint64_t(capacity) * (sizeof(KernelBDPTVertex) + sizeof(uint));
+    cache_capacity = min(requested, uint(max_num_paths_) / capacity);
+    cache_capacity = max(1u, min(cache_capacity, uint((256ull * 1024 * 1024) / cache_bytes)));
+  }
 
   LOG_INFO << "BDPT light cache: " << capacity << " vertices, light tree "
            << (device_scene_->data.integrator.use_light_tree ? "enabled" : "disabled");
-  bdpt_vertices_.alloc_to_device(capacity, false);
-  bdpt_vertex_indices_.alloc_to_device(capacity, false);
-  if (bdpt_vertex_count_.size() != 1) {
+  bdpt_vertices_.alloc_to_device(size_t(capacity) * cache_capacity, false);
+  bdpt_vertex_indices_.alloc_to_device(size_t(capacity) * cache_capacity, false);
+  if (bdpt_vertex_count_.size() != cache_capacity) {
     bdpt_vertex_count_.free();
-    bdpt_vertex_count_.alloc(1);
+    bdpt_vertex_count_.alloc(cache_capacity);
     bdpt_vertex_count_.zero_to_device();
   }
 
@@ -598,6 +648,9 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
   integrator_state_gpu_.bdpt_vertex_indices = (uint *)bdpt_vertex_indices_.device_pointer;
   integrator_state_gpu_.bdpt_vertex_count = (uint *)bdpt_vertex_count_.device_pointer;
   integrator_state_gpu_.bdpt_vertex_capacity = capacity;
+  integrator_state_gpu_.bdpt_cache_capacity = cache_capacity;
+  integrator_state_gpu_.bdpt_cache_count = 1;
+  integrator_state_gpu_.bdpt_cache_start_sample = 0;
   integrator_state_gpu_.bdpt_light_path_count = light_paths;
   integrator_state_gpu_.bdpt_light_path_sample_ratio = float(light_paths);
 }
@@ -661,6 +714,10 @@ bool PathTraceWorkGPU::update_queue_counter_and_cache()
    * number of queued kernels, we could try asynchronously updating the image cache
    * while continuing to work on the majority of states? */
   IntegratorQueueCounter *queue_counter = integrator_queue_counter_.data();
+  if (queue_counter->bdpt_error) {
+    device_->set_error("BDPT camera sample is outside its independent light-cache batch");
+    return false;
+  }
   if (queue_counter->cache_miss) {
     LOG_DEBUG << "Image cache miss in GPU kernel, updating to load requested tiles";
     device_->image_load_requested_gpu(*queue_);
@@ -738,7 +795,16 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
                                     training_limit - guiding_trained_samples_);
       }
     }
-    const int batch_samples = min(min(map_update_samples, guiding_batch_samples),
+    /* Each original sample retains its own light cache. Batching changes only
+     * concurrent work, never cache reuse, emitted paths, or MIS normalization.
+     * Keep training and adaptive sample scheduling on their original boundaries. */
+    int light_batch_samples = map_update_samples;
+    if (use_bidirectional_path_tracing(device_scene_) && !adaptive_sampling &&
+        sample_offset == 0 && !integrator_state_gpu_.guiding_training && update_samples == 1)
+    {
+      light_batch_samples *= int(integrator_state_gpu_.bdpt_cache_capacity);
+    }
+    const int batch_samples = min(min(light_batch_samples, guiding_batch_samples),
                                   samples_num - samples_done);
     const int batch_start_sample = start_sample + samples_done;
     /* A work tile must fit a fresh group, not only the global state array. Otherwise
@@ -974,16 +1040,22 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
   /* Render schedulers divide the same sample range into different work-call sizes. Emit the
    * proportional share of the per-update budget so light paths per camera sample stay constant. */
   const uint update_samples = uint(max(device_scene_->data.integrator.bdpt_update_samples, 1));
+  const uint cache_count = update_samples == 1 ? uint(batch_samples) : 1u;
+  assert(cache_count <= integrator_state_gpu_.bdpt_cache_capacity);
+  const uint samples_per_cache = uint(batch_samples) / cache_count;
   const uint batch_light_paths = max(
       1u,
-      uint((uint64_t(integrator_state_gpu_.bdpt_vertex_capacity) * uint64_t(batch_samples) +
+      uint((uint64_t(integrator_state_gpu_.bdpt_vertex_capacity) * uint64_t(samples_per_cache) +
             update_samples - 1u) /
            update_samples));
-  const int num_light_paths = int(
+  const uint paths_per_cache = uint(
       min(integrator_state_gpu_.bdpt_vertex_capacity, batch_light_paths));
-  integrator_state_gpu_.bdpt_light_path_count = uint(num_light_paths);
-  integrator_state_gpu_.bdpt_light_path_sample_ratio = float(num_light_paths) /
-                                                       float(max(batch_samples, 1));
+  const int num_light_paths = int(paths_per_cache * cache_count);
+  integrator_state_gpu_.bdpt_cache_count = cache_count;
+  integrator_state_gpu_.bdpt_cache_start_sample = uint(iteration);
+  integrator_state_gpu_.bdpt_light_path_count = paths_per_cache;
+  integrator_state_gpu_.bdpt_light_path_sample_ratio = float(paths_per_cache) /
+                                                       float(max(samples_per_cache, 1u));
   integrator_state_gpu_.bdpt_buffer_full_x = effective_buffer_params_.full_x;
   integrator_state_gpu_.bdpt_buffer_full_y = effective_buffer_params_.full_y;
   integrator_state_gpu_.bdpt_buffer_width = effective_buffer_params_.width;
@@ -1020,40 +1092,45 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
   if (device_->have_error()) {
     return;
   }
-  const int one = 1;
-  queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER, one,
-                   DeviceKernelArguments(&num_light_paths));
+  const int order_threads = device_->info.type == DEVICE_METAL ? int(64 * cache_count) : 1;
+  queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER,
+                  order_threads,
+                  DeviceKernelArguments(&num_light_paths));
   /* Optional diagnostic snapshot before sensor work. Omit the completion marker
    * and tail padding so record comparisons contain only generated vertex data. */
   if (const char *prefix = std::getenv("CYCLES_BDPT_CACHE_DUMP")) {
     queue_->copy_from_device(bdpt_vertex_count_);
     if (queue_->synchronize()) {
-      const uint count = min(bdpt_vertex_count_.data()[0],
-                             integrator_state_gpu_.bdpt_vertex_capacity);
       vector<uint8_t> staging;
       const auto *vertices = static_cast<const KernelBDPTVertex *>(
           queue_->copy_from_device_synchronized(bdpt_vertices_, staging));
       vector<uint8_t> index_staging;
       const auto *order = static_cast<const uint *>(
           queue_->copy_from_device_synchronized(bdpt_vertex_indices_, index_staging));
-      const string path = string(prefix) + "_" + std::to_string(iteration) + ".vertices";
-      std::ofstream file(path, std::ios::binary);
       constexpr size_t bytes = offsetof(KernelBDPTVertex, sensor_complete);
-      if (vertices && order && file) {
-        for (uint i = 0; i < count; ++i) {
-          if (order[i] >= integrator_state_gpu_.bdpt_vertex_capacity) {
-            file.setstate(std::ios::failbit);
-            break;
+      for (uint cache = 0; cache < cache_count; ++cache) {
+        const uint count = min(bdpt_vertex_count_.data()[cache],
+                               integrator_state_gpu_.bdpt_vertex_capacity);
+        const uint offset = cache * integrator_state_gpu_.bdpt_vertex_capacity;
+        const string path = string(prefix) + "_" + std::to_string(iteration + cache) + ".vertices";
+        std::ofstream file(path, std::ios::binary);
+        if (vertices && order && file) {
+          for (uint i = 0; i < count; ++i) {
+            const uint slot = order[offset + i];
+            if (slot < offset || slot >= offset + integrator_state_gpu_.bdpt_vertex_capacity) {
+              file.setstate(std::ios::failbit);
+              break;
+            }
+            file.write(reinterpret_cast<const char *>(vertices + slot), bytes);
           }
-          file.write(reinterpret_cast<const char *>(vertices + order[i]), bytes);
         }
-      }
-      if (!vertices || !order || !file) {
-        LOG_ERROR << "Unable to write BDPT cache snapshot " << path;
-      }
-      else {
-        LOG_INFO << "BDPT cache snapshot: path=" << path << " vertices=" << count
-                 << " record_bytes=" << bytes;
+        if (!vertices || !order || !file) {
+          LOG_ERROR << "Unable to write BDPT cache snapshot " << path;
+        }
+        else {
+          LOG_INFO << "BDPT cache snapshot: path=" << path << " vertices=" << count
+                   << " record_bytes=" << bytes;
+        }
       }
     }
   }
@@ -1080,9 +1157,13 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
   }
   queue_->synchronize();
   if (diagnose_bdpt) {
+    uint cached = 0;
+    for (uint cache = 0; cache < cache_count; ++cache) {
+      cached += bdpt_vertex_count_.data()[cache];
+    }
     LOG_INFO << "BDPT diagnostics: sample=" << iteration << " emitted=" << num_light_paths
-             << " camera_samples=" << batch_samples
-             << " cached=" << bdpt_vertex_count_.data()[0]
+             << " camera_samples=" << batch_samples << " cached=" << cached
+             << " caches=" << cache_count << " per_cache_emitted=" << paths_per_cache
              << " sensor_shadows=" << integrator_next_shadow_path_index_.data()[0];
   }
 }
@@ -1501,8 +1582,16 @@ bool PathTraceWorkGPU::enqueue_work_tiles(bool &finished)
         const int one = 1;
         queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_PREFIX, one, DeviceKernelArguments(&one));
         queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_SCATTER, records, DeviceKernelArguments(&records));
-        const int fit_threads = int(integrator_state_gpu_.guiding_capacity) * GUIDING_FIELD_TYPES * 32;
+        const int fit_threads = (int(integrator_state_gpu_.guiding_capacity) *
+                                     GUIDING_FIELD_TYPES +
+                                 int(integrator_state_gpu_.guiding_fit_task_capacity)) *
+                                32;
         queue_->enqueue(DEVICE_KERNEL_GUIDING_FIT, fit_threads, DeviceKernelArguments(&fit_threads));
+        const int reduce_threads = int(integrator_state_gpu_.guiding_capacity) *
+                                   GUIDING_FIELD_TYPES * 32;
+        queue_->enqueue(DEVICE_KERNEL_GUIDING_FIT_REDUCE,
+                        reduce_threads,
+                        DeviceKernelArguments(&reduce_threads));
         queue_->copy_from_device(guiding_partition_);
         if (!queue_->synchronize()) {
           return false;

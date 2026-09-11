@@ -255,21 +255,21 @@ struct GuidingField {
 
   /* At most one invocation per pre-existing node. Child initialization completes before the
    * separate publication kernel; neither new children nor queries execute in this launch. */
-  ccl_device_inline_method void refine(const uint index, const uint split_threshold) const
+  ccl_device_inline_method uint refine_allocate(const uint index, const uint split_threshold) const
   {
     if (index >= counts[1]) {
-      return;
+      return 0;
     }
     ccl_global GuidingSpatialNode *node = &nodes[index];
     if (node->children != 0 || node->visits < split_threshold || node->depth >= max_depth) {
-      return;
+      return 0;
     }
     /* Failed reservations are rolled back. Only this kernel observes the transient count;
      * publication runs after all reservations complete. Failed indices never access storage. */
     const uint first = atomic_fetch_and_add_uint32(&counts[0], 2);
     if (first + 2 > capacity) {
       atomic_fetch_and_add_uint32(&counts[0], -2);
-      return;
+      return 0;
     }
 
     /* Recover this node's bounds from the immutable ancestral splits. Other leaves can refine
@@ -301,11 +301,24 @@ struct GuidingField {
       nodes[child].split = 0.0f;
       nodes[child].depth = node->depth + 1;
       nodes[child].visits = node->visits / 2;
-      for (uint i = 0; i < GUIDING_FIELD_TYPES * sampling_size; ++i) {
+    }
+    node->children = first;
+    return first;
+  }
+
+  /* Disjoint lanes can copy the inherited distributions cooperatively. New children
+   * are only consumed by a subsequent dispatch, after every copy has completed. */
+  ccl_device_inline_method void refine_copy(const uint index,
+                                            const uint first,
+                                            const uint lane = 0,
+                                            const uint width = 1) const
+  {
+    for (uint child = first; child < first + 2; ++child) {
+      for (uint i = lane; i < GUIDING_FIELD_TYPES * sampling_size; i += width) {
         sampling[child * GUIDING_FIELD_TYPES * sampling_size + i] =
             sampling[index * GUIDING_FIELD_TYPES * sampling_size + i];
       }
-      for (uint i = 0; i < GUIDING_FIELD_TYPES * accumulation_size; ++i) {
+      for (uint i = lane; i < GUIDING_FIELD_TYPES * accumulation_size; i += width) {
         const uint offset = i % accumulation_size;
         const bool squared_weight = squared_moment(offset);
         accumulation[child * GUIDING_FIELD_TYPES * accumulation_size + i] =
@@ -313,7 +326,14 @@ struct GuidingField {
             accumulation[index * GUIDING_FIELD_TYPES * accumulation_size + i];
       }
     }
-    node->children = first;
+  }
+
+  ccl_device_inline_method void refine(const uint index, const uint split_threshold) const
+  {
+    const uint first = refine_allocate(index, split_threshold);
+    if (first != 0) {
+      refine_copy(index, first);
+    }
   }
 
   /* One invocation per node/type, in a kernel after refinement. */

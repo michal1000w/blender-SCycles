@@ -79,6 +79,41 @@ struct GuidingObservationPartition {
   }
 };
 
+/* Only large fields need scratch fits. Each such field has more than one full
+ * chunk of records, bounding task count by twice floor(history_capacity / chunk_size).
+ * Storage contains one first-task index per field, pairs (field, local offset),
+ * and the total task count. Small fields are fitted directly. */
+struct GuidingObservationTasks {
+  ccl_static_constexpr uint chunk_size = 4096;
+  ccl_global uint *storage;
+  uint distributions;
+  uint capacity;
+
+  ccl_device_inline_method bool build(const ccl_global uint *counts) const
+  {
+    uint total = 0;
+    for (uint field = 0; field < distributions; ++field) {
+      storage[field] = total;
+      const uint count = counts[field];
+      if (count <= chunk_size) {
+        continue;
+      }
+      const uint chunks = 1 + (count - 1) / chunk_size;
+      if (chunks > capacity - total) {
+        storage[distributions + 2 * capacity] = 0;
+        return false;
+      }
+      for (uint chunk = 0; chunk < chunks; ++chunk) {
+        storage[distributions + 2 * total] = field;
+        storage[distributions + 2 * total + 1] = chunk * chunk_size;
+        ++total;
+      }
+    }
+    storage[distributions + 2 * capacity] = total;
+    return true;
+  }
+};
+
 /* Indexed view consumed directly by directional fitting and source collection.
  * Source distances are converted to the isotropic metric at read time. */
 struct GuidingHistoryObservationRange {

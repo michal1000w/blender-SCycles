@@ -542,7 +542,15 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
     return false;
   }
 
-  const uint vertex_count = min(*kernel_integrator_state.bdpt_vertex_count,
+  const uint cache = kernel_integrator_state.bdpt_cache_count > 1 ?
+                         uint(INTEGRATOR_STATE(state, path, sample)) -
+                             kernel_integrator_state.bdpt_cache_start_sample :
+                         0u;
+  if (cache >= kernel_integrator_state.bdpt_cache_count) {
+    atomic_fetch_and_or_uint32(&kernel_integrator_state.queue_counter->bdpt_error, 1u);
+    return false;
+  }
+  const uint vertex_count = min(kernel_integrator_state.bdpt_vertex_count[cache],
                                 kernel_integrator_state.bdpt_vertex_capacity);
   if (vertex_count == 0 || kernel_integrator_state.bdpt_light_path_count == 0) {
     return false;
@@ -554,7 +562,9 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
                                            bounce ^ 0x62647074u);
   const uint vertex_index = min(uint(select * float(vertex_count)), vertex_count - 1u);
   const ccl_global KernelBDPTVertex *light_vertex =
-      &kernel_integrator_state.bdpt_vertices[kernel_integrator_state.bdpt_vertex_indices[vertex_index]];
+      &kernel_integrator_state.bdpt_vertices
+           [kernel_integrator_state.bdpt_vertex_indices
+                [cache * kernel_integrator_state.bdpt_vertex_capacity + vertex_index]];
   const uint light_path_length = light_vertex->path_length & 0xffu;
   const uint light_selection_count = (light_vertex->path_length >> 8u) & 0xfffu;
   const uint transparent_bounce = INTEGRATOR_STATE(state, path, transparent_bounce) +

@@ -94,7 +94,9 @@ def main():
             bpy.ops.render.render(write_still=True)
             image = oiio.ImageInput.open(scene.render.filepath)
             assert image is not None, name
-            pixels = np.asarray(image.read_image(format=oiio.FLOAT))[..., :3]
+            channels = list(image.spec().channelnames)
+            rgb_indices = [channels.index(channel) for channel in ('R', 'G', 'B')]
+            pixels = np.asarray(image.read_image(format=oiio.FLOAT))[..., rgb_indices]
             image.close()
             assert np.isfinite(pixels).all() and float(pixels.max()) > 0, name
             images.append(pixels)

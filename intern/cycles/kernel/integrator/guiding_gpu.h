@@ -9,6 +9,7 @@
 #include "kernel/sample/guiding_field.h"
 #include "kernel/sample/guiding_history.h"
 #include "kernel/sample/guiding_mixture_conditional.h"
+#include "kernel/sample/guiding_mixture_fit_metal.h"
 #include "kernel/sample/guiding_observation_range.h"
 #include "kernel/util/colorspace.h"
 #include "util/hash.h"
@@ -45,7 +46,19 @@ ccl_device void guiding_gpu_begin_update()
 
 ccl_device void guiding_gpu_refine(const uint index)
 {
-  guiding_gpu_field().refine(index, 1024);
+  if (metal::simd_sum(1u) != 32u) {
+    const uint fields = kernel_integrator_state.guiding_capacity * GUIDING_FIELD_TYPES;
+    atomic_fetch_and_or_uint32(kernel_integrator_state.guiding_partition + 3 * fields, 8u);
+    return;
+  }
+  const GuidingField field = guiding_gpu_field();
+  const uint node = index / 32;
+  const uint lane = index % 32;
+  uint first = lane == 0 ? field.refine_allocate(node, 1024) : 0;
+  first = metal::simd_broadcast(first, 0);
+  if (first != 0) {
+    field.refine_copy(node, first, lane, 32);
+  }
 }
 
 ccl_device void guiding_gpu_publish(const uint index)
@@ -102,7 +115,14 @@ ccl_device void guiding_gpu_partition_count(const uint index)
 ccl_device void guiding_gpu_partition_prefix(const uint index)
 {
   if (index == 0) {
-    guiding_gpu_partition().prefix();
+    const auto partition = guiding_gpu_partition();
+    partition.prefix();
+    const GuidingObservationTasks tasks{kernel_integrator_state.guiding_fit_tasks,
+                                        partition.distributions,
+                                        kernel_integrator_state.guiding_fit_task_capacity};
+    if (!tasks.build(partition.counts)) {
+      atomic_fetch_and_or_uint32(partition.error, 128u);
+    }
   }
 }
 
@@ -120,21 +140,38 @@ ccl_device void guiding_gpu_fit(const uint index)
     atomic_fetch_and_or_uint32(partition.error, 8u);
     return;
   }
-  const uint distribution = index / 32;
+  const uint group = index / 32;
   const uint lane = index % 32;
-  const uint count = partition.counts[distribution];
+  const bool partial = group >= partition.distributions;
+  const uint task = group - partition.distributions;
+  const ccl_global uint *tasks = kernel_integrator_state.guiding_fit_tasks;
+  if (partial &&
+      task >=
+          tasks[partition.distributions + 2 * kernel_integrator_state.guiding_fit_task_capacity])
+  {
+    return;
+  }
+  const uint distribution = partial ? tasks[partition.distributions + 2 * task] : group;
+  const uint start = partial ? tasks[partition.distributions + 2 * task + 1] : 0;
+  const uint full_count = partition.counts[distribution];
+  if (!partial && full_count > GuidingObservationTasks::chunk_size) {
+    return;
+  }
+  const uint count = min(full_count - start, GuidingObservationTasks::chunk_size);
   if (count == 0) {
     return;
   }
   if (partition.offsets[distribution] > partition.capacity ||
-      count > partition.capacity - partition.offsets[distribution])
+      full_count > partition.capacity - partition.offsets[distribution])
   {
     atomic_fetch_and_or_uint32(partition.error, 64u);
     return;
   }
   const GuidingField field = guiding_gpu_field();
-  const GuidingHistoryObservationRange range{partition.records, partition.indices,
-                                            partition.offsets[distribution], field.scene_scale()};
+  const GuidingHistoryObservationRange range{partition.records,
+                                             partition.indices,
+                                             partition.offsets[distribution] + start,
+                                             field.scene_scale()};
   float maximum_weight = 0;
   for (uint i = lane; i < count; i += 32) {
     maximum_weight = max(maximum_weight, range[i].w);
@@ -145,28 +182,32 @@ ccl_device void guiding_gpu_fit(const uint index)
   const float model_mass = metal::simd_sum(lane < GuidingGaussianMixture::components ?
       model[lane * GuidingGaussianMixture::component_stride] : 0.0f);
   if (!(model_mass > 0.0f)) {
+    if (partial && lane < GuidingGaussianMixture::components) {
+      ccl_global float *storage = kernel_integrator_state.guiding_fit_partials +
+                                  task * GuidingMixtureStatistics::working_size +
+                                  lane * GuidingMixtureStatistics::working_component_size;
+      for (int i = 0; i < GuidingMixtureStatistics::working_component_size; ++i) {
+        storage[i] = 0;
+      }
+    }
     return;
   }
   using Stats = GuidingMixtureStatistics;
   Stats batch;
+  guiding_mixture_collect_cooperative(
+      model, range, count, lane, maximum_weight, field.metric_extent(), batch);
   if (lane < GuidingGaussianMixture::components) {
-    const uint base = lane * GuidingGaussianMixture::component_stride;
-    batch.direction_reference = make_float3(model[base + 2], model[base + 3], model[base + 4]);
-  }
-  GuidingConditionalMixture conditional;
-  for (uint i = 0; i < count; ++i) {
-    const auto observation = range.observation(i);
-    const float log_density = lane < GuidingGaussianMixture::components ?
-        conditional.log_component(model, lane, make_float3(observation.direction_weight),
-                                  make_float3(observation.position)) : -FLT_MAX;
-    const float maximum = metal::simd_max(log_density);
-    const float density = log_density > -FLT_MAX ? expf(log_density - maximum) : 0;
-    const float sum = metal::simd_sum(density);
-    if (lane < GuidingGaussianMixture::components && sum > 0) {
-      batch.record(observation, density / sum, maximum_weight, field.metric_extent());
+    if (partial) {
+      ccl_global float *storage = kernel_integrator_state.guiding_fit_partials +
+                                  task * Stats::working_size +
+                                  lane * Stats::working_component_size;
+      for (int i = 0; i < Stats::storage_size; ++i) {
+        storage[i] = batch.values[i];
+        storage[Stats::storage_size + i] = batch.errors[i];
+      }
+      storage[2 * Stats::storage_size] = maximum_weight;
+      return;
     }
-  }
-  if (lane < GuidingGaussianMixture::components) {
     ccl_global float *storage = kernel_integrator_state.guiding_fit +
         distribution * Stats::working_size + lane * Stats::working_component_size;
     Stats accumulated;
@@ -186,11 +227,75 @@ ccl_device void guiding_gpu_fit(const uint index)
     }
     storage[2 * Stats::storage_size] = scale;
   }
-  if (lane == 0) {
+  if (!partial && lane == 0) {
     ccl_global uint *observations = kernel_integrator_state.guiding_fit_counts + distribution;
     /* Publication only uses this count for its 64-observation eligibility gate.
      * Effective support is computed from the full weighted moments. */
     *observations = min(64u, min(64u, *observations) + min(64u, count));
+  }
+}
+
+ccl_device void guiding_gpu_fit_reduce(const uint index)
+{
+  const uint distribution = index / 32;
+  const uint lane = index % 32;
+  const auto partition = guiding_gpu_partition();
+  const uint count = partition.counts[distribution];
+  if (count <= GuidingObservationTasks::chunk_size || lane >= GuidingGaussianMixture::components) {
+    return;
+  }
+  using Stats = GuidingMixtureStatistics;
+  const GuidingField field = guiding_gpu_field();
+  const ccl_global float *model = field.sampling + distribution * field.sampling_size +
+                                  field.tree_size;
+  const uint base = lane * GuidingGaussianMixture::component_stride;
+  Stats accumulated;
+  accumulated.direction_reference = make_float3(model[base + 2], model[base + 3], model[base + 4]);
+  ccl_global float *storage = kernel_integrator_state.guiding_fit +
+                              distribution * Stats::working_size +
+                              lane * Stats::working_component_size;
+  for (int i = 0; i < Stats::storage_size; ++i) {
+    accumulated.values[i] = storage[i];
+    accumulated.errors[i] = storage[Stats::storage_size + i];
+  }
+  float scale = storage[2 * Stats::storage_size];
+  const uint first = kernel_integrator_state.guiding_fit_tasks[distribution];
+  const uint chunks = 1 + (count - 1) / GuidingObservationTasks::chunk_size;
+  const uint total = kernel_integrator_state
+                         .guiding_fit_tasks[partition.distributions +
+                                            2 * kernel_integrator_state.guiding_fit_task_capacity];
+  if (first > total || chunks > total - first) {
+    atomic_fetch_and_or_uint32(partition.error, 128u);
+    return;
+  }
+  bool have_batch = false;
+  for (uint chunk = first; chunk < first + chunks; ++chunk) {
+    const ccl_global float *input = kernel_integrator_state.guiding_fit_partials +
+                                    chunk * Stats::working_size +
+                                    lane * Stats::working_component_size;
+    const float batch_scale = input[2 * Stats::storage_size];
+    if (!(batch_scale > 0)) {
+      continue;
+    }
+    have_batch = true;
+    Stats batch;
+    batch.direction_reference = accumulated.direction_reference;
+    for (int i = 0; i < Stats::storage_size; ++i) {
+      batch.values[i] = input[i];
+      batch.errors[i] = input[Stats::storage_size + i];
+    }
+    if (!accumulated.merge(batch, batch_scale, scale)) {
+      atomic_fetch_and_or_uint32(partition.error, 16u);
+      return;
+    }
+  }
+  for (int i = 0; i < Stats::storage_size; ++i) {
+    storage[i] = accumulated.values[i];
+    storage[Stats::storage_size + i] = accumulated.errors[i];
+  }
+  storage[2 * Stats::storage_size] = scale;
+  if (lane == 0 && have_batch) {
+    kernel_integrator_state.guiding_fit_counts[distribution] = 64;
   }
 }
 

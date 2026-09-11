@@ -246,6 +246,7 @@ set(SRC_KERNEL_SAMPLE_HEADERS
   sample/guiding_history.h
   sample/guiding_mixture_conditional.h
   sample/guiding_mixture_fit.h
+  sample/guiding_mixture_fit_metal.h
   sample/guiding_mixture_statistics.h
   sample/guiding_observation_range.h
   sample/guiding_position.h
@@ -260,6 +261,7 @@ set(SRC_KERNEL_SAMPLE_HEADERS
 
 set(SRC_KERNEL_UTIL_HEADERS
   util/colorspace.h
+  util/compact_indices.h
   util/differential.h
   util/ies.h
   util/image_2d.h
