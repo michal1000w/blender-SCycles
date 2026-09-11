@@ -52,8 +52,8 @@ bool device_kernel_has_gpu_function(DeviceKernel kernel, const bool metal)
        kernel == DEVICE_KERNEL_GUIDING_PUBLISH || kernel == DEVICE_KERNEL_GUIDING_FLUSH_HISTORY ||
        kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
        kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
-       kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
-       kernel == DEVICE_KERNEL_GUIDING_FIT))
+       kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER || kernel == DEVICE_KERNEL_GUIDING_FIT ||
+       kernel == DEVICE_KERNEL_GUIDING_FIT_REDUCE))
   {
     return false;
   }
@@ -145,6 +145,8 @@ const char *device_kernel_as_string(DeviceKernel kernel)
       return "guiding_partition_scatter";
     case DEVICE_KERNEL_GUIDING_FIT:
       return "guiding_fit";
+    case DEVICE_KERNEL_GUIDING_FIT_REDUCE:
+      return "guiding_fit_reduce";
     case DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT:
       return "integrator_photon_emit";
     case DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE:

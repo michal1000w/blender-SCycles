@@ -76,6 +76,9 @@ struct ShaderCache {
         }
         break;
       case APPLE_M2_BIG:
+        /* The light-path megakernel retains shader and reciprocal-transport state.
+         * A small group gives the compiler more registers per active thread. */
+        occupancy_tuning[DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE] = {64, 64};
         occupancy_tuning[DEVICE_KERNEL_INTEGRATOR_COMPACT_SHADOW_STATES] = {384, 128};
         occupancy_tuning[DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA] = {640, 128};
         occupancy_tuning[DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST] = {1024, 64};
@@ -351,7 +354,8 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
        device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
        device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
        device_kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
-       device_kernel == DEVICE_KERNEL_GUIDING_FIT) &&
+       device_kernel == DEVICE_KERNEL_GUIDING_FIT ||
+       device_kernel == DEVICE_KERNEL_GUIDING_FIT_REDUCE) &&
       !(device->scene_kernel_features & KERNEL_FEATURE_PATH_GUIDING))
   {
     return false;

@@ -371,6 +371,37 @@ TEST(GuidingMixtureFit, ConditionalPublicationAndPositionDependentPdf)
   EXPECT_NEAR(query.pdf(output.data(), make_float3(0, 0, 1), p), M_1_4PI_F, 1e-7f);
 }
 
+TEST(GuidingMixtureFit, ChunkTasksCoverLargeFieldsExactlyOnce)
+{
+  constexpr uint chunk = GuidingObservationTasks::chunk_size;
+  const std::array<uint, 7> counts = {0, 1, chunk, chunk + 1, 2 * chunk, 2 * chunk + 1, 0};
+  constexpr uint capacity = 8;
+  std::array<uint, counts.size() + 2 * capacity + 2> storage;
+  storage.fill(~0u);
+  GuidingObservationTasks tasks{storage.data(), uint(counts.size()), capacity};
+  ASSERT_TRUE(tasks.build(counts.data()));
+  EXPECT_EQ(storage[counts.size() + 2 * capacity], 7u);
+  EXPECT_EQ(storage.back(), ~0u);
+  for (uint field = 0; field < counts.size(); ++field) {
+    if (counts[field] <= chunk) {
+      continue;
+    }
+    uint covered = 0;
+    const uint pieces = 1 + (counts[field] - 1) / chunk;
+    for (uint piece = 0; piece < pieces; ++piece) {
+      const uint task = storage[field] + piece;
+      EXPECT_EQ(storage[counts.size() + 2 * task], field);
+      EXPECT_EQ(storage[counts.size() + 2 * task + 1], covered);
+      covered += min(chunk, counts[field] - covered);
+    }
+    EXPECT_EQ(covered, counts[field]);
+  }
+  tasks.capacity = 1;
+  ASSERT_FALSE(tasks.build(counts.data()));
+  EXPECT_EQ(storage[counts.size() + 2], 0u);
+  EXPECT_EQ(storage.back(), ~0u);
+}
+
 TEST(GuidingMixtureFit, IndexedHistoryPartitionAndFitting)
 {
   constexpr uint fields = 3, count = 192;

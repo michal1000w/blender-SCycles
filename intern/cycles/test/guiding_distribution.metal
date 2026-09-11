@@ -194,6 +194,41 @@ kernel void guiding_resample(device const float2 *random [[buffer(0)]],
                                   0.0f;
 }
 
+/* Independent pre-factorization evaluation of the normalized product lobes. */
+float reference_product_pdf(device const float *storage,
+                            GuidingGaussianProduct profile,
+                            float3 direction,
+                            float3 position)
+{
+  GuidingGaussianMixture mixture;
+  float mass = 0, density = 0;
+  for (int i = 0; i < GuidingGaussianMixture::components; ++i) {
+    const auto illumination = mixture.component(storage, i, position);
+    for (int j = 0; j < 2; ++j) {
+      if (!(profile.weights[j] > 0)) {
+        continue;
+      }
+      float integral;
+      const auto product = illumination.product(profile.lobes[j], &integral);
+      const float weight = storage[i * GuidingGaussianMixture::component_stride] *
+                           profile.weights[j] * integral;
+      mass += weight;
+      density += weight * product.pdf(direction);
+    }
+  }
+  return mass > 0 ? .95f * density / mass + .05f * M_1_4PI_F : M_1_4PI_F;
+}
+
+#include "kernel/util/compact_indices.h"
+
+kernel void compact_indices_test(device uint *indices [[buffer(0)]],
+                                 device uint *counts [[buffer(1)]],
+                                 constant uint &size [[buffer(2)]],
+                                 uint lane [[thread_position_in_grid]])
+{
+  counts[lane] = compact_indices(indices + 16, size, lane);
+}
+
 kernel void guiding_gaussian_sample(device const float2 *random [[buffer(0)]],
                                     device float4 *result [[buffer(1)]],
                                     constant uint &test [[buffer(2)]],
@@ -202,19 +237,30 @@ kernel void guiding_gaussian_sample(device const float2 *random [[buffer(0)]],
 {
   if (test >= 7) {
     const GuidingGaussianProduct profile{
-        {{normalize(float3(1, 2, 3)), test != 8 ? 5.0f : 16384.0f},
+        {{normalize(float3(1, 2, 3)), test == 8 ? 16384.0f : 5.0f},
          {normalize(float3(-2, 1, -3)), 30.0f}},
-        {test != 8 ? 0.3f : 1.0f, test != 8 ? 0.7f : 0.0f}};
+        {test == 8 ? 1.0f : 0.3f, test == 8 ? 0.0f : 0.7f}};
     GuidingGaussianMixture mixture;
     const float3 position = test == 9  ? float3(.2f, .3f, .4f) :
                             test == 10 ? float3(.8f, .7f, .6f) :
                                          float3(0);
-    float pdf;
-    const float3 direction = mixture.sample_product(
-        mixture_storage, profile, random[index], &pdf, position);
+    float pdf, other_pdf, other_incident, incident;
+    const float3 other = normalize(float3(1, -2, 1));
+    const float3 direction = mixture.sample_product(mixture_storage,
+                                                    profile,
+                                                    random[index],
+                                                    &pdf,
+                                                    position,
+                                                    &other,
+                                                    &other_pdf,
+                                                    &other_incident,
+                                                    &incident);
     result[2 * index] = float4(direction, pdf);
     result[2 * index + 1] = float4(
-        mixture.pdf_product(mixture_storage, profile, direction, position));
+        reference_product_pdf(mixture_storage, profile, direction, position),
+        other_pdf,
+        other_incident,
+        incident);
     return;
   }
   const float concentrations[] = {0.0f, 1e-5f, 0.01f, 1.0f, 32.0f, 16384.0f};
@@ -608,6 +654,17 @@ kernel void guiding_mixture_source_statistics_16(
 
 #include "kernel/sample/guiding_mixture_conditional.h"
 
+#include "kernel/sample/guiding_mixture_fit_metal.h"
+
+struct GuidingTestObservationRange {
+  device const GuidingMixtureObservation *values;
+  uint begin;
+  GuidingMixtureObservation observation(uint index) const
+  {
+    return values[begin + index];
+  }
+};
+
 kernel void guiding_mixture_conditional_update(device const GuidingMixtureObservation *observations
                                                [[buffer(0)]],
                                                device const float *input [[buffer(1)]],
@@ -636,25 +693,10 @@ kernel void guiding_mixture_conditional_update(device const GuidingMixtureObserv
     }
     maximum_weight = metal::simd_max(maximum_weight);
     GuidingMixtureStatistics batch;
-    batch.direction_reference = statistics.direction_reference;
-    for (uint i = begin; i < end; ++i) {
-      const auto observation = observations[i];
-      if (!GuidingDirectionalMixtureFit<1>::valid(observation.direction_weight)) {
-        continue;
-      }
-      const float3 direction = normalize(float3(observation.direction_weight));
-      const float log_density = lane < GuidingGaussianMixture::components ?
-                                    conditional.log_component(
-                                        input, lane, direction, float3(observation.position)) :
-                                    -FLT_MAX;
-      const float maximum = metal::simd_max(log_density);
-      const float density = log_density > -FLT_MAX ? expf(log_density - maximum) : 0;
-      const float total = metal::simd_sum(density);
-      if (lane < GuidingGaussianMixture::components && total > 0) {
-        batch.record(observation, density / total, maximum_weight, float3(1, .5f, .25f));
-      }
-    }
-    if (maximum_weight > 0) {
+    const GuidingTestObservationRange range{observations, begin};
+    guiding_mixture_collect_cooperative(
+        input, range, end - begin, lane, maximum_weight, float3(1, .5f, .25f), batch);
+    if (maximum_weight > 0 && lane < GuidingGaussianMixture::components) {
       statistics.merge(batch, maximum_weight, scale);
     }
   }

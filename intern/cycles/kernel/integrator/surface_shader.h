@@ -1339,6 +1339,7 @@ ccl_device int surface_shader_bsdf_gpu_resampled_closure(
     float eta;
     float bsdf_pdf;
     float guide_pdf;
+    float incident_pdf;
     float average_roughness;
     int label;
   } candidates[2] = {};
@@ -1353,13 +1354,27 @@ ccl_device int surface_shader_bsdf_gpu_resampled_closure(
                                                            &candidates[0].roughness,
                                                            &candidates[0].eta,
                                                            candidates[0].average_roughness);
-  if (candidates[0].bsdf_pdf > 0.0f) {
-    candidates[0].guide_pdf = surface_shader_gpu_guiding_distribution_pdf(proposal,
-                                                                          candidates[0].direction);
+  if (proposal.use_smooth_product) {
+    /* Reuse each conditioned lobe for proposal and incident PDFs of both RIS candidates. */
+    GuidingGaussianMixture smooth;
+    candidates[1].direction = smooth.sample_product(proposal.weights + GuidingField::tree_size,
+                                                    proposal.smooth_product,
+                                                    make_float2(rand_guide),
+                                                    &candidates[1].guide_pdf,
+                                                    proposal.position,
+                                                    &candidates[0].direction,
+                                                    &candidates[0].guide_pdf,
+                                                    &candidates[0].incident_pdf,
+                                                    &candidates[1].incident_pdf);
   }
-
-  candidates[1].direction = surface_shader_gpu_guiding_distribution_sample(
-      proposal, make_float2(rand_guide), &candidates[1].guide_pdf);
+  else {
+    if (candidates[0].bsdf_pdf > 0.0f) {
+      candidates[0].guide_pdf = surface_shader_gpu_guiding_distribution_pdf(
+          proposal, candidates[0].direction);
+    }
+    candidates[1].direction = surface_shader_gpu_guiding_distribution_sample(
+        proposal, make_float2(rand_guide), &candidates[1].guide_pdf);
+  }
   float closure_pdfs[MAX_CLOSURE];
   candidates[1].bsdf_pdf = surface_shader_bsdf_eval_pdfs(kg,
                                                          sd,
@@ -1371,7 +1386,6 @@ ccl_device int surface_shader_bsdf_gpu_resampled_closure(
 
   GuidingResamplingPair pair{};
   GuidingField::DirectionalTree directional;
-  GuidingGaussianMixture smooth;
   const float uniform = (sd->runtime_flag & SR_BSDF_HAS_TRANSMISSION) ? M_1_PI_F * 0.25f :
                                                                         M_1_PI_F * 0.5f;
   for (int i = 0; i < 2; ++i) {
@@ -1379,9 +1393,7 @@ ccl_device int surface_shader_bsdf_gpu_resampled_closure(
     pair.proposal[i] = 0.5f * (candidate.bsdf_pdf + candidate.guide_pdf);
     if (candidate.bsdf_pdf > 0.0f && !bsdf_eval_is_zero(&candidate.eval)) {
       const float incident_pdf = proposal.use_smooth_product ?
-                                     smooth.pdf(proposal.weights + GuidingField::tree_size,
-                                                candidate.direction,
-                                                proposal.position) :
+                                     candidate.incident_pdf :
                                      directional.pdf(proposal.weights, candidate.direction);
       pair.target[i] = average(bsdf_eval_sum(&candidate.eval)) *
                        ((1.0f - proposal.probability) * uniform +

@@ -179,6 +179,8 @@ class PathTraceWorkGPU : public PathTraceWork {
   device_vector<uint> guiding_partition_;
   device_only_memory<uint> guiding_indices_;
   device_only_memory<float> guiding_fit_;
+  device_only_memory<float> guiding_fit_partials_;
+  device_only_memory<uint> guiding_fit_tasks_;
   device_vector<uint> guiding_fit_counts_;
   bool guiding_history_group_active_ = false;
   bool guiding_reset_pending_ = true;

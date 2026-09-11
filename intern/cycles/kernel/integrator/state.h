@@ -101,6 +101,7 @@ struct IntegratorStateCPU {
 struct IntegratorQueueCounter {
   int num_queued[DEVICE_GPU_KERNEL_INTEGRATOR_NUM];
   int cache_miss;
+  uint bdpt_error;
 };
 
 #if defined(__INTEGRATOR_GPU_PACKED_STATE__) && defined(__KERNEL_GPU__)
@@ -229,6 +230,8 @@ struct IntegratorStateGPU {
   ccl_global uint *guiding_partition;
   ccl_global uint *guiding_indices;
   ccl_global float *guiding_fit;
+  ccl_global float *guiding_fit_partials;
+  ccl_global uint *guiding_fit_tasks;
   ccl_global uint *guiding_fit_counts;
 
   /* Divisor used to partition active indices by locality when sorting by material. */
@@ -238,6 +241,7 @@ struct IntegratorStateGPU {
   uint guiding_capacity;
   uint guiding_training;
   uint guiding_history_capacity;
+  uint guiding_fit_task_capacity;
 
   uint photon_hash_size;
   uint photon_capacity;
@@ -247,6 +251,9 @@ struct IntegratorStateGPU {
 
   uint bdpt_vertex_capacity;
   uint bdpt_light_path_count;
+  uint bdpt_cache_capacity;
+  uint bdpt_cache_count;
+  uint bdpt_cache_start_sample;
   float bdpt_light_path_sample_ratio;
   int bdpt_buffer_full_x;
   int bdpt_buffer_full_y;

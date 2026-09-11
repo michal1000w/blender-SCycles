@@ -25,7 +25,7 @@ import threading
 import time
 
 
-def inside_blender(output, bdpt=False):
+def inside_blender(output, bdpt=False, after_training=False):
     import bpy
     import numpy as np
     import OpenImageIO as oiio
@@ -39,6 +39,9 @@ def inside_blender(output, bdpt=False):
     runpy.run_path(str(scene_script), run_name='__main__')
     scene = bpy.context.scene
     scene.render.use_persistent_data = True
+    if after_training:
+        scene.cycles.guiding_training_samples = 5
+        scene.cycles.bdpt_update_samples = 1
     cancelled = []
 
     def on_cancel(_scene):
@@ -61,7 +64,9 @@ def inside_blender(output, bdpt=False):
     bpy.ops.render.render(write_still=True)
     image = oiio.ImageInput.open(scene.render.filepath)
     assert image is not None
-    pixels = np.asarray(image.read_image(format=oiio.FLOAT))[..., :3]
+    channels = list(image.spec().channelnames)
+    rgb_indices = [channels.index(channel) for channel in ('R', 'G', 'B')]
+    pixels = np.asarray(image.read_image(format=oiio.FLOAT))[..., rgb_indices]
     image.close()
     assert np.isfinite(pixels).all() and pixels.max() > 0, 'Invalid restarted render'
     (output / 'image.json').write_text(json.dumps(dict(mean=float(pixels.mean()),
@@ -69,14 +74,19 @@ def inside_blender(output, bdpt=False):
     print('GUIDING_CANCEL_PASSED', flush=True)
 
 
-def controller(blender, output, bdpt=False):
+def controller(blender, output, bdpt=False, after_training=False):
     output.mkdir(parents=True, exist_ok=True)
     command = [str(blender), '--background', '--factory-startup', '--debug-cycles',
                '--log-level', 'debug', '--python-exit-code', '1', '--python', str(pathlib.Path(__file__).resolve()),
                '--', '--inside-blender', '--output', str(output)]
     if bdpt:
         command.append('--bdpt')
+    if after_training:
+        command.append('--after-training')
     env = dict(os.environ, BLENDER_USER_RESOURCES=str(output / 'blender-user'))
+    if after_training:
+        env.pop('CYCLES_METAL_BDPT_BATCH_SIZE', None)
+        env['CYCLES_BDPT_DIAGNOSTICS'] = '1'
     child = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, bufsize=1)
     lines = queue.Queue()
@@ -93,6 +103,7 @@ def controller(blender, output, bdpt=False):
     ready_at = None
     sent_at = None
     restart_at = None
+    observed_cache_batch = 0
     deadline = time.monotonic() + 900
     try:
         with (output / 'render.log').open('w') as log:
@@ -114,7 +125,11 @@ def controller(blender, output, bdpt=False):
                 transcript.append(line)
                 log.write(line)
                 log.flush()
-                if ready_at is None and re.search(r'Rendered \d+ samples in', line):
+                cache_batch = re.search(r'BDPT diagnostics:.* caches=(\d+)', line)
+                if cache_batch and not sent:
+                    observed_cache_batch = max(observed_cache_batch, int(cache_batch[1]))
+                batch_ready = not after_training or observed_cache_batch >= 4
+                if ready_at is None and batch_ready and re.search(r'Rendered \d+ samples in', line):
                     ready_at = time.monotonic()
                 if 'GUIDING_CANCEL_RESTART' in line:
                     restart_at = time.monotonic()
@@ -122,6 +137,7 @@ def controller(blender, output, bdpt=False):
         text = ''.join(transcript)
         assert sent and result == 0 and 'GUIDING_CANCEL_PASSED' in text, \
             'Cancel/restart failed; inspect render.log'
+        assert not after_training or observed_cache_batch >= 4, 'Default four-cache work was not exercised'
         restart = text.split('GUIDING_CANCEL_RESTART', 1)[1]
         publications = [int(value) for value in re.findall(
             r'Metal guiding publish: trained_samples=(\d+)', restart)]
@@ -130,6 +146,7 @@ def controller(blender, output, bdpt=False):
         assert latency < 5, f'Cancellation was delayed for {latency:.3f} seconds'
         (output / 'report.json').write_text(json.dumps(dict(cancelled=True, restarted=True,
             cancel_latency_seconds=latency, training_publications=publications,
+            after_training=after_training, observed_cache_batch=observed_cache_batch,
             integrator='bdpt' if bdpt else 'pt'), indent=2) + '\n')
         print('GUIDING_CANCEL_PASSED ' + str(output))
     finally:
@@ -148,15 +165,19 @@ def main():
     parser.add_argument('--output', type=pathlib.Path, required=True)
     parser.add_argument('--inside-blender', action='store_true')
     parser.add_argument('--bdpt', action='store_true')
+    parser.add_argument('--after-training', action='store_true',
+                        help='Cancel after default four-cache BDPT work has completed training')
     arguments = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else sys.argv[1:]
     args = parser.parse_args(arguments)
+    if args.after_training and not args.bdpt:
+        parser.error('--after-training requires --bdpt')
     output = args.output.resolve()
     if args.inside_blender:
-        inside_blender(output, args.bdpt)
+        inside_blender(output, args.bdpt, args.after_training)
     else:
         if args.blender is None:
             parser.error('--blender is required')
-        controller(args.blender.resolve(), output, args.bdpt)
+        controller(args.blender.resolve(), output, args.bdpt, args.after_training)
 
 
 if __name__ == '__main__':

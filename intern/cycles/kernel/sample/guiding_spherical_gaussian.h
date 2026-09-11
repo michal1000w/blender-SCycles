@@ -93,6 +93,11 @@ struct GuidingSphericalGaussian {
 
   ccl_device_inline_method static float one_minus_exp_negative(const float x)
   {
+    /* exp(-20) is below half an ULP at one: the float subtraction rounds to one.
+     * Narrow guiding lobes hit this case frequently during product evaluation. */
+    if (x >= 20.0f) {
+      return 1.0f;
+    }
     if (x < 0.05f) {
       return x * (1.0f - x * (0.5f - x * (1.0f / 6.0f - x * (1.0f / 24.0f - x / 120.0f))));
     }
@@ -139,25 +144,42 @@ struct GuidingSphericalGaussian {
     return direction;
   }
 
-  ccl_device_inline_method GuidingSphericalGaussian product(const GuidingSphericalGaussian other,
-                                                            ccl_private float *integral) const
+  ccl_device_inline_method GuidingSphericalGaussian
+  product(const GuidingSphericalGaussian other,
+          ccl_private float *integral,
+          const float own_normalization = 0.0f,
+          const float other_normalization = 0.0f,
+          ccl_private float *product_normalization = nullptr) const
   {
     /* A uniform factor changes only the integral. Reconstructing the natural
      * parameter would needlessly renormalize the axis and perturb a narrow PDF. */
     if (other.concentration == 0.0f) {
       *integral = M_1_4PI_F;
+      if (product_normalization) {
+        *product_normalization = own_normalization > 0 ? own_normalization : normalization();
+      }
       return *this;
     }
     if (concentration == 0.0f) {
       *integral = M_1_4PI_F;
+      if (product_normalization) {
+        *product_normalization = other_normalization > 0 ? other_normalization :
+                                                           other.normalization();
+      }
       return other;
     }
     const float3 vector = axis * concentration + other.axis * other.concentration;
     const float length = len(vector);
     const GuidingSphericalGaussian result = {
         length > 0.0f ? vector / length : make_float3(0, 0, 1), length};
-    *integral = normalization() * other.normalization() / result.normalization() *
+    const float result_normalization = result.normalization();
+    *integral = (own_normalization > 0 ? own_normalization : normalization()) *
+                (other_normalization > 0 ? other_normalization : other.normalization()) /
+                result_normalization *
                 expf(min(length - concentration - other.concentration, 0.0f));
+    if (product_normalization) {
+      *product_normalization = result_normalization;
+    }
     return result;
   }
 };
@@ -328,22 +350,45 @@ struct GuidingGaussianMixture {
   ccl_device_inline float pdf_product(const ccl_global float *storage,
                                       const GuidingGaussianProduct profile,
                                       const float3 direction,
-                                      const float3 position = zero_float3())
+                                      const float3 position = zero_float3(),
+                                      ccl_private float *incident_pdf = nullptr)
   {
     float density = 0.0f, mass = 0.0f;
+    float incident_density = 0.0f;
+    const float profile_normalization[2] = {profile.lobes[0].normalization(),
+                                            profile.lobes[1].normalization()};
 #pragma unroll 1
     for (int i = 0; i < components; ++i) {
+      if (!(storage[component_stride * i] > 0.0f)) {
+        continue;
+      }
       const GuidingSphericalGaussian illumination = component(storage, i, position);
+      const float illumination_normalization = illumination.normalization();
+      if (incident_pdf) {
+        incident_density += storage[component_stride * i] *
+                            (illumination_normalization *
+                             expf(illumination.concentration *
+                                  (min(dot(illumination.axis, direction), 1.0f) - 1.0f)));
+      }
       for (int j = 0; j < 2; ++j) {
         if (!(profile.weights[j] > 0.0f) || !(storage[component_stride * i] > 0.0f)) {
           continue;
         }
-        float integral;
-        const GuidingSphericalGaussian product = illumination.product(profile.lobes[j], &integral);
+        float integral, product_normalization;
+        const GuidingSphericalGaussian product = illumination.product(profile.lobes[j],
+                                                                      &integral,
+                                                                      illumination_normalization,
+                                                                      profile_normalization[j],
+                                                                      &product_normalization);
         const float weight = storage[component_stride * i] * profile.weights[j] * integral;
         mass += weight;
-        density += weight * product.pdf(direction);
+        density += weight * (product_normalization *
+                             expf(product.concentration *
+                                  (min(dot(product.axis, direction), 1.0f) - 1.0f)));
       }
+    }
+    if (incident_pdf) {
+      *incident_pdf = (1.0f - exploration) * incident_density + exploration * M_1_4PI_F;
     }
     return mass > 0.0f ? (1.0f - exploration) * density / mass + exploration * M_1_4PI_F :
                          M_1_4PI_F;
@@ -353,19 +398,46 @@ struct GuidingGaussianMixture {
                                           const GuidingGaussianProduct profile,
                                           float2 random,
                                           ccl_private float *sample_pdf,
-                                          const float3 position = zero_float3())
+                                          const float3 position = zero_float3(),
+                                          ccl_private const float3 *other_direction = nullptr,
+                                          ccl_private float *other_product_pdf = nullptr,
+                                          ccl_private float *other_incident_pdf = nullptr,
+                                          ccl_private float *sample_incident_pdf = nullptr)
   {
     random = clamp(random, zero_float2(), make_float2(0x1.fffffep-1f));
     float weights[2 * components];
     float mass = 0.0f;
+    float other_density = 0.0f, other_incident_density = 0.0f;
     int last_nonzero = 0;
+    const float profile_normalization[2] = {profile.lobes[0].normalization(),
+                                            profile.lobes[1].normalization()};
 #pragma unroll 1
     for (int i = 0; i < components; ++i) {
       const GuidingSphericalGaussian illumination = component(storage, i, position);
+      const float illumination_normalization = illumination.normalization();
+      if (other_direction) {
+        other_incident_density += storage[component_stride * i] *
+                                  (illumination_normalization *
+                                   expf(illumination.concentration *
+                                        (min(dot(illumination.axis, *other_direction), 1.0f) -
+                                         1.0f)));
+      }
       for (int j = 0; j < 2; ++j) {
         float integral = 0.0f;
         if (profile.weights[j] > 0.0f && storage[component_stride * i] > 0.0f) {
-          illumination.product(profile.lobes[j], &integral);
+          float product_normalization;
+          const auto product = illumination.product(profile.lobes[j],
+                                                    &integral,
+                                                    illumination_normalization,
+                                                    profile_normalization[j],
+                                                    &product_normalization);
+          if (other_direction) {
+            const float weight = storage[component_stride * i] * profile.weights[j] * integral;
+            other_density += weight *
+                             (product_normalization *
+                              expf(product.concentration *
+                                   (min(dot(product.axis, *other_direction), 1.0f) - 1.0f)));
+          }
         }
         weights[2 * i + j] = storage[component_stride * i] * profile.weights[j] * integral;
         mass += weights[2 * i + j];
@@ -373,6 +445,13 @@ struct GuidingGaussianMixture {
           last_nonzero = 2 * i + j;
         }
       }
+    }
+    if (other_direction) {
+      *other_product_pdf = mass > 0.0f ? (1.0f - exploration) * other_density / mass +
+                                             exploration * M_1_4PI_F :
+                                         M_1_4PI_F;
+      *other_incident_pdf = (1.0f - exploration) * other_incident_density +
+                            exploration * M_1_4PI_F;
     }
     float3 direction;
     if (!(mass > 0.0f) || random.x < exploration) {
@@ -400,7 +479,7 @@ struct GuidingGaussianMixture {
       float component_pdf;
       direction = product.sample(random, &component_pdf);
     }
-    *sample_pdf = pdf_product(storage, profile, direction, position);
+    *sample_pdf = pdf_product(storage, profile, direction, position, sample_incident_pdf);
     return direction;
   }
 };
