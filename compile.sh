@@ -449,6 +449,22 @@ CMAKE_ARGS=(
   -DCMAKE_CXX_FLAGS=-Wno-error=unguarded-availability-new
 )
 
+# Xcode updates can remove an SDK while CMake keeps its discovered library paths.
+# Refresh compiler detection too: it caches the SDK's implicit include paths.
+if [ -f "${BUILD_DIR}/CMakeCache.txt" ]; then
+  while IFS='=' read -r cache_key cache_path; do
+    case "$cache_path" in
+      /*.sdk/*)
+        if [ ! -e "$cache_path" ]; then
+          log "Refreshing CMake configuration for missing SDK dependency: ${cache_key}"
+          CMAKE_ARGS+=(--fresh)
+          break
+        fi
+        ;;
+    esac
+  done < <(sed -n -E 's/^([^:#]+):(FILEPATH|PATH)=/\1=/p' "${BUILD_DIR}/CMakeCache.txt")
+fi
+
 if [ "${#EXTRA_CMAKE_ARGS[@]}" -gt 0 ]; then
   CMAKE_ARGS+=("${EXTRA_CMAKE_ARGS[@]}")
 fi
