@@ -55,6 +55,7 @@ KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vcm, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vc, KERNEL_FEATURE_BDPT)
 /* Completed surface stages, retained while a reciprocal shader waits for image tiles. */
 KERNEL_STRUCT_MEMBER(path, uint, bdpt_surface_stage, KERNEL_FEATURE_BDPT)
+KERNEL_STRUCT_MEMBER(path, int, bdpt_volume_bounce, KERNEL_FEATURE_BDPT)
 /* Object at last scatter point for light linking. */
 KERNEL_STRUCT_MEMBER(path, int, mis_ray_object, KERNEL_FEATURE_LIGHT_LINKING)
 /* Normal at last scatter point for light tree. */
