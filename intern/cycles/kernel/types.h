@@ -302,6 +302,10 @@ enum PathRayFlag : uint32_t {
    * Continue the complete camera estimator, but do not assign weight to unavailable light-side
    * strategies after such an event. Currently used for BSSRDF transport. */
   PATH_RAY_BDPT_UNSUPPORTED = (1U << 30U),
+
+  /* Before the first medium event: an all-delta-transmission camera prefix.
+   * Afterwards: that prefix was reproduced by the volumetric sensor manifold. */
+  PATH_RAY_BDPT_VOLUME_SENSOR = (1U << 31U),
 };
 
 // 8bit enum, just in case we need to move more variables in it

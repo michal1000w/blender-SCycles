@@ -79,6 +79,12 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
 #endif
 
+#ifdef __KERNEL_METAL__
+  if (bdpt_emitter_supported && bdpt_volume_sensor_owns_camera_path(state, 0, klight->max_bounces)) {
+    mis_weight = 0.0f;
+  }
+#endif
+
   /* Write to render buffer. */
   guiding_record_surface_emission(kg, state, eval, mis_weight);
 #ifndef __KERNEL_METAL__

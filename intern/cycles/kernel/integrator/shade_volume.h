@@ -737,6 +737,117 @@ ccl_device void volume_shadow_null_scattering(KernelGlobals kg,
   }
 }
 
+#  ifdef __KERNEL_METAL__
+/* Attenuate one finite segment of a refracted sensor connection. The sensor task owns
+ * this state, so rebuilding its stack cannot disturb a live camera/light path. */
+ccl_device bool bdpt_volume_connection_transmittance(KernelGlobals kg,
+                                                     IntegratorState state,
+                                                     const float3 start,
+                                                     const float3 end,
+                                                     const float time,
+                                                     const float wavelength_rand,
+                                                     const uint segment,
+                                                     ccl_private Spectrum *throughput)
+{
+  Ray ray ccl_optional_struct_init;
+  ray.D = normalize_len(end - start, &ray.tmax);
+  if (!(ray.tmax > 0.0f)) {
+    return true;
+  }
+  /* Offset along the segment, never using a medium vertex's nonexistent normal. */
+  ray.P = ray_offset(start, ray.D);
+  ray.D = normalize_len(ray_offset(end, -ray.D) - ray.P, &ray.tmax);
+  ray.tmin = 0.0f;
+  ray.time = time;
+  ray.self.object = OBJECT_NONE;
+  ray.self.prim = PRIM_NONE;
+  ray.self.light_object = OBJECT_NONE;
+  ray.self.light_prim = PRIM_NONE;
+#    ifdef __RAY_DIFFERENTIALS__
+  ray.dP = differential_zero_compact();
+  ray.dD = differential_zero_compact();
+#    endif
+  integrator_state_write_ray(state, &ray);
+  integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_CAMERA);
+  RNGState rng;
+  path_state_rng_load(state, &rng);
+  path_state_rng_scramble(&rng, hash_uint2(segment, 0x6d6e6576u));
+
+  for (int boundary = 0; boundary <= kernel_data.integrator.transparent_max_bounce; boundary++) {
+    Intersection isect;
+    const float end_t = ray.tmax;
+    const bool hit = scene_intersect(kg, &ray, PATH_RAY_VISIBILITY_CAMERA, &isect);
+    if (hit) {
+      ray.tmax = isect.t;
+    }
+    if (!integrator_state_volume_stack_is_empty(kg, state)) {
+      ShaderData sd;
+      shader_setup_from_volume(&sd, &ray, OBJECT_NONE);
+#    ifdef __SPECTRAL__
+      sd.rand_wavelength = wavelength_rand;
+#    endif
+      sd.lcg_state = lcg_state_init(rng.rng_pixel, rng.rng_offset, rng.sample, segment);
+      if (volume_is_homogeneous<false>(kg, state)) {
+        const Spectrum extinction = volume_shader_eval_extinction<false>(
+            kg, state, &sd, PATH_RAY_VISIBILITY_CAMERA, PATH_RAY_FLAG_NONE);
+        *throughput *= volume_color_transmittance(extinction, ray.tmax - ray.tmin);
+      }
+      else {
+        OctreeTracing octree(ray.tmin);
+        if (volume_octree_setup<false>(kg,
+                                       &ray,
+                                       &sd,
+                                       state,
+                                       &rng,
+                                       PATH_RAY_VISIBILITY_CAMERA,
+                                       PATH_RAY_FLAG_NONE,
+                                       octree))
+        {
+          while (volume_octree_advance<false>(
+              kg, &ray, &sd, state, &rng, PATH_RAY_VISIBILITY_CAMERA, PATH_RAY_FLAG_NONE, octree))
+          {
+            *throughput *= volume_transmittance<false>(kg,
+                                                       state,
+                                                       &ray,
+                                                       &sd,
+                                                       octree.sigma.range(),
+                                                       octree.t,
+                                                       &rng,
+                                                       PATH_RAY_VISIBILITY_CAMERA,
+                                                       PATH_RAY_FLAG_NONE);
+            octree.t.min = octree.t.max;
+            rng.rng_offset += PRNG_BOUNCE_NUM;
+          }
+        }
+      }
+      if (sd.runtime_flag & SR_CACHE_MISS) {
+        return false;
+      }
+    }
+    if (!hit) {
+      return true;
+    }
+    ShaderData boundary_sd;
+    shader_setup_from_ray(kg, &boundary_sd, &ray, &isect);
+    if (!(boundary_sd.shader_flag & SD_HAS_ONLY_VOLUME)) {
+      /* A solved interface can be hit at the numerical end of a segment. All other
+       * surfaces are blockers; never reinterpret glass as transparent shadow glass. */
+      if (end_t - isect.t > 1.0e-5f) {
+        *throughput = zero_spectrum();
+      }
+      return true;
+    }
+    volume_stack_enter_exit<false>(kg, state, &boundary_sd);
+    ray.tmin = intersection_t_offset(isect.t);
+    ray.tmax = end_t;
+    ray.self.object = isect.object;
+    ray.self.prim = isect.prim;
+  }
+  *throughput = zero_spectrum();
+  return true;
+}
+#  endif
+
 /* Equi-angular sampling as in:
  * "Importance Sampling Techniques for Path Tracing in Participating Media" */
 
@@ -2544,6 +2655,14 @@ ccl_device_forceinline void integrate_volume_direct_light(
     return;
   }
 
+#  ifdef __KERNEL_METAL__
+  if (bdpt_volume_sensor_supports_light(kg, ls.type, ls.prim) &&
+      bdpt_volume_sensor_prefix(kg, state, sd, P))
+  {
+    return;
+  }
+#  endif
+
   /* Evaluate constant part of light shader, rest will optionally be done in another kernel. */
   Spectrum light_shader_eval ccl_optional_struct_init;
   const bool is_constant_light_shader = light_sample_shader_eval_nee_constant(
@@ -3237,6 +3356,20 @@ volume_integrate_event(KernelGlobals kg,
             kg, state, rand_phase_guiding, sd->P, ray->D, &result.indirect_phases);
       }
 #    endif
+    }
+#  endif
+
+#  ifdef __KERNEL_METAL__
+    if (kernel_data.integrator.use_bidirectional_path_tracing &&
+        INTEGRATOR_STATE(state, path, volume_bounce) == 0)
+    {
+      if (bdpt_volume_sensor_prefix(kg, state, sd, sd->P)) {
+        INTEGRATOR_STATE_WRITE(
+            state, path, bdpt_volume_bounce) = INTEGRATOR_STATE(state, path, bounce) + 1;
+      }
+      else {
+        INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_BDPT_VOLUME_SENSOR;
+      }
     }
 #  endif
 

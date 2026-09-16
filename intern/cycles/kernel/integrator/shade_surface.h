@@ -161,6 +161,14 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
   mis_weight = light_sample_mis_weight_forward_surface(kg, state, path_visibility, path_flag, sd);
 #endif
 
+#ifdef __KERNEL_METAL__
+  if ((sd->shader_flag & (SD_MIS_FRONT | SD_MIS_BACK)) &&
+      bdpt_volume_sensor_owns_camera_path(state))
+  {
+    mis_weight = 0.0f;
+  }
+#endif
+
   guiding_record_surface_emission(kg, state, L, mis_weight);
   film_write_surface_emission(
       kg, state, L, mis_weight, render_buffer, object_lightgroup(kg, sd->object), sd->P);
@@ -466,6 +474,13 @@ ccl_device
     ray.P = integrate_surface_ray_offset(kg, sd, ray.P, ray.D);
   }
 
+#ifdef __KERNEL_METAL__
+  if (bdpt_volume_sensor_owns_camera_path(state, 1) &&
+      bdpt_volume_sensor_supports_light(kg, ls.type, ls.prim))
+  {
+    return SHADER_EVAL_EMPTY;
+  }
+#endif
   /* Branch off shadow kernel. */
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
       kg,
@@ -565,6 +580,11 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
       &kernel_integrator_state.bdpt_vertices
            [kernel_integrator_state.bdpt_vertex_indices
                 [cache * kernel_integrator_state.bdpt_vertex_capacity + vertex_index]];
+  /* Medium records have no triangle, UVs or surface closure. Their sensor strategy
+   * is evaluated separately; never reconstruct one as a surface intersection. */
+  if (light_vertex->type == PRIMITIVE_VOLUME) {
+    return false;
+  }
   const uint light_path_length = light_vertex->path_length & 0xffu;
   const uint light_selection_count = (light_vertex->path_length >> 8u) & 0xfffu;
   const uint transparent_bounce = INTEGRATOR_STATE(state, path, transparent_bounce) +
@@ -810,6 +830,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #  ifdef __KERNEL_METAL__
     if (kernel_data.integrator.use_bidirectional_path_tracing) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_UNSUPPORTED;
+      INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_BDPT_VOLUME_SENSOR;
     }
     if (kernel_data.integrator.use_photon_mapping) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;

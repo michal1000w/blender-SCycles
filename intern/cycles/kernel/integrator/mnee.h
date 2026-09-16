@@ -423,7 +423,9 @@ ccl_device_inline bool mnee_newton_solver(KernelGlobals kg,
                                           const ccl_private LightSample *ls,
                                           const bool light_fixed_direction,
                                           const int vertex_count,
-                                          ccl_private ManifoldVertex *vertices)
+                                          ccl_private ManifoldVertex *vertices,
+                                          const float solver_threshold = MNEE_SOLVER_THRESHOLD,
+                                          const float min_progress_distance = MNEE_MIN_PROGRESS_DISTANCE)
 {
   float2 dx[MNEE_MAX_CAUSTIC_CASTERS];
   ManifoldVertex tentative[MNEE_MAX_CAUSTIC_CASTERS];
@@ -461,7 +463,7 @@ ccl_device_inline bool mnee_newton_solver(KernelGlobals kg,
       }
 
       /* Return if solve successful. */
-      if (constraint_norm < MNEE_SOLVER_THRESHOLD) {
+      if (constraint_norm < solver_threshold) {
         return true;
       }
 
@@ -536,10 +538,12 @@ ccl_device_inline bool mnee_newton_solver(KernelGlobals kg,
       mnee_setup_manifold_vertex(
           kg, &tv, mv.bsdf, mv.eta, mv.n_offset, &projection_ray, &projection_isect, sd_vtx);
 
-      /* Fail newton solve if we are not making progress, probably stuck trying to move off the
-       * edge of the mesh. */
+      /* Fail the ordinary surface solve when stuck near an edge. A tighter volume solve
+       * disables this absolute world-space cutoff: a sub-cutoff step can still be needed
+       * to meet its angular constraint, especially near the medium endpoint. The iteration
+       * limit still bounds genuinely stalled solves. */
       const float distance = len(tv.p - mv.p);
-      if (distance < MNEE_MIN_PROGRESS_DISTANCE) {
+      if (distance < min_progress_distance) {
         return false;
       }
     }
@@ -729,7 +733,9 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
                                                           ccl_private Spectrum *throughput,
                                                           ccl_private float3 *r_receiver_wo,
                                                           ccl_private float3 *r_light_wo,
-                                                          ccl_private float *r_light_distance)
+                                                          ccl_private float *r_light_distance,
+                                                          const bool volume_endpoint,
+                                                          ccl_private float3 *r_vertices)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -767,6 +773,13 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
   }
   *throughput *= ls->eval_fac / ls->pdf;
 
+  /* A medium endpoint has no surface normal. Differentiate its position in the plane
+   * perpendicular to the final segment: the resulting transfer is in projected area
+   * measure, ready to multiply the phase function without a fictitious cosine. */
+  if (volume_endpoint) {
+    ls->Ng = normalize(vertices[vertex_count - 1].p - ls->P);
+  }
+
   /* Generalized geometry term. */
   float dh_dx;
   float dx1_dxlight;
@@ -780,7 +793,7 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
   const float dw0_dx1 = fabsf(dot(wo, vertices[0].n)) / sqr(wo_len);
 
   /* Clamp since it has a tendency to be unstable. */
-  const float G = fminf(dw0_dx1 * dx1_dxlight, 2.f);
+  const float G = volume_endpoint ? dw0_dx1 * dx1_dxlight : fminf(dw0_dx1 * dx1_dxlight, 2.f);
   *throughput *= G;
 
   /* Specular reflectance. */
@@ -806,7 +819,20 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
 
     /* Check visibility. */
     probe_ray.D = normalize_len(v.p - probe_ray.P, &probe_ray.tmax);
-    if (scene_intersect(kg, &probe_ray, PATH_RAY_VISIBILITY_TRANSMIT, &probe_isect)) {
+    for (int boundary = 0; boundary <= kernel_data.integrator.transparent_max_bounce; boundary++) {
+      if (!scene_intersect(kg, &probe_ray, PATH_RAY_VISIBILITY_TRANSMIT, &probe_isect)) {
+        break;
+      }
+      if (volume_endpoint) {
+        shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+        if (sd_mnee->shader_flag & SD_HAS_ONLY_VOLUME) {
+          probe_ray.tmin = intersection_t_offset(probe_isect.t);
+          if (boundary == kernel_data.integrator.transparent_max_bounce) {
+            return SHADER_EVAL_EMPTY;
+          }
+          continue;
+        }
+      }
       const int hit_object = (probe_isect.object == OBJECT_NONE) ?
                                  kernel_data_fetch(prim_object, probe_isect.prim) :
                                  probe_isect.object;
@@ -814,10 +840,15 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
       if (hit_object != v.object || fabsf(probe_ray.tmax - probe_isect.t) > MNEE_MIN_DISTANCE) {
         return SHADER_EVAL_EMPTY;
       }
+      break;
     }
+    probe_ray.tmin = 0.0f;
     probe_ray.self.object = v.object;
     probe_ray.self.prim = v.prim;
     probe_ray.P = v.p;
+    if (r_vertices != nullptr) {
+      r_vertices[vi] = v.p;
+    }
 
     /* Set view looking direction. */
     wi = -wo;
@@ -895,7 +926,9 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                            ccl_private float3 *r_light_wo = nullptr,
                                                            const bool consider_all_refractive = false,
                                                            ccl_private float *r_light_distance = nullptr,
-                                                           const float wavelength_rand_override = -1.0f)
+                        const float wavelength_rand_override = -1.0f,
+                        const bool volume_endpoint = false,
+                        ccl_private float3 *r_vertices = nullptr)
 {
   /*
    * 1. send seed ray from shading point to light sample position (or along sampled light
@@ -964,6 +997,14 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
       }
 #endif
 
+      if (volume_endpoint && consider_all_refractive && (sd_mnee->shader_flag & SD_HAS_ONLY_VOLUME)) {
+        vertex_count--;
+        probe_ray.self.object = probe_isect.object;
+        probe_ray.self.prim = probe_isect.prim;
+        probe_ray.tmin = intersection_t_offset(probe_isect.t);
+        continue;
+      }
+
       /* Last bool argument is the MNEE flag (for TINY_MAX_CLOSURE cap in kernel_shader.h). */
       surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
           kg, state, sd_mnee, nullptr, PATH_RAY_VISIBILITY_DIFFUSE, PATH_RAY_FLAG_NONE, true);
@@ -1002,6 +1043,13 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
 
           found_refractive_microfacet_bsdf = true;
           ccl_private MicrofacetBsdf *microfacet_bsdf = (ccl_private MicrofacetBsdf *)bsdf;
+          /* The volumetric sensor partition can replay a delta camera prefix exactly.
+           * Rough camera prefixes retain the complete ordinary camera estimator. */
+          if (volume_endpoint &&
+              !roughness_is_almost_specular(microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y))
+          {
+            return SHADER_EVAL_EMPTY;
+          }
 
           /* Figure out appropriate index of refraction ratio. */
           const float eta = (sd_mnee->runtime_flag & SR_BACKFACING) ? 1.0f / microfacet_bsdf->ior :
@@ -1081,7 +1129,16 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
 
   /* 2. Walk on the specular manifold to find vertices on the casters that satisfy snell's law for
    * each interface. */
-  if (mnee_newton_solver(kg, sd, sd_mnee, ls, light_fixed_direction, vertex_count, vertices)) {
+  if (mnee_newton_solver(kg,
+                         sd,
+                         sd_mnee,
+                         ls,
+                         light_fixed_direction,
+                         vertex_count,
+                         vertices,
+                         volume_endpoint ? 1.0e-5f : MNEE_SOLVER_THRESHOLD,
+                         volume_endpoint ? 0.0f : MNEE_MIN_PROGRESS_DISTANCE))
+  {
     /* 3. If a solution exists, calculate contribution of the corresponding path */
     ShaderEvalResult result = mnee_path_contribution(kg,
                                                      state,
@@ -1094,7 +1151,9 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                      throughput,
                                                      r_receiver_wo,
                                                      r_light_wo,
-                                                     r_light_distance);
+                                                     r_light_distance,
+                                                     volume_endpoint,
+                                                     r_vertices);
 
     /* TODO: Cache misses are not handled correctly.
      * - PATH_MNEE_VALID flag is not handled properly

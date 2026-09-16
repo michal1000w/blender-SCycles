@@ -1275,6 +1275,140 @@ ccl_device_inline bool bdpt_perspective_ray_to_raster(const float3 sensor_P,
          raster->y < kernel_data.cam.height;
 }
 
+/* A deterministic strategy partition avoids assigning ordinary straight-connection PDFs
+ * to a refracted sensor connection. Only retire camera paths whose complete delta
+ * prefix the same solver can reproduce. Failed/unsupported manifolds keep camera transport. */
+ccl_device_inline bool bdpt_volume_sensor_prefix(KernelGlobals kg,
+                                                 IntegratorState state,
+                                                 ccl_private ShaderData *sd,
+                                                 const float3 P)
+{
+#if defined(__MNEE__) && defined(__VOLUME__)
+  const uint flag = INTEGRATOR_STATE(state, path, flag);
+  const int bounce = INTEGRATOR_STATE(state, path, bounce);
+  if (!kernel_data.integrator.use_bidirectional_path_tracing ||
+      !(flag & PATH_RAY_BDPT_VOLUME_SENSOR) || (flag & PATH_RAY_BDPT_UNSUPPORTED) ||
+      INTEGRATOR_STATE(state, path, volume_bounce) != 0 || bounce == 0 ||
+      CameraType(kernel_data.cam.type) != CAMERA_PERSPECTIVE)
+  {
+    return false;
+  }
+  if (kernel_data.kernel_features & KERNEL_FEATURE_SHADOW_LINKING) {
+    return false;
+  }
+  KernelBDPTVertex target = {};
+  target.P = P;
+  target.type = PRIMITIVE_VOLUME;
+  target.object = sd->object;
+  target.time_wavelength = photon_pack_time_wavelength(sd->time, 0.0f, false);
+  const float3 lens_rand = path_rng_3D(kg,
+                                       INTEGRATOR_STATE(state, path, rng_pixel),
+                                       INTEGRATOR_STATE(state, path, sample),
+                                       PRNG_LENS_TIME);
+  float3 raster, sensor_P;
+  float jacobian;
+  if (!bdpt_sample_camera_endpoint(
+          kg, &target, sd, make_float2(lens_rand.y, lens_rand.z), &raster, &sensor_P, &jacobian))
+  {
+    return false;
+  }
+  ShaderDataTinyStorage camera_storage;
+  ccl_private ShaderData *camera_sd = AS_SHADER_DATA(&camera_storage);
+  camera_sd->P = sensor_P;
+  camera_sd->N = camera_sd->Ng = normalize(P - sensor_P);
+  camera_sd->object = OBJECT_NONE;
+  camera_sd->prim = PRIM_NONE;
+  camera_sd->time = sd->time;
+#  ifdef __RAY_DIFFERENTIALS__
+  camera_sd->dP = 0.0f;
+#  endif
+  LightSample ls ccl_optional_struct_init;
+  ls.P = P;
+  ls.Ng = sd->wi;
+  ls.D = normalize_len(P - sensor_P, &ls.t);
+  ls.pdf = ls.pdf_selection = ls.eval_fac = 1.0f;
+  ls.object = sd->object;
+  ls.prim = PRIM_NONE;
+  ls.shader = sd->shader;
+  ls.group = LIGHTGROUP_NONE;
+  ls.type = LIGHT_TRIANGLE;
+  ls.emitter_id = EMITTER_NONE;
+  ShaderDataCausticsStorage manifold_storage;
+  ccl_private ShaderData *manifold_sd = AS_SHADER_DATA(&manifold_storage);
+  RNGState rng;
+  path_state_rng_load(state, &rng);
+  Spectrum throughput;
+  float3 camera_wo, light_wo;
+  float distance;
+  int vertices = 0;
+  const int transmission = INTEGRATOR_STATE(state, path, transmission_bounce);
+  const int diffuse = INTEGRATOR_STATE(state, path, diffuse_bounce);
+  const auto mnee = INTEGRATOR_STATE(state, path, mnee);
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = 0;
+  INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = 0;
+  INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = 0;
+#  ifdef __SPECTRAL__
+  /* Volume shader setup does not initialize rand_wavelength. Let MNEE recover the
+   * immutable camera-path wavelength for each interface that requires it. */
+  const float wavelength_rand = -1.0f;
+#  else
+  const float wavelength_rand = -1.0f;
+#  endif
+  const ShaderEvalResult result = kernel_path_mnee_sample(kg,
+                                                          state,
+                                                          camera_sd,
+                                                          manifold_sd,
+                                                          &rng,
+                                                          &ls,
+                                                          &throughput,
+                                                          &camera_wo,
+                                                          vertices,
+                                                          &light_wo,
+                                                          true,
+                                                          &distance,
+                                                          wavelength_rand,
+                                                          true);
+  INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
+  INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission;
+  INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse;
+  INTEGRATOR_STATE_WRITE(state, path, mnee) = mnee;
+  if (result == SHADER_EVAL_CACHE_MISS) {
+    sd->runtime_flag |= SR_CACHE_MISS;
+  }
+  return result == SHADER_EVAL_OK && vertices == bounce && dot(light_wo, sd->wi) > 1.0f - 1.0e-6f;
+#else
+  return false;
+#endif
+}
+
+ccl_device_inline bool bdpt_volume_sensor_owns_camera_path(ConstIntegratorState state,
+                                                           const int additional_bounces = 0,
+                                                           const float max_light_bounces = FLT_MAX)
+{
+  if (!kernel_data.integrator.use_bidirectional_path_tracing ||
+      !(INTEGRATOR_STATE(state, path, flag) & PATH_RAY_BDPT_VOLUME_SENSOR) ||
+      INTEGRATOR_STATE(state, path, volume_bounce) != 1)
+  {
+    return false;
+  }
+  const int light_bounces = INTEGRATOR_STATE(state, path, bounce) -
+                            INTEGRATOR_STATE(state, path, bdpt_volume_bounce) + additional_bounces;
+  return light_bounces >= 0 && light_bounces < kernel_data.integrator.bdpt_max_bounces &&
+         float(light_bounces) <= max_light_bounces;
+}
+
+ccl_device_inline bool bdpt_volume_sensor_supports_light(KernelGlobals kg,
+                                                         const LightType type,
+                                                         const int prim)
+{
+  if (type == LIGHT_TRIANGLE || type == LIGHT_BACKGROUND) {
+    return true;
+  }
+  const ccl_global KernelLight *light = &kernel_data_fetch(lights, prim);
+  return !((type == LIGHT_POINT || type == LIGHT_SPOT) && !light->spot.is_sphere &&
+           light->spot.radius > 0.0f);
+}
+
 /* Splat one reservoir-selected light vertex onto a built-in sensor. */
 ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     KernelGlobals kg,
@@ -1305,6 +1439,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   }
   float distance = sqrtf(distance2);
   float3 direction = delta / distance;
+  const bool volume_vertex = light_vertex->type == PRIMITIVE_VOLUME;
   Spectrum manifold_throughput = one_spectrum();
   bool manifold_connection = false;
 
@@ -1314,8 +1449,8 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
    * specular manifold used by Cycles MNEE, but in reverse: camera -> interfaces -> cached light
    * vertex. This yields both the physically valid endpoint direction and its transfer Jacobian. */
   if ((kernel_data.kernel_features & KERNEL_FEATURE_MNEE) &&
-      light_vertex->type != PRIMITIVE_VOLUME &&
-      CameraType(kernel_data.cam.type) == CAMERA_PERSPECTIVE)
+      CameraType(kernel_data.cam.type) == CAMERA_PERSPECTIVE &&
+      (!volume_vertex || !(kernel_data.kernel_features & KERNEL_FEATURE_SHADOW_LINKING)))
   {
     ShaderDataTinyStorage camera_sd_storage;
     ccl_private ShaderData *camera_sd = AS_SHADER_DATA(&camera_sd_storage);
@@ -1331,14 +1466,14 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
 
     LightSample sensor_target ccl_optional_struct_init;
     sensor_target.P = light_vertex->P;
-    sensor_target.Ng = light_sd->N;
+    sensor_target.Ng = volume_vertex ? direction : light_sd->N;
     sensor_target.t = distance;
     sensor_target.D = -direction;
     sensor_target.pdf = 1.0f;
     sensor_target.pdf_selection = 1.0f;
     sensor_target.eval_fac = 1.0f;
     sensor_target.object = light_vertex->object;
-    sensor_target.prim = light_vertex->prim;
+    sensor_target.prim = volume_vertex ? PRIM_NONE : light_vertex->prim;
     sensor_target.shader = light_sd->shader;
     sensor_target.group = light_vertex->light_group;
     sensor_target.type = LIGHT_TRIANGLE;
@@ -1353,6 +1488,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     float3 light_wo = zero_float3();
     float light_distance = 0.0f;
     int manifold_vertex_count = 0;
+    float3 manifold_vertices[MNEE_MAX_CAUSTIC_CASTERS];
     const ShaderEvalResult manifold_result = kernel_path_mnee_sample(kg,
                                                                      state,
                                                                      camera_sd,
@@ -1365,9 +1501,9 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
                                                                      &light_wo,
                                                                      true,
                                                                      &light_distance,
-                                                                     photon_unpack_wavelength_rand(
-                                                                         light_vertex
-                                                                             ->time_wavelength));
+        photon_unpack_wavelength_rand(light_vertex->time_wavelength),
+        volume_vertex,
+        volume_vertex ? manifold_vertices : nullptr);
     if (manifold_result == SHADER_EVAL_CACHE_MISS) {
       light_sd->runtime_flag |= SR_CACHE_MISS;
       return;
@@ -1385,22 +1521,57 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
        * from the cached endpoint back to the last interface; the hit at its upper bound is the
        * intended manifold vertex, while anything earlier is a true blocker. */
       Ray verify_ray ccl_optional_struct_init;
-      bool verify_skip_self = true;
-      verify_ray.P = shadow_ray_offset(kg, light_sd, light_wo, &verify_skip_self);
+      bool verify_skip_self = !volume_vertex;
+      verify_ray.P = volume_vertex ? light_vertex->P :
+                                     shadow_ray_offset(kg, light_sd, light_wo, &verify_skip_self);
       verify_ray.D = light_wo;
       verify_ray.tmin = 0.0f;
       verify_ray.tmax = light_distance;
       verify_ray.time = camera_sd->time;
       verify_ray.self.object = verify_skip_self ? light_sd->object : OBJECT_NONE;
       verify_ray.self.prim = verify_skip_self ? light_sd->prim : PRIM_NONE;
+      verify_ray.self.light_object = OBJECT_NONE;
+      verify_ray.self.light_prim = PRIM_NONE;
+#  ifdef __RAY_DIFFERENTIALS__
+      verify_ray.dP = differential_zero_compact();
+      verify_ray.dD = differential_zero_compact();
+#  endif
       Intersection verify_isect;
-      const bool early_blocker = scene_intersect(
-                                     kg,
-                                     &verify_ray,
-                                     PATH_RAY_VISIBILITY_TRANSMIT,
-                                     &verify_isect) &&
+      const bool early_blocker =
+          !volume_vertex &&
+          scene_intersect(kg, &verify_ray, PATH_RAY_VISIBILITY_TRANSMIT, &verify_isect) &&
                                  verify_isect.t < light_distance - MNEE_MIN_DISTANCE;
       if (!early_blocker) {
+#  ifdef __VOLUME__
+        if (volume_vertex) {
+          float3 segment_start = sensor_P;
+          for (int segment = 0; segment <= manifold_vertex_count; segment++) {
+            const float3 segment_end = segment == manifold_vertex_count ?
+                                           light_vertex->P :
+                                           manifold_vertices[segment];
+            if (!bdpt_volume_connection_transmittance(
+                    kg,
+                    state,
+                    segment_start,
+                    segment_end,
+                    camera_sd->time,
+                    photon_unpack_wavelength_rand(light_vertex->time_wavelength),
+                    uint(segment),
+                    &candidate_throughput))
+            {
+              light_sd->runtime_flag |= SR_CACHE_MISS;
+              return;
+            }
+            segment_start = segment_end;
+          }
+          /* The helper uses the dedicated sensor state's stack as scratch. Restore the
+           * endpoint medium before evaluating its reciprocal phase function. */
+          Ray endpoint_ray = verify_ray;
+          endpoint_ray.P = light_vertex->P;
+          integrator_state_write_ray(state, &endpoint_ray);
+          integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_CAMERA);
+        }
+#  endif
         raster = manifold_raster;
         direction = light_wo;
         connection_jacobian = sensor_jacobian;
@@ -1450,7 +1621,6 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   camera_ray.dP = differential_zero_compact();
   camera_ray.dD = differential_zero_compact();
 #endif
-  const bool volume_vertex = light_vertex->type == PRIMITIVE_VOLUME;
   BsdfEval light_eval;
   float light_pdf = 0.0f;
   if (volume_vertex) {
@@ -1587,7 +1757,12 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
                                 (BDPTMISWeight::from_encoded(light_vertex->d_vcm) *
                                      selection_ratio +
                                  BDPTMISWeight::from_encoded(light_vertex->d_vc) * reverse_pdf);
-  const float mis_weight = (BDPTMISWeight(1.0f) + w_light).inverse();
+  /* A refracted medium sensor connection replaces the matching camera strategy.
+   * Its prefix is replayed at camera medium vertices before suppressing anything.
+   * Ordinary straight sensor connections retain their existing MIS partition. */
+  const float mis_weight = (volume_vertex && manifold_connection) ?
+                               1.0f :
+                               (BDPTMISWeight(1.0f) + w_light).inverse();
 
   /* Transpose the reciprocal camera evaluation in geometric projected-area measure.
    * One cached map serves a camera batch, so its splat represents every sample in that batch. */

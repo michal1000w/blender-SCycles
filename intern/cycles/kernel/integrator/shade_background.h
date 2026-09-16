@@ -169,6 +169,11 @@ ccl_device_inline ShaderEvalResult integrate_background(
     mis_weight = light_sample_mis_weight_forward_background(kg, state, path_visibility, path_flag);
 #endif
 
+#ifdef __KERNEL_METAL__
+    if (kernel_data.background.use_mis && bdpt_volume_sensor_owns_camera_path(state)) {
+      mis_weight = 0.0f;
+    }
+#endif
     guiding_record_background(kg, state, L, mis_weight);
     L *= mis_weight;
   }
@@ -272,6 +277,11 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
         kg, state, path_visibility, path_flag, klight->object_id, light_eval.pdf);
 #endif
 
+#ifdef __KERNEL_METAL__
+    if (bdpt_volume_sensor_owns_camera_path(state, 0, klight->max_bounces)) {
+      mis_weight = 0.0f;
+    }
+#endif
     /* Write to render buffer. */
     guiding_record_background(kg, state, eval, mis_weight);
     film_write_surface_emission(

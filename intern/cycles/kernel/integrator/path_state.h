@@ -65,6 +65,8 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_volume_bounce) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_VOLUME_SENSOR;
   }
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
   INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
@@ -135,6 +137,18 @@ ccl_device_inline void path_state_next(KernelGlobals kg,
 #endif
   PathRayVisibility visibility = INTEGRATOR_STATE(state, path, visibility);
   uint32_t flag = INTEGRATOR_STATE(state, path, flag);
+
+#ifdef __KERNEL_METAL__
+  if (kernel_data.integrator.use_bidirectional_path_tracing) {
+    const int volume_bounce = INTEGRATOR_STATE(state, path, volume_bounce);
+    if ((label & LABEL_RAY_PORTAL) || ((label & LABEL_VOLUME_SCATTER) && volume_bounce > 0) ||
+        (volume_bounce == 0 && !(label & (LABEL_TRANSPARENT | LABEL_VOLUME_SCATTER)) &&
+         (label & (LABEL_SINGULAR | LABEL_TRANSMIT)) != (LABEL_SINGULAR | LABEL_TRANSMIT)))
+    {
+      flag &= ~PATH_RAY_BDPT_VOLUME_SENSOR;
+    }
+  }
+#endif
 
   /* ray through transparent keeps same flags from previous ray and is
    * not counted as a regular bounce, transparent has separate max */
