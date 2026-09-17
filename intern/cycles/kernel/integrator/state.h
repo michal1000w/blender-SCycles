@@ -241,7 +241,9 @@ struct IntegratorStateGPU {
   uint guiding_capacity;
   uint guiding_training;
   uint guiding_history_capacity;
+  uint guiding_observation_capacity;
   uint guiding_fit_task_capacity;
+  uint guiding_force_fit;
 
   uint photon_hash_size;
   uint photon_capacity;

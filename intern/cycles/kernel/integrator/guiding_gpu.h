@@ -77,8 +77,9 @@ ccl_device void guiding_gpu_publish(const uint index)
     references[c] = make_float3(model[base + 2], model[base + 3], model[base + 4]);
     total += working[c * Stats::working_component_size];
   }
-  /* Keep the histogram as initial support and for spatial adaptation. A trained
-   * interval replaces its angular-region mixture with soft-assignment fits. */
+  /* Keep the histogram as initial support and for spatial adaptation. Exact-direction EM
+   * from the compact stream replaces this when a training interval collected working stats.
+   * Otherwise the histogram/moment mixture from field.publish() remains. */
   field.publish(index, 0.05f);
   if (!(total > 0.0f)) {
     return;
@@ -97,24 +98,82 @@ ccl_device void guiding_gpu_publish(const uint index)
   }
 }
 
+ccl_device_inline GuidingHistory guiding_gpu_history()
+{
+  return {kernel_integrator_state.guiding_history,
+          kernel_integrator_state.guiding_history_count,
+          kernel_integrator_state.guiding_history_capacity,
+          kernel_integrator_state.guiding_observation_capacity};
+}
+
+ccl_device_inline uint guiding_gpu_live_fields()
+{
+  const uint capacity = kernel_integrator_state.guiding_capacity;
+  const uint live = kernel_integrator_state.guiding_counts[0];
+  return min(capacity, max(live, 1u)) * GUIDING_FIELD_TYPES;
+}
+
 ccl_device_inline GuidingObservationPartition guiding_gpu_partition()
 {
-  const uint fields = kernel_integrator_state.guiding_capacity * GUIDING_FIELD_TYPES;
+  const uint allocated = kernel_integrator_state.guiding_capacity * GUIDING_FIELD_TYPES;
+  const uint fields = guiding_gpu_live_fields();
   ccl_global uint *storage = kernel_integrator_state.guiding_partition;
-  return {kernel_integrator_state.guiding_history, storage, storage + fields,
-          storage + 2 * fields, kernel_integrator_state.guiding_indices,
-          storage + 3 * fields, fields, GuidingField::accumulation_size,
-          kernel_integrator_state.guiding_history_capacity};
+  return {kernel_integrator_state.guiding_history, storage, storage + allocated,
+          storage + 2 * allocated, kernel_integrator_state.guiding_indices,
+          storage + 3 * allocated, fields, GuidingField::accumulation_size,
+          guiding_gpu_history().capacity()};
+}
+
+ccl_device_inline bool guiding_gpu_should_fit()
+{
+  const GuidingHistory history = guiding_gpu_history();
+  if (history.observation_capacity == 0) {
+    return false;
+  }
+  const uint compact = min(history.count[1], history.observation_capacity);
+  if (compact == 0) {
+    return false;
+  }
+  if (kernel_integrator_state.guiding_force_fit) {
+    return true;
+  }
+  /* Another drained ancestry group would overflow the compact GMM stream. */
+  return compact + history.ancestry_capacity > history.observation_capacity;
+}
+
+ccl_device_inline bool guiding_gpu_history_slot_active(const uint index)
+{
+  const GuidingHistory history = guiding_gpu_history();
+  /* Mixture collection reads the compact stream. Ancestry was already copied there. */
+  if (history.observation_capacity != 0) {
+    if (index < history.ancestry_capacity) {
+      return false;
+    }
+    const uint observation = index - history.ancestry_capacity;
+    return observation < min(history.count[1], history.observation_capacity);
+  }
+  if (index < history.ancestry_capacity) {
+    return index < min(history.count[0], history.ancestry_capacity);
+  }
+  const uint observation = index - history.ancestry_capacity;
+  return observation < min(history.count[1], history.observation_capacity);
 }
 
 ccl_device void guiding_gpu_partition_count(const uint index)
 {
-  guiding_gpu_partition().count(index);
+  if (guiding_gpu_should_fit() && guiding_gpu_history_slot_active(index)) {
+    guiding_gpu_partition().count(index);
+  }
 }
 
 ccl_device void guiding_gpu_partition_prefix(const uint index)
 {
   if (index == 0) {
+    GuidingHistory history = guiding_gpu_history();
+    history.count[0] = 0;
+    if (!guiding_gpu_should_fit()) {
+      return;
+    }
     const auto partition = guiding_gpu_partition();
     partition.prefix();
     const GuidingObservationTasks tasks{kernel_integrator_state.guiding_fit_tasks,
@@ -128,11 +187,16 @@ ccl_device void guiding_gpu_partition_prefix(const uint index)
 
 ccl_device void guiding_gpu_partition_scatter(const uint index)
 {
-  guiding_gpu_partition().scatter(index);
+  if (guiding_gpu_should_fit() && guiding_gpu_history_slot_active(index)) {
+    guiding_gpu_partition().scatter(index);
+  }
 }
 
 ccl_device void guiding_gpu_fit(const uint index)
 {
+  if (!guiding_gpu_should_fit()) {
+    return;
+  }
   const auto partition = guiding_gpu_partition();
   /* Apple GPU SIMD groups contain 32 lanes. Reject an incompatible execution
    * width explicitly rather than mixing independent fields in a reduction. */
@@ -239,9 +303,13 @@ ccl_device void guiding_gpu_fit_reduce(const uint index)
 {
   const uint distribution = index / 32;
   const uint lane = index % 32;
+  const bool reclaim = distribution == 0 && lane == 0 && guiding_gpu_should_fit();
   const auto partition = guiding_gpu_partition();
   const uint count = partition.counts[distribution];
   if (count <= GuidingObservationTasks::chunk_size || lane >= GuidingGaussianMixture::components) {
+    if (reclaim) {
+      guiding_gpu_history().count[1] = 0;
+    }
     return;
   }
   using Stats = GuidingMixtureStatistics;
@@ -297,11 +365,32 @@ ccl_device void guiding_gpu_fit_reduce(const uint index)
   if (lane == 0 && have_batch) {
     kernel_integrator_state.guiding_fit_counts[distribution] = 64;
   }
+  if (reclaim) {
+    guiding_gpu_history().count[1] = 0;
+  }
 }
 
 ccl_device_inline bool guiding_gpu_training()
 {
   return kernel_data.integrator.use_guiding && kernel_integrator_state.guiding_training;
+}
+
+ccl_device_inline void guiding_gpu_commit_observation(const uint field_index,
+                                                      const uint direction,
+                                                      const packed_float3 position,
+                                                      const float value,
+                                                      const float distance = FLT_MAX)
+{
+  if (!(value > 0.0f) || !isfinite_safe(value) || field_index == ~0u) {
+    return;
+  }
+  packed_normal packed;
+  packed.value = direction;
+  guiding_gpu_field().record(
+      field_index, value, packed.decode(), make_float3(position), distance);
+  if (kernel_integrator_state.guiding_observation_capacity != 0) {
+    guiding_gpu_history().append_observation(field_index, direction, position, value, distance);
+  }
 }
 
 ccl_device_inline void guiding_gpu_record_bounce(IntegratorState state,
@@ -324,9 +413,7 @@ ccl_device_inline void guiding_gpu_record_bounce(IntegratorState state,
   const uint node = field.find_leaf(P);
   const GuidingFieldType type = volume ? GUIDING_FIELD_VOLUME_RADIANCE :
                                          guiding_surface_field_type(normal, false);
-  const GuidingHistory history{kernel_integrator_state.guiding_history,
-                               kernel_integrator_state.guiding_history_count,
-                               kernel_integrator_state.guiding_history_capacity};
+  const GuidingHistory history = guiding_gpu_history();
   /* Remove post-scatter throughput and the actual contribution PDF, as in CPU path segments. */
   const uint index = history.append(
       INTEGRATOR_STATE(state, gpu_guiding, history_head),
@@ -338,6 +425,48 @@ ccl_device_inline void guiding_gpu_record_bounce(IntegratorState state,
       distance_scale);
   if (index != ~0u) {
     INTEGRATOR_STATE_WRITE(state, gpu_guiding, history_head) = index;
+    const uint flags = INTEGRATOR_STATE(state, gpu_guiding, source_flags);
+    const float3 previous_P = INTEGRATOR_STATE(state, gpu_guiding, source_P);
+    const float previous_scale = INTEGRATOR_STATE(state, gpu_guiding, source_scale);
+    const float previous_rest = INTEGRATOR_STATE(state, gpu_guiding, source_rest);
+    float distance_at_P = FLT_MAX;
+    bool finite = false;
+    if (flags & 1u) {
+      distance_at_P = len(P - previous_P);
+      if (previous_scale == 0.0f) {
+        finite = isfinite_safe(distance_at_P);
+      }
+      else if ((flags & 2u) && previous_rest < FLT_MAX && isfinite_safe(previous_rest) &&
+               isfinite_safe(distance_at_P))
+      {
+        distance_at_P += previous_rest;
+        finite = isfinite_safe(distance_at_P);
+      }
+      else {
+        distance_at_P = FLT_MAX;
+      }
+    }
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_P) = P;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_scale) = distance_scale;
+    uint new_flags = 1u;
+    float rest = FLT_MAX;
+    if (distance_scale == 0.0f) {
+      new_flags |= 2u;
+      rest = 0.0f;
+    }
+    else if (finite && distance_scale > 0.0f && distance_scale < FLT_MAX &&
+             isfinite_safe(distance_at_P))
+    {
+      rest = distance_at_P / distance_scale;
+      if (isfinite_safe(rest) && rest < FLT_MAX) {
+        new_flags |= 2u;
+      }
+      else {
+        rest = FLT_MAX;
+      }
+    }
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_rest) = rest;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_flags) = new_flags;
   }
   if (!delta) {
     field.record_visit(node);
@@ -365,38 +494,35 @@ ccl_device_inline void guiding_gpu_record_importance(ConstIntegratorState state,
    */
   const float importance = average(spectrum_to_rgb(INTEGRATOR_STATE(state, path, throughput))) /
                            projected_area;
-  float source_distance = 0.0f, source_scale = 1.0f;
-  float3 previous_position = P;
-  uint ancestor = INTEGRATOR_STATE(state, gpu_guiding, history_head);
+  const uint flags = INTEGRATOR_STATE(state, gpu_guiding, source_flags);
+  float source_distance = FLT_MAX;
   bool finite_source = false;
-  const float3 extent = max(field.bounds_max - field.bounds_min, make_float3(1e-8f));
-  while (ancestor != ~0u) {
-    const ccl_global auto &record = kernel_integrator_state.guiding_history[ancestor];
-    const float3 position = field.bounds_min + make_float3(record.position) * extent;
-    source_distance += source_scale * len(position - previous_position);
-    if (!isfinite_safe(source_distance)) {
-      break;
+  if (flags & 1u) {
+    const float3 previous_P = INTEGRATOR_STATE(state, gpu_guiding, source_P);
+    source_distance = len(P - previous_P);
+    const float scale = INTEGRATOR_STATE(state, gpu_guiding, source_scale);
+    if (scale == 0.0f) {
+      finite_source = isfinite_safe(source_distance);
     }
-    if (record.distance_scale == 0.0f) {
-      finite_source = true;
-      break;
+    else if ((flags & 2u) && isfinite_safe(source_distance)) {
+      const float rest = INTEGRATOR_STATE(state, gpu_guiding, source_rest);
+      if (rest < FLT_MAX && isfinite_safe(rest)) {
+        source_distance += rest;
+        finite_source = isfinite_safe(source_distance);
+      }
+      else {
+        source_distance = FLT_MAX;
+      }
     }
-    if (!(record.distance_scale > 0.0f) || record.distance_scale == FLT_MAX) {
-      break;
+    else {
+      source_distance = FLT_MAX;
     }
-    /* Adjoint traversal uses the reciprocal refraction transfer. */
-    source_scale /= record.distance_scale;
-    previous_position = position;
-    ancestor = record.parent;
   }
-  const GuidingHistory history{kernel_integrator_state.guiding_history,
-                               kernel_integrator_state.guiding_history_count,
-                               kernel_integrator_state.guiding_history_capacity};
-  history.append_observation(field.record_index(node, type, direction),
-                              packed_normal(direction).value,
-                              field.normalized_position(P),
-                              importance,
-                              finite_source ? source_distance : FLT_MAX);
+  guiding_gpu_commit_observation(field.record_index(node, type, direction),
+                                 packed_normal(direction).value,
+                                 field.normalized_position(P),
+                                 importance,
+                                 finite_source ? source_distance : FLT_MAX);
   /* Adjoint arrivals greatly outnumber complete radiance observations. Driving subdivision
    * with those arrivals would create spatial cells whose radiance estimates are undersampled.
    * Both fields share refinement driven by the camera-vertex observations. */
@@ -410,9 +536,7 @@ ccl_device_inline void guiding_gpu_record_history(uint index,
   const float3 extent = max(field.bounds_max - field.bounds_min, make_float3(1e-8f));
   GuidingVirtualDistance transport;
   float downstream_distance = 0.0f, downstream_scale = 0.0f;
-  const GuidingHistory history{kernel_integrator_state.guiding_history,
-                               kernel_integrator_state.guiding_history_count,
-                               kernel_integrator_state.guiding_history_capacity};
+  const GuidingHistory history = guiding_gpu_history();
   while (index != ~0u) {
     const ccl_global GuidingHistoryRecord &record = history.records[index];
     const float3 position = field.bounds_min + make_float3(record.position) * extent;
@@ -432,23 +556,36 @@ ccl_device_inline void guiding_gpu_record_history(uint index,
 }
 
 /* One completed path observation per vertex, rather than a count for every film fragment.
- * This runs after all main/shadow queues drain and before any record slot is reused. */
-ccl_device void guiding_gpu_flush_history(const uint index)
+ * This runs after all main/shadow queues drain and before any record slot is reused.
+ * Mixture EM is deferred; flush still publishes the histogram so no sample is dropped.
+ * A grid-stride loop walks only written ancestry so empty capacity is not launched. */
+ccl_device void guiding_gpu_flush_history(const uint index, const uint stride)
 {
-  const ccl_global GuidingHistoryRecord &record = kernel_integrator_state.guiding_history[index];
-  if (record.field_index == ~0u) {
-    return;
+  const GuidingHistory history = guiding_gpu_history();
+  if (index == 0) {
+    if (history.count[0] > history.ancestry_capacity) {
+      atomic_fetch_and_or_uint32(guiding_gpu_partition().error, 32u);
+    }
   }
-  packed_normal direction;
-  direction.value = record.direction;
-  guiding_gpu_field().record(
-      record.field_index, record.radiance, direction.decode(), make_float3(record.position));
-  guiding_gpu_field().record_source(record.field_index,
-                                    record.source_weight,
-                                    record.inverse_distance_weight,
-                                    record.distance_weight,
-                                    direction.decode(),
-                                    make_float3(record.position));
+  const uint total = min(history.count[0], history.ancestry_capacity);
+  const uint step = max(stride, 1u);
+  for (uint i = index; i < total; i += step) {
+    const ccl_global GuidingHistoryRecord &record = kernel_integrator_state.guiding_history[i];
+    if (record.field_index == ~0u) {
+      continue;
+    }
+    packed_normal direction;
+    direction.value = record.direction;
+    guiding_gpu_field().record(
+        record.field_index, record.radiance, direction.decode(), make_float3(record.position));
+    guiding_gpu_field().record_source(record.field_index,
+                                      record.source_weight,
+                                      record.inverse_distance_weight,
+                                      record.distance_weight,
+                                      direction.decode(),
+                                      make_float3(record.position));
+    history.compact_completed(i);
+  }
 }
 
 ccl_device_inline void guiding_gpu_record_radiance(ConstIntegratorState state,
@@ -467,7 +604,6 @@ ccl_device_inline void guiding_gpu_record_shadow_radiance(ConstIntegratorShadowS
   if (!guiding_gpu_training()) {
     return;
   }
-  const GuidingField field = guiding_gpu_field();
   guiding_gpu_record_history(INTEGRATOR_STATE(state, shadow_gpu_guiding, history_head),
                              contribution,
                              INTEGRATOR_STATE(state, shadow_gpu_guiding, history_endpoint));
@@ -476,14 +612,12 @@ ccl_device_inline void guiding_gpu_record_shadow_radiance(ConstIntegratorShadowS
     const Spectrum weight = INTEGRATOR_STATE(state, shadow_gpu_guiding, direct_inverse_weight);
     packed_normal direction;
     direction.value = INTEGRATOR_STATE(state, shadow_gpu_guiding, direct_record_direction);
-    const GuidingHistory history{kernel_integrator_state.guiding_history,
-                                 kernel_integrator_state.guiding_history_count,
-                                 kernel_integrator_state.guiding_history_capacity};
-    history.append_observation(direct_index,
-                                direction.value,
-                                INTEGRATOR_STATE(state, shadow_gpu_guiding, direct_record_position),
-                                average(spectrum_to_rgb(contribution * weight)),
-                                INTEGRATOR_STATE(state, shadow_gpu_guiding, direct_record_distance));
+    guiding_gpu_commit_observation(
+        direct_index,
+        direction.value,
+        INTEGRATOR_STATE(state, shadow_gpu_guiding, direct_record_position),
+        average(spectrum_to_rgb(contribution * weight)),
+        INTEGRATOR_STATE(state, shadow_gpu_guiding, direct_record_distance));
   }
 }
 

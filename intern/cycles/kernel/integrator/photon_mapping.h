@@ -116,6 +116,9 @@ ccl_device_inline void photon_state_init(IntegratorState state, const uint seed,
   if (kernel_data.integrator.use_guiding) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
     INTEGRATOR_STATE_WRITE(state, gpu_guiding, history_head) = ~0u;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_flags) = 0u;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_scale) = 0.0f;
+    INTEGRATOR_STATE_WRITE(state, gpu_guiding, source_rest) = FLT_MAX;
   }
 #endif
 #ifdef __PATH_GUIDING__

@@ -63,6 +63,8 @@ class PathTraceWorkGPU : public PathTraceWork {
   void alloc_gpu_guiding();
   void prepare_gpu_guiding();
   void update_gpu_guiding(int batch_samples);
+  void enqueue_gpu_guiding_group_fit();
+  void enqueue_gpu_guiding_mixture_fit();
   int gpu_guiding_group_size() const;
 
   /* Returns DEVICE_KERNEL_NUM if there are no scheduled kernels. */
@@ -185,6 +187,7 @@ class PathTraceWorkGPU : public PathTraceWork {
   bool guiding_history_group_active_ = false;
   bool guiding_reset_pending_ = true;
   int guiding_trained_samples_ = 0;
+  int guiding_live_nodes_ = 1;
 
   /* Temporary buffer used by the copy_to_display() whenever graphics interoperability is not
    * available. Is allocated on-demand. */
