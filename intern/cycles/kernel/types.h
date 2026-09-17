@@ -1124,6 +1124,21 @@ struct ccl_align(16) ShaderData {
   /* Random number for sampling the wavelength. */
   float rand_wavelength;
 #endif
+#ifdef __KERNEL_METAL__
+  /* Reuse one spatial/product query across BSDF pdf and sample on the same ShaderData. */
+  const ccl_global float *gpu_guiding_weights;
+  float3 gpu_guiding_cached_P;
+  float3 gpu_guiding_cached_wi;
+  float3 gpu_guiding_product_axis;
+  float3 gpu_guiding_lobe_axis[2];
+  float gpu_guiding_probability;
+  float gpu_guiding_bsdf_fraction;
+  float gpu_guiding_product_anisotropy;
+  float gpu_guiding_lobe_kappa[2];
+  float gpu_guiding_lobe_weight[2];
+  int gpu_guiding_product_type;
+  uint gpu_guiding_flags;
+#endif
 
   /* Closure weights summed directly, so we can evaluate
    * emission and shadow transparency with MAX_CLOSURE 0. */

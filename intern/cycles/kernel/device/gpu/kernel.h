@@ -167,8 +167,9 @@ ccl_gpu_kernel_postfix
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(guiding_flush_history, const uint work_size)
 {
-  if (ccl_gpu_global_id_x() < work_size) {
-    ccl_gpu_kernel_call(guiding_gpu_flush_history(ccl_gpu_global_id_x()));
+  const uint index = ccl_gpu_global_id_x();
+  if (index < work_size) {
+    ccl_gpu_kernel_call(guiding_gpu_flush_history(index, work_size));
   }
 }
 ccl_gpu_kernel_postfix

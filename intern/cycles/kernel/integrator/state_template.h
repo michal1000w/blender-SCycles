@@ -86,6 +86,11 @@ KERNEL_STRUCT_END(path)
 #endif
 KERNEL_STRUCT_BEGIN(gpu_guiding)
 KERNEL_STRUCT_MEMBER(gpu_guiding, uint, history_head, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+/* Incremental adjoint source chain. Avoids walking ancestry at every camera vertex. */
+KERNEL_STRUCT_MEMBER(gpu_guiding, packed_float3, source_P, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(gpu_guiding, float, source_scale, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(gpu_guiding, float, source_rest, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(gpu_guiding, uint, source_flags, KERNEL_STRUCT_GPU_GUIDING_FEATURE)
 KERNEL_STRUCT_END(gpu_guiding)
 #ifdef KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL
 #  undef KERNEL_STRUCT_GPU_GUIDING_FEATURE_LOCAL

@@ -399,7 +399,10 @@ void PathTraceWorkGPU::alloc_gpu_guiding()
     integrator_state_gpu_.guiding_history = nullptr;
     integrator_state_gpu_.guiding_history_count = nullptr;
     integrator_state_gpu_.guiding_history_capacity = 0;
+    integrator_state_gpu_.guiding_observation_capacity = 0;
+    integrator_state_gpu_.guiding_force_fit = 0;
     guiding_history_group_active_ = false;
+    guiding_live_nodes_ = 1;
     integrator_state_gpu_.guiding_nodes = nullptr;
     integrator_state_gpu_.guiding_accumulation = nullptr;
     integrator_state_gpu_.guiding_sampling = nullptr;
@@ -460,6 +463,7 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
     guiding_counts_.data()[1] = 1;
     queue_->copy_to_device(guiding_counts_);
     guiding_trained_samples_ = 0;
+    guiding_live_nodes_ = 1;
     guiding_reset_pending_ = false;
   }
   const int training_samples = device_scene_->data.integrator.guiding_training_samples;
@@ -481,6 +485,22 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
                             (sizeof(GuidingHistoryRecord) + sizeof(uint) +
                              (2 * task_bytes + chunk_size - 1) / chunk_size);
     const size_t tasks = 2 * (capacity / chunk_size);
+    /* Ancestry keeps the occupancy-sized wavefront. A compact GMM stream is only enabled when
+     * it can hold at least one extra drained group; otherwise publication fits from the histogram
+     * and exact directional moments, including BDPT extras already recorded there. */
+    size_t ancestry = capacity;
+    size_t observations = 0;
+    if (max_num_paths_ > 0) {
+      const uint64_t records_per_path =
+          uint64_t(max(device_scene_->data.integrator.max_bounce, 1)) + 3;
+      const size_t occupancy = max(size_t(3), size_t(max_num_paths_) * size_t(records_per_path));
+      ancestry = min(capacity, occupancy);
+      observations = capacity - ancestry;
+      if (observations < ancestry) {
+        ancestry = capacity;
+        observations = 0;
+      }
+    }
     if (guiding_fit_partials_.memory_size() !=
             tasks * GuidingMixtureStatistics::working_size * sizeof(float) ||
         guiding_fit_tasks_.memory_size() != (fields + 2 * tasks + 1) * sizeof(uint))
@@ -491,10 +511,12 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
     integrator_state_gpu_.guiding_fit_partials = (float *)guiding_fit_partials_.device_pointer;
     integrator_state_gpu_.guiding_fit_tasks = (uint *)guiding_fit_tasks_.device_pointer;
     integrator_state_gpu_.guiding_fit_task_capacity = uint(tasks);
-    if (guiding_history_.memory_size() != capacity * sizeof(GuidingHistoryRecord)) {
+    if (guiding_history_.memory_size() != capacity * sizeof(GuidingHistoryRecord) ||
+        guiding_history_count_.size() != 2)
+    {
       guiding_history_.alloc_to_device(capacity);
       guiding_indices_.alloc_to_device(capacity);
-      guiding_history_count_.alloc(1);
+      guiding_history_count_.alloc(2);
       /* alloc() creates host storage only. Allocate the device counter before publishing
        * its address in integrator_state; enqueue_reset() clears it again for each batch. */
       guiding_history_count_.zero_to_device();
@@ -502,7 +524,9 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
     integrator_state_gpu_.guiding_history = (GuidingHistoryRecord *)
                                                 guiding_history_.device_pointer;
     integrator_state_gpu_.guiding_history_count = (uint *)guiding_history_count_.device_pointer;
-    integrator_state_gpu_.guiding_history_capacity = uint(capacity);
+    integrator_state_gpu_.guiding_history_capacity = uint(ancestry);
+    integrator_state_gpu_.guiding_observation_capacity = uint(observations);
+    integrator_state_gpu_.guiding_force_fit = 0;
     integrator_state_gpu_.guiding_indices = (uint *)guiding_indices_.device_pointer;
   }
   else {
@@ -518,6 +542,8 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
     integrator_state_gpu_.guiding_history = nullptr;
     integrator_state_gpu_.guiding_history_count = nullptr;
     integrator_state_gpu_.guiding_history_capacity = 0;
+    integrator_state_gpu_.guiding_observation_capacity = 0;
+    integrator_state_gpu_.guiding_force_fit = 0;
   }
   guiding_history_group_active_ = false;
   device_->const_copy_to(
@@ -530,20 +556,49 @@ int PathTraceWorkGPU::gpu_guiding_group_size() const
     return max_num_paths_;
   }
   const auto &integrator = device_scene_->data.integrator;
-  const uint64_t camera_records = uint64_t(max(integrator.max_bounce, 1)) + 1;
-  /* Non-MIS training can record standalone NEE, and BDPT can additionally produce
-   * an adjoint arrival and a connection shadow. Mixed transparent surfaces can
-   * produce these observations without consuming an ordinary bounce. Terminal
-   * visits are included; shadow-catcher splitting is reserved by the scheduler. */
-  const uint64_t visits = uint64_t(max(integrator.max_bounce, 1)) +
-                          uint64_t(max(integrator.transparent_max_bounce, 0)) + 2;
-  const bool standalone_nee = integrator.use_guiding_direct_light &&
-                              !integrator.use_guiding_mis_weights;
-  const uint64_t observations_per_visit = (standalone_nee ? 1 : 0) +
-                                           (integrator.use_bidirectional_path_tracing ? 2 : 0);
-  const uint64_t records_per_path = camera_records + observations_per_visit * visits;
+  /* Ancestry is one record per non-transparent bounce plus the terminating vertex. Extra BDPT
+   * adjoint and connection samples use the observation suffix and do not shrink this bound. */
+  const uint64_t records_per_path = uint64_t(max(integrator.max_bounce, 1)) + 3;
   return min(max_num_paths_,
              int(uint64_t(integrator_state_gpu_.guiding_history_capacity) / records_per_path));
+}
+
+void PathTraceWorkGPU::enqueue_gpu_guiding_mixture_fit()
+{
+  const int records = int(integrator_state_gpu_.guiding_history_capacity +
+                          integrator_state_gpu_.guiding_observation_capacity);
+  if (records <= 0 || integrator_state_gpu_.guiding_observation_capacity == 0) {
+    return;
+  }
+  queue_->zero_to_device(guiding_partition_);
+  queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_COUNT, records, DeviceKernelArguments(&records));
+  const int one = 1;
+  queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_PREFIX, one, DeviceKernelArguments(&one));
+  queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_SCATTER, records, DeviceKernelArguments(&records));
+  const int live = max(guiding_live_nodes_, 1);
+  const int distributions = min(live, int(integrator_state_gpu_.guiding_capacity)) *
+                            GUIDING_FIELD_TYPES;
+  const int fit_threads = (distributions + int(integrator_state_gpu_.guiding_fit_task_capacity)) *
+                          32;
+  queue_->enqueue(DEVICE_KERNEL_GUIDING_FIT, fit_threads, DeviceKernelArguments(&fit_threads));
+  const int reduce_threads = distributions * 32;
+  queue_->enqueue(
+      DEVICE_KERNEL_GUIDING_FIT_REDUCE, reduce_threads, DeviceKernelArguments(&reduce_threads));
+}
+
+void PathTraceWorkGPU::enqueue_gpu_guiding_group_fit()
+{
+  const int ancestry = int(integrator_state_gpu_.guiding_history_capacity);
+  if (ancestry <= 0) {
+    return;
+  }
+  /* Publish every drained sample into the histogram. Mixture EM waits for a full compact
+   * stream or the next field publication so occupancy-sized groups are not re-fitted.
+   * Grid-stride over written ancestry; empty reserved capacity is not dispatched. */
+  const int flush_threads = min(ancestry, 262144);
+  queue_->enqueue(
+      DEVICE_KERNEL_GUIDING_FLUSH_HISTORY, flush_threads, DeviceKernelArguments(&flush_threads));
+  enqueue_gpu_guiding_mixture_fit();
 }
 
 void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
@@ -562,6 +617,15 @@ void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
   if (!publish) {
     return;
   }
+  if (integrator_state_gpu_.guiding_observation_capacity != 0) {
+    integrator_state_gpu_.guiding_force_fit = 1;
+    device_->const_copy_to(
+        "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
+    enqueue_gpu_guiding_mixture_fit();
+    integrator_state_gpu_.guiding_force_fit = 0;
+    device_->const_copy_to(
+        "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
+  }
   const int one = 1;
   const int capacity = int(integrator_state_gpu_.guiding_capacity);
   const int distributions = capacity * GUIDING_FIELD_TYPES;
@@ -578,15 +642,20 @@ void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
     queue_->enqueue(
         DEVICE_KERNEL_GUIDING_REFINE, refine_threads, DeviceKernelArguments(&refine_threads));
   }
-  queue_->zero_to_device(guiding_fit_);
-  queue_->zero_to_device(guiding_fit_counts_);
-  queue_->copy_from_device(guiding_partition_);
-  queue_->synchronize();
-  if (guiding_partition_.data()[guiding_partition_.size() - 1] != 0) {
-    device_->set_error("Metal guiding mixture publication failed");
-    return;
+  if (integrator_state_gpu_.guiding_observation_capacity != 0) {
+    queue_->zero_to_device(guiding_fit_);
+    queue_->zero_to_device(guiding_fit_counts_);
+    queue_->copy_from_device(guiding_partition_);
+    queue_->copy_from_device(guiding_counts_);
+    queue_->synchronize();
+    if (guiding_partition_.data()[guiding_partition_.size() - 1] != 0) {
+      device_->set_error("Metal guiding mixture publication failed");
+      return;
+    }
+    guiding_live_nodes_ = max(int(guiding_counts_.data()[0]), 1);
   }
-  LOG_DEBUG << "Metal guiding publish: trained_samples=" << guiding_trained_samples_;
+  LOG_DEBUG << "Metal guiding publish: trained_samples=" << guiding_trained_samples_
+            << " spatial_nodes=" << guiding_live_nodes_;
 }
 
 void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
@@ -1565,47 +1634,15 @@ bool PathTraceWorkGPU::enqueue_work_tiles(bool &finished)
       return false;
     }
     if (guiding_history_group_active_) {
-      queue_->copy_from_device(guiding_history_count_);
-      if (!queue_->synchronize()) {
-        return false;
-      }
-      if (guiding_history_count_.data()[0] > integrator_state_gpu_.guiding_history_capacity) {
-        device_->set_error("Metal guiding training history overflow: render rejected");
-        return false;
-      }
-      const int records = int(guiding_history_count_.data()[0]);
-      if (records > 0) {
-        queue_->enqueue(
-            DEVICE_KERNEL_GUIDING_FLUSH_HISTORY, records, DeviceKernelArguments(&records));
-        queue_->zero_to_device(guiding_partition_);
-        queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_COUNT, records, DeviceKernelArguments(&records));
-        const int one = 1;
-        queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_PREFIX, one, DeviceKernelArguments(&one));
-        queue_->enqueue(DEVICE_KERNEL_GUIDING_PARTITION_SCATTER, records, DeviceKernelArguments(&records));
-        const int fit_threads = (int(integrator_state_gpu_.guiding_capacity) *
-                                     GUIDING_FIELD_TYPES +
-                                 int(integrator_state_gpu_.guiding_fit_task_capacity)) *
-                                32;
-        queue_->enqueue(DEVICE_KERNEL_GUIDING_FIT, fit_threads, DeviceKernelArguments(&fit_threads));
-        const int reduce_threads = int(integrator_state_gpu_.guiding_capacity) *
-                                   GUIDING_FIELD_TYPES * 32;
-        queue_->enqueue(DEVICE_KERNEL_GUIDING_FIT_REDUCE,
-                        reduce_threads,
-                        DeviceKernelArguments(&reduce_threads));
-        queue_->copy_from_device(guiding_partition_);
-        if (!queue_->synchronize()) {
-          return false;
-        }
-        if (guiding_partition_.data()[guiding_partition_.size() - 1] != 0) {
-          device_->set_error("Metal guiding observation grouping or fitting failed");
-          return false;
-        }
-      }
-      LOG_DEBUG << "Metal guiding history: records=" << guiding_history_count_.data()[0]
-                << " capacity=" << integrator_state_gpu_.guiding_history_capacity;
+      enqueue_gpu_guiding_group_fit();
+      LOG_DEBUG << "Metal guiding history group flushed, ancestry_capacity="
+                << integrator_state_gpu_.guiding_history_capacity
+                << " observation_capacity=" << integrator_state_gpu_.guiding_observation_capacity;
       guiding_history_group_active_ = false;
     }
-    queue_->zero_to_device(guiding_history_count_);
+    if (integrator_state_gpu_.guiding_observation_capacity == 0) {
+      queue_->zero_to_device(guiding_history_count_);
+    }
     /* The tile scheduler uses the same bound, including the split reservation below. */
     max_num_camera_paths = gpu_guiding_group_size();
     if (max_num_camera_paths < (has_shadow_catcher() ? 2 : 1)) {
