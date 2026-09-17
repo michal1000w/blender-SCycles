@@ -142,4 +142,31 @@ struct GuidingHistoryObservationRange {
   }
 };
 
+#ifndef __KERNEL_GPU__
+ccl_device_inline size_t guiding_gpu_memory_budget_bytes(const int megabytes)
+{
+  const int clamped = megabytes < 0 ? 0 : megabytes;
+  return size_t(clamped) * size_t(1024) * size_t(1024);
+}
+
+/* History records, compact indices, and bounded mixture-fit scratch share this budget. */
+ccl_device_inline size_t guiding_gpu_history_capacity_from_budget(const size_t budget_bytes,
+                                                                  const size_t fields)
+{
+  const size_t task_bytes = GuidingMixtureStatistics::working_size * sizeof(float) +
+                            2 * sizeof(uint);
+  const size_t chunk_size = GuidingObservationTasks::chunk_size;
+  const size_t fixed_bytes = sizeof(uint) * (fields + 2);
+  if (budget_bytes <= fixed_bytes) {
+    return 0;
+  }
+  const size_t stride = sizeof(GuidingHistoryRecord) + sizeof(uint) +
+                        (2 * task_bytes + chunk_size - 1) / chunk_size;
+  const size_t capacity = (budget_bytes - fixed_bytes) / stride;
+  /* Partition and fit kernels take signed work sizes, so keep the slot count in range. */
+  const size_t signed_work_max = size_t(0x7fffffff);
+  return capacity < signed_work_max ? capacity : signed_work_max;
+}
+#endif
+
 CCL_NAMESPACE_END
