@@ -65,6 +65,9 @@ ccl_device_inline
   sd->prim = isect->prim;
   sd->runtime_flag = 0;
   sd->shader_flag = 0;
+#ifdef __KERNEL_METAL__
+  sd->gpu_guiding_flags = 0;
+#endif
 
   /* Read matrices and time. */
   sd->time = ray->time;
@@ -173,6 +176,9 @@ ccl_device_inline void shader_setup_from_sample(KernelGlobals kg,
   sd->Ng = Ng;
   sd->wi = I;
   sd->shader = shader;
+#ifdef __KERNEL_METAL__
+  sd->gpu_guiding_flags = 0;
+#endif
   if (is_lamp) {
     sd->type = PRIMITIVE_LAMP;
   }

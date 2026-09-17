@@ -382,7 +382,7 @@ kernel void guiding_history_append(device GuidingHistoryRecord *records [[buffer
                                    constant uint &capacity [[buffer(3)]],
                                    uint path [[thread_position_in_grid]])
 {
-  const GuidingHistory history{records, count, capacity};
+  const GuidingHistory history{records, count, capacity, 0};
   uint head = ~0u;
   for (uint depth = 0; depth < 8; ++depth) {
     const uint next = history.append(head, path, depth, packed_float3(1, 2, 3));
@@ -403,7 +403,7 @@ kernel void guiding_history_accumulate(device GuidingHistoryRecord *records [[bu
                                        device const uint2 *heads [[buffer(1)]],
                                        uint branch_path [[thread_position_in_grid]])
 {
-  const GuidingHistory history{records, nullptr, 0};
+  const GuidingHistory history{records, nullptr, 0, 0};
   uint head = heads[branch_path / 2][branch_path % 2];
   while (head != ~0u) {
     history.accumulate(head, 1.0f);
