@@ -43,6 +43,12 @@ CCL_NAMESPACE_BEGIN
 
 #define VOLUME_BOUNDS_MAX 1024
 
+/* Metal path-guiding memory budgets in MiB. The spatial field stays compact;
+ * training histories can be larger because BDPT records extra adjoint samples. */
+#define GUIDING_GPU_MEMORY_MB_MIN 16
+#define GUIDING_GPU_MEMORY_MB_MAX 1024
+#define GUIDING_GPU_HISTORY_MEMORY_MB_MAX 4096
+
 #define SHADER_NONE (~0)
 #define OBJECT_NONE (~0)
 #define PRIM_NONE (~0)
