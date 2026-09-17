@@ -497,8 +497,11 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   const GuidingParams guiding_params = get_guiding_params(device);
   kintegrator->use_guiding = guiding_params.use;
   kintegrator->guiding_training_samples = max(guiding_training_samples, 0);
-  kintegrator->guiding_gpu_memory_mb = clamp(guiding_gpu_memory_mb, 16, 1024);
-  kintegrator->guiding_gpu_history_memory_mb = clamp(guiding_gpu_history_memory_mb, 16, 1024);
+  kintegrator->guiding_gpu_memory_mb = clamp(
+      guiding_gpu_memory_mb, GUIDING_GPU_MEMORY_MB_MIN, GUIDING_GPU_MEMORY_MB_MAX);
+  kintegrator->guiding_gpu_history_memory_mb = clamp(guiding_gpu_history_memory_mb,
+                                                     GUIDING_GPU_MEMORY_MB_MIN,
+                                                     GUIDING_GPU_HISTORY_MEMORY_MB_MAX);
   const float3 guiding_lower = photon_bounds.valid() ? photon_bounds.min : make_float3(-1.0f);
   const float3 guiding_upper = photon_bounds.valid() ? photon_bounds.max : make_float3(1.0f);
   const float3 guiding_padding = max((guiding_upper - guiding_lower) * 1e-4f, make_float3(1e-4f));

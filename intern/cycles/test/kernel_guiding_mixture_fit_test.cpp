@@ -9,10 +9,13 @@
 
 #include <gtest/gtest.h>
 
+#include "kernel/sample/guiding_field.h"
 #include "kernel/sample/guiding_mixture_conditional.h"
 #include "kernel/sample/guiding_mixture_fit.h"
 #include "kernel/sample/guiding_mixture_statistics.h"
 #include "kernel/sample/guiding_observation_range.h"
+#include "kernel/types.h"
+#include "util/math.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -652,6 +655,29 @@ TEST(GuidingMixtureFit, DecayedPriorMatchesExplicitWeightedHistory)
                 reference.directional_fit().concentration,
                 .1f);
   }
+}
+
+TEST(GuidingMixtureFit, FourGiBTrainingBudgetExceedsPreviousLimitWithoutCounterWrap)
+{
+  EXPECT_EQ(GUIDING_GPU_MEMORY_MB_MIN, 16);
+  EXPECT_EQ(GUIDING_GPU_MEMORY_MB_MAX, 1024);
+  EXPECT_EQ(GUIDING_GPU_HISTORY_MEMORY_MB_MAX, 4096);
+  EXPECT_EQ(clamp(8, GUIDING_GPU_MEMORY_MB_MIN, GUIDING_GPU_HISTORY_MEMORY_MB_MAX), 16);
+  EXPECT_EQ(clamp(4096, GUIDING_GPU_MEMORY_MB_MIN, GUIDING_GPU_HISTORY_MEMORY_MB_MAX), 4096);
+  EXPECT_EQ(clamp(8192, GUIDING_GPU_MEMORY_MB_MIN, GUIDING_GPU_HISTORY_MEMORY_MB_MAX), 4096);
+  const size_t fields = size_t(GUIDING_FIELD_TYPES);
+  const size_t four_gib = guiding_gpu_memory_budget_bytes(GUIDING_GPU_HISTORY_MEMORY_MB_MAX);
+  const size_t one_gib = guiding_gpu_memory_budget_bytes(GUIDING_GPU_MEMORY_MB_MAX);
+  EXPECT_EQ(four_gib, size_t(4096) * size_t(1024) * size_t(1024));
+  EXPECT_GT(four_gib, one_gib);
+  const size_t four_capacity = guiding_gpu_history_capacity_from_budget(four_gib, fields);
+  const size_t one_capacity = guiding_gpu_history_capacity_from_budget(one_gib, fields);
+  EXPECT_GT(four_capacity, one_capacity);
+  EXPECT_NEAR(double(four_capacity) / double(one_capacity), 4.0, 0.05);
+  EXPECT_LE(four_capacity, size_t(0x7fffffff));
+  EXPECT_GT(four_capacity * sizeof(GuidingHistoryRecord), one_gib);
+  EXPECT_LE(four_capacity * sizeof(GuidingHistoryRecord), four_gib);
+  EXPECT_EQ(guiding_gpu_history_capacity_from_budget(0, fields), 0u);
 }
 
 CCL_NAMESPACE_END

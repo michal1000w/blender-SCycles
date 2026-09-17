@@ -858,8 +858,10 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     guiding_gpu_history_memory_mb: IntProperty(
         name="Guiding Training Memory",
-        description="Maximum memory in MiB for Metal path training histories. Larger budgets allow more paths to train concurrently",
-        min=16, max=1024,
+        description="Maximum memory in MiB for Metal path training histories. Larger budgets "
+        "allow more paths to train concurrently, including BDPT adjoint observations. "
+        "The slider stays in the typical range; values up to 4096 MiB (4 GiB) can be typed",
+        min=16, soft_max=1024, max=4096,
         default=128,
     )
 

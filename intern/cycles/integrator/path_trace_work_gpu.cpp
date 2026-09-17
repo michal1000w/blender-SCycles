@@ -418,7 +418,8 @@ void PathTraceWorkGPU::alloc_gpu_guiding()
                                                                   GuidingMixtureStatistics::working_size) *
                                                                  sizeof(float) +
                                 GUIDING_FIELD_TYPES * 4 * sizeof(uint);
-  const size_t budget = size_t(device_scene_->data.integrator.guiding_gpu_memory_mb) * 1024 * 1024;
+  const size_t budget = guiding_gpu_memory_budget_bytes(
+      device_scene_->data.integrator.guiding_gpu_memory_mb);
   /* Root plus pairs of children. Reserve counts within the user-visible memory budget. */
   const size_t capacity = max(size_t(3),
                               (((budget - 3 * sizeof(uint)) / bytes_per_node) - 1) | size_t(1));
@@ -472,19 +473,13 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
   /* Complete batches have drained before this call. Histories are only needed while training;
    * allocate again here if a persistent session restarts after releasing its training buffer. */
   if (integrator_state_gpu_.guiding_training) {
-    const size_t budget = size_t(device_scene_->data.integrator.guiding_gpu_history_memory_mb) *
-                          1024 * 1024;
     /* Large fields are fitted in independent bounded chunks. Reserve their scratch
      * space inside the history budget, without reducing spatial field capacity. */
     const size_t fields = size_t(integrator_state_gpu_.guiding_capacity) * GUIDING_FIELD_TYPES;
-    const size_t task_bytes = GuidingMixtureStatistics::working_size * sizeof(float) +
-                              2 * sizeof(uint);
-    const size_t chunk_size = GuidingObservationTasks::chunk_size;
-    const size_t fixed_bytes = sizeof(uint) * (fields + 2);
-    const size_t capacity = (budget - fixed_bytes) /
-                            (sizeof(GuidingHistoryRecord) + sizeof(uint) +
-                             (2 * task_bytes + chunk_size - 1) / chunk_size);
-    const size_t tasks = 2 * (capacity / chunk_size);
+    const size_t budget = guiding_gpu_memory_budget_bytes(
+        device_scene_->data.integrator.guiding_gpu_history_memory_mb);
+    const size_t capacity = guiding_gpu_history_capacity_from_budget(budget, fields);
+    const size_t tasks = 2 * (capacity / GuidingObservationTasks::chunk_size);
     /* Ancestry keeps the occupancy-sized wavefront. A compact GMM stream is only enabled when
      * it can hold at least one extra drained group; otherwise publication fits from the histogram
      * and exact directional moments, including BDPT extras already recorded there. */

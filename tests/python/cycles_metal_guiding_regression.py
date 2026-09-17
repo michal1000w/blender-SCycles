@@ -39,6 +39,12 @@ def main():
     from cycles import ui
     assert ui.CYCLES_RENDER_PT_sampling_path_guiding.poll(bpy.context), "Metal guiding UI hidden"
     assert not ui.CYCLES_RENDER_PT_sampling_path_guiding_debug.poll(bpy.context), "CPU controls exposed on Metal"
+    training_memory = scene.cycles.bl_rna.properties["guiding_gpu_history_memory_mb"]
+    assert training_memory.hard_min == 16, training_memory.hard_min
+    assert training_memory.hard_max == 4096, training_memory.hard_max
+    scene.cycles.guiding_gpu_history_memory_mb = 4096
+    assert scene.cycles.guiding_gpu_history_memory_mb == 4096
+    scene.cycles.guiding_gpu_history_memory_mb = 128
     results = {}
     images = {}
 
