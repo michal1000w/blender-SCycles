@@ -523,7 +523,7 @@ surface_shader_gpu_guiding_glossy_product(const ccl_private ShaderData *sd)
 }
 
 ccl_device_inline SurfaceGuidingProposal
-surface_shader_gpu_guiding_query(const ccl_private ShaderData *sd, const bool light_path)
+surface_shader_gpu_guiding_query(ccl_private ShaderData *sd, const bool light_path)
 {
   SurfaceGuidingProposal proposal{};
   if (!kernel_data.integrator.use_surface_guiding ||
@@ -531,6 +531,26 @@ surface_shader_gpu_guiding_query(const ccl_private ShaderData *sd, const bool li
       !(kernel_data.integrator.surface_guiding_probability > 0.0f) ||
       !(sd->runtime_flag & SR_BSDF_HAS_EVAL))
   {
+    return proposal;
+  }
+  const uint want = light_path ? 3u : 1u;
+  if ((sd->gpu_guiding_flags & 3u) == want && sd->gpu_guiding_cached_P.x == sd->P.x &&
+      sd->gpu_guiding_cached_P.y == sd->P.y && sd->gpu_guiding_cached_P.z == sd->P.z &&
+      sd->gpu_guiding_cached_wi.x == sd->wi.x && sd->gpu_guiding_cached_wi.y == sd->wi.y &&
+      sd->gpu_guiding_cached_wi.z == sd->wi.z)
+  {
+    proposal.weights = sd->gpu_guiding_weights;
+    proposal.position = guiding_gpu_field().normalized_position(sd->P);
+    proposal.probability = sd->gpu_guiding_probability;
+    proposal.bsdf_fraction = sd->gpu_guiding_bsdf_fraction;
+    proposal.use_smooth_product = (sd->gpu_guiding_flags & 4u) != 0u;
+    proposal.use_resampling = (sd->gpu_guiding_flags & 8u) != 0u;
+    proposal.product = {sd->gpu_guiding_product_axis,
+                        sd->gpu_guiding_product_anisotropy,
+                        GuidingDirectionalProduct::Type(sd->gpu_guiding_product_type)};
+    proposal.smooth_product = {{{sd->gpu_guiding_lobe_axis[0], sd->gpu_guiding_lobe_kappa[0]},
+                                {sd->gpu_guiding_lobe_axis[1], sd->gpu_guiding_lobe_kappa[1]}},
+                               {sd->gpu_guiding_lobe_weight[0], sd->gpu_guiding_lobe_weight[1]}};
     return proposal;
   }
   float total_weight = 0.0f;
@@ -599,6 +619,22 @@ surface_shader_gpu_guiding_query(const ccl_private ShaderData *sd, const bool li
     proposal.smooth_product = {{{proposal.product.axis, 3.0f}, {-proposal.product.axis, 3.0f}},
                                {two_sided ? 0.5f : 1.0f, two_sided ? 0.5f : 0.0f}};
   }
+  sd->gpu_guiding_weights = proposal.weights;
+  sd->gpu_guiding_cached_P = sd->P;
+  sd->gpu_guiding_cached_wi = sd->wi;
+  sd->gpu_guiding_product_axis = proposal.product.axis;
+  sd->gpu_guiding_product_anisotropy = proposal.product.anisotropy;
+  sd->gpu_guiding_product_type = proposal.product.type;
+  sd->gpu_guiding_lobe_axis[0] = proposal.smooth_product.lobes[0].axis;
+  sd->gpu_guiding_lobe_axis[1] = proposal.smooth_product.lobes[1].axis;
+  sd->gpu_guiding_lobe_kappa[0] = proposal.smooth_product.lobes[0].concentration;
+  sd->gpu_guiding_lobe_kappa[1] = proposal.smooth_product.lobes[1].concentration;
+  sd->gpu_guiding_lobe_weight[0] = proposal.smooth_product.weights[0];
+  sd->gpu_guiding_lobe_weight[1] = proposal.smooth_product.weights[1];
+  sd->gpu_guiding_probability = proposal.probability;
+  sd->gpu_guiding_bsdf_fraction = proposal.bsdf_fraction;
+  sd->gpu_guiding_flags = want | (proposal.use_smooth_product ? 4u : 0u) |
+                          (proposal.use_resampling ? 8u : 0u);
   return proposal;
 }
 
@@ -650,7 +686,7 @@ ccl_device_inline float surface_shader_gpu_guiding_pdf_from_query(
   return (1.0f - probability) * bsdf_pdf + probability * proposal.bsdf_fraction * guide_pdf;
 }
 
-ccl_device_inline float surface_shader_gpu_guiding_pdf(const ccl_private ShaderData *sd,
+ccl_device_inline float surface_shader_gpu_guiding_pdf(ccl_private ShaderData *sd,
                                                        const float3 direction,
                                                        const float bsdf_pdf,
                                                        const bool light_path)
