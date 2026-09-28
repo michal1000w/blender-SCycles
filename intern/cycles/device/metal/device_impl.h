@@ -19,9 +19,21 @@
 CCL_NAMESPACE_BEGIN
 
 class DeviceQueue;
+class MetalDiffractionAlbedoBuilder;
 
 class MetalDevice : public Device {
  public:
+  bool configure_diffraction_reference(DiffractionGratingCacheOptions &options,
+                                       string &error) override;
+  bool build_diffraction_albedo(const DiffractionAlbedoRequest &request,
+                                DiffractionAlbedoTable &table,
+                                string &error,
+                                const std::function<bool()> &cancelled = {}) override;
+  bool build_diffraction_two_sided_albedo(const DiffractionTwoSidedAlbedoRequest &request,
+                                          DiffractionTwoSidedAlbedoTable &table,
+                                          string &error,
+                                          const std::function<bool()> &cancelled = {}) override;
+  std::shared_ptr<MetalDiffractionAlbedoBuilder> diffraction_albedo_builder;
   id<MTLDevice> mtlDevice = nil;
   id<MTLLibrary> mtlLibrary[PSO_NUM] = {nil};
   id<MTLCommandQueue> mtlComputeCommandQueue = nil;

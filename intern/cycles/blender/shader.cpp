@@ -11,6 +11,7 @@
 #include "scene/scene.h"
 #include "scene/shader_graph.h"
 #include "scene/shader_nodes.h"
+#include "scene/diffraction_index.h"
 
 #include "blender/image.h"
 #include "blender/sync.h"
@@ -673,6 +674,38 @@ static ShaderNode *add_node(Scene *scene,
         break;
     }
     node = glossy;
+  }
+  else if (b_node.is_type("ShaderNodeBsdfDiffraction"_ustr)) {
+    const auto &storage = *static_cast<const blender::NodeShaderDiffraction *>(b_node.storage);
+    auto *grating = graph->create_node<DiffractionSmoothBsdfNode>();
+    grating->use_fast_model = storage.quality == 1;
+    grating->profile = {storage.pitch, storage.depth, storage.duty_cycle,
+                        storage.incident_ior, {storage.ridge_ior, storage.ridge_extinction},
+                        storage.groove_ior, {storage.substrate_ior, storage.substrate_extinction}};
+    if (b_node.id) {
+      if (diffraction_parse_conductor_csv(get_text_datablock_content(b_node.id),
+                                          grating->profile.ridge_spectrum,
+                                          grating->optical_constants_error)) {
+        grating->profile.absorbing_substrate_spectrum = grating->profile.ridge_spectrum;
+        grating->profile.ridge_ior = grating->profile.ridge_spectrum.front().index;
+        grating->profile.substrate_ior = grating->profile.ridge_ior;
+      }
+    }
+    const float maximum_index = grating->profile.substrate_ior.imag() > 0 ? storage.incident_ior :
+                                std::max(storage.incident_ior, storage.substrate_ior);
+    grating->cache_options.bounds = {{-0.5, -maximum_index, 380}, {0.5, maximum_index, 780}};
+    grating->cache_options.half_orders = 16;
+    grating->use_automatic_reference_orders = true;
+    /* The centered lamellar profile has both mirror symmetries. Quadratic
+     * chart cells and sufficient refinement are needed near grazing channels;
+     * retain the same error criterion over the complete angular domain. */
+    grating->cache_options.mirror_symmetry = true;
+    grating->cache_options.allow_quadratic_cells = true;
+    grating->cache_options.use_tensor_cells = grating->profile.ridge_ior.imag() == 0 &&
+                                              grating->profile.substrate_ior.imag() == 0;
+    grating->cache_options.maximum_depth = 36;
+    grating->cache_options.validation_workers = std::max(1, std::min(6, TaskScheduler::max_concurrency()));
+    node = grating;
   }
   else if (b_node.is_type("ShaderNodeBsdfGlass"_ustr)) {
     GlassBsdfNode *glass = graph->create_node<GlassBsdfNode>();
@@ -1606,6 +1639,64 @@ static void add_nodes(Scene *scene,
                     proxy_output_map);
 
   BKE_id_free(nullptr, &localtree->id);
+
+  /* Both SVM and OSL compile this imported graph. Disconnect disabled feature
+   * inputs here so cache preparation and wavelength/feature discovery also see
+   * the native shader. Never mutate the saved Blender node tree. */
+  blender::PointerRNA scene_rna_ptr = RNA_id_pointer_create(&b_scene.id);
+  blender::PointerRNA cscene = RNA_pointer_get(&scene_rna_ptr, "cycles");
+  const bool effects = get_boolean(cscene, "use_diffraction_effects");
+  const bool material = effects && get_boolean(cscene, "use_material_diffraction");
+  const bool polarization = effects && get_boolean(cscene, "use_polarization");
+  const vector<ShaderNode *> authored_nodes(graph->nodes.begin(), graph->nodes.end());
+  for (ShaderNode *node : authored_nodes) {
+    if (!material && node->type == DiffractionSmoothBsdfNode::get_node_type()) {
+      auto *grating = static_cast<DiffractionSmoothBsdfNode *>(node);
+      BsdfNode *carrier;
+      const float eta = float(grating->profile.substrate_ior.real()/grating->profile.incident_ior);
+      if (grating->profile.substrate_ior.imag() > 0.0) {
+        auto *metal = graph->create_node<MetallicBsdfNode>();
+        metal->set_distribution(CLOSURE_BSDF_MICROFACET_GGX_ID);
+        metal->set_fresnel_type(CLOSURE_BSDF_PHYSICAL_CONDUCTOR);
+        metal->set_ior(make_float3(eta,eta,eta));
+        const float k = float(grating->profile.substrate_ior.imag()/grating->profile.incident_ior);
+        metal->set_k(make_float3(k,k,k));
+        metal->set_roughness(0.0f);
+        carrier = metal;
+      }
+      else {
+        auto *glass = graph->create_node<GlassBsdfNode>();
+        glass->set_distribution(CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID);
+        glass->set_IOR(eta);
+        glass->set_roughness(0.0f);
+        carrier = glass;
+      }
+      carrier->set_color(grating->get_color());
+      for (const char *name : {"Color", "Normal", "Tangent"}) {
+        const ShaderInput *from = grating->input(name);
+        ShaderInput *to = carrier->input(name);
+        if (!to && name == string("Color")) to = carrier->input("Base Color");
+        if (from && to) {
+          if (from->link) graph->connect(from->link,to);
+          else carrier->set(to->socket_type,grating->get_float3(from->socket_type));
+        }
+      }
+      graph->relink(grating->output("BSDF"),carrier->output("BSDF"));
+      continue;
+    }
+    if (!material) {
+      if (ShaderInput *weight = node->input("Diffraction Weight")) {
+        if (weight->link) weight->disconnect();
+        node->set(weight->socket_type, 0.0f);
+      }
+    }
+    if (!polarization) {
+      if (ShaderInput *filter = node->input("Polarizer")) {
+        if (filter->link) filter->disconnect();
+        node->set(filter->socket_type, 0);
+      }
+    }
+  }
 }
 
 static void add_nodes(Scene *scene,
@@ -2016,6 +2107,7 @@ void BlenderSync::sync_lights(blender::Depsgraph &b_depsgraph, bool update_all, 
     }
 
     blender::Light &b_light = blender::id_cast<blender::Light &>(*b_id);
+    if (update_all) geometry_map.set_recalc(&b_light.id);
     Shader *shader;
 
     /* test if we need to sync */

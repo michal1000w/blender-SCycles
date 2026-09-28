@@ -145,6 +145,8 @@ PathTraceWorkGPU::PathTraceWorkGPU(Device *device,
       photon_hash_(device, "photon_hash"),
       photon_stored_(device, "photon_stored", MEM_READ_WRITE),
       bdpt_vertices_(device, "bdpt_light_vertices"),
+      bdpt_coherent_history_(device, "bdpt_coherent_history"),
+      bdpt_polarization_(device, "bdpt_polarization"),
       bdpt_vertex_indices_(device, "bdpt_vertex_indices"),
       bdpt_vertex_count_(device, "bdpt_light_vertex_count", MEM_READ_WRITE),
       guiding_nodes_(device, "guiding_spatial_nodes"),
@@ -684,9 +686,13 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
 {
   if (!use_bidirectional_path_tracing(device_scene_)) {
     bdpt_vertices_.free();
+    bdpt_coherent_history_.free();
+    bdpt_polarization_.free();
     bdpt_vertex_indices_.free();
     bdpt_vertex_count_.free();
     integrator_state_gpu_.bdpt_vertices = nullptr;
+    integrator_state_gpu_.bdpt_coherent_history = nullptr;
+    integrator_state_gpu_.bdpt_polarization = nullptr;
     integrator_state_gpu_.bdpt_vertex_indices = nullptr;
     integrator_state_gpu_.bdpt_vertex_count = nullptr;
     integrator_state_gpu_.bdpt_vertex_capacity = 0;
@@ -720,7 +726,13 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
      * batch independent caches within the existing path-state and memory bounds. */
     const char *value = std::getenv("CYCLES_METAL_BDPT_BATCH_SIZE");
     const uint requested = value ? uint(clamp(std::atoi(value), 1, 4)) : 4u;
-    const uint64_t cache_bytes = uint64_t(capacity) * (sizeof(KernelBDPTVertex) + sizeof(uint));
+    const uint64_t cache_bytes = uint64_t(capacity) *
+                                 (sizeof(KernelBDPTVertex) + sizeof(uint) +
+                                  (device_scene_->data.integrator.coherent_specular_enabled ?
+                                       sizeof(CoherentPathHistory) :
+                                       0) +
+                                  ((device_scene_->data.kernel_features & KERNEL_FEATURE_POLARIZATION) ?
+                                       sizeof(KernelPolarizationState) : 0));
     cache_capacity = min(requested, uint(max_num_paths_) / capacity);
     cache_capacity = max(1u, min(cache_capacity, uint((256ull * 1024 * 1024) / cache_bytes)));
   }
@@ -728,6 +740,18 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
   LOG_INFO << "BDPT light cache: " << capacity << " vertices, light tree "
            << (device_scene_->data.integrator.use_light_tree ? "enabled" : "disabled");
   bdpt_vertices_.alloc_to_device(size_t(capacity) * cache_capacity, false);
+  if (device_scene_->data.integrator.coherent_specular_enabled) {
+    bdpt_coherent_history_.alloc_to_device(size_t(capacity) * cache_capacity, false);
+  }
+  else {
+    bdpt_coherent_history_.free();
+  }
+  if (device_scene_->data.kernel_features & KERNEL_FEATURE_POLARIZATION) {
+    bdpt_polarization_.alloc_to_device(size_t(capacity) * cache_capacity, false);
+  }
+  else {
+    bdpt_polarization_.free();
+  }
   bdpt_vertex_indices_.alloc_to_device(size_t(capacity) * cache_capacity, false);
   if (bdpt_vertex_count_.size() != cache_capacity) {
     bdpt_vertex_count_.free();
@@ -736,6 +760,13 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
   }
 
   integrator_state_gpu_.bdpt_vertices = (KernelBDPTVertex *)bdpt_vertices_.device_pointer;
+  integrator_state_gpu_.bdpt_coherent_history =
+      device_scene_->data.integrator.coherent_specular_enabled ?
+          (CoherentPathHistory *)bdpt_coherent_history_.device_pointer :
+          nullptr;
+  integrator_state_gpu_.bdpt_polarization =
+      (device_scene_->data.kernel_features & KERNEL_FEATURE_POLARIZATION) ?
+          (KernelPolarizationState *)bdpt_polarization_.device_pointer : nullptr;
   integrator_state_gpu_.bdpt_vertex_indices = (uint *)bdpt_vertex_indices_.device_pointer;
   integrator_state_gpu_.bdpt_vertex_count = (uint *)bdpt_vertex_count_.device_pointer;
   integrator_state_gpu_.bdpt_vertex_capacity = capacity;
@@ -805,6 +836,10 @@ bool PathTraceWorkGPU::update_queue_counter_and_cache()
    * number of queued kernels, we could try asynchronously updating the image cache
    * while continuing to work on the majority of states? */
   IntegratorQueueCounter *queue_counter = integrator_queue_counter_.data();
+  if (queue_counter->coherent_error) {
+    device_->set_error("Coherent sphere transmission encountered an unresolved caustic, axial ring, grazing path or invalid geometry; render rejected rather than dropping paths");
+    return false;
+  }
   if (queue_counter->bdpt_error) {
     device_->set_error("BDPT camera sample is outside its independent light-cache batch");
     return false;

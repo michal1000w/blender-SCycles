@@ -64,6 +64,26 @@ static void node_declare(NodeDeclarationBuilder &b)
       .min(1.0f)
       .max(1000.0f)
       .description("Index of refraction (IOR) of the thin film");
+  PanelDeclarationBuilder &polarization = b.add_panel("Polarization"_ustr).default_closed(true);
+  polarization.add_input<decl::Bool>("Polarizer"_ustr)
+      .default_value(false)
+      .description("Cycles: ideal absorbing linear polarization analyzer on transmission");
+  polarization.add_input<decl::Float>("Polarizer Angle"_ustr)
+      .default_value(0.0f).subtype(PROP_ANGLE)
+      .description("Pass axis in object-local XY; unchanged by front/back surface orientation");
+  PanelDeclarationBuilder &grating = b.add_panel("Diffraction"_ustr).default_closed(true);
+  grating.add_input<decl::Float>("Diffraction Weight"_ustr)
+      .default_value(0.0f).min(0.0f).max(1.0f).subtype(PROP_FACTOR)
+      .description("Cycles: Fast grating coverage; Multiscatter GGX uses a bounded lossless "
+                   "film and applies one reciprocal Color tint per return");
+  grating.add_input<decl::Float>("Diffraction Pitch"_ustr)
+      .default_value(1600.0f).min(1.0f).max(1000000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Depth"_ustr)
+      .default_value(150.0f).min(0.0f).max(100000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Duty Cycle"_ustr)
+      .default_value(0.5f).min(0.0f).max(1.0f).subtype(PROP_FACTOR);
+  grating.add_input<decl::Vector>("Tangent"_ustr).hide_value()
+      .description("Direction across the grating grooves");
 }
 
 static void node_shader_buts_glass(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)

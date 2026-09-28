@@ -96,6 +96,12 @@ ccl_device_forceinline float3 integrate_surface_ray_offset(KernelGlobals kg,
   return ray_offset(ray_P, sd->Ng);
 }
 
+CCL_NAMESPACE_END
+#include "kernel/light/coherent.h"
+#include "kernel/light/coherent_history_kernel.h"
+#include "kernel/light/coherent_specular.h"
+CCL_NAMESPACE_BEGIN
+
 ccl_device_forceinline bool integrate_surface_holdout(KernelGlobals kg,
                                                       ConstIntegratorState state,
                                                       ccl_private ShaderData *sd,
@@ -149,7 +155,7 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
 #endif
 
   /* Evaluate emissive closure. */
-  const Spectrum L = surface_shader_emission(sd);
+  const Spectrum L = surface_shader_emission(sd) * polarization_emission_weight(kg, state);
 
   float mis_weight;
 #ifdef __KERNEL_METAL__
@@ -384,6 +390,14 @@ ccl_device
 
   kernel_assert(ls.pdf != 0.0f);
 
+  if (kernel_data.integrator.coherent_specular_enabled &&
+      coherent_detector_eligible(sd) && ls.type == LIGHT_POINT &&
+      coherent_history_owned_direct_source(kg, ls.prim))
+  {
+    /* The deterministic detector estimator owns this direct diagonal. */
+    return SHADER_EVAL_EMPTY;
+  }
+
   const bool is_transmission = dot(ls.D, sd->N) < 0.0f;
 
   if (ls.prim != PRIM_NONE && ls.prim == sd->prim && ls.object == sd->object) {
@@ -417,6 +431,26 @@ ccl_device
   float avg_roughness_squared = 0.0f;
   const float bsdf_pdf = surface_shader_bsdf_eval(
       kg, state, sd, ls.D, &bsdf_eval, ls.shader, avg_roughness_squared);
+  if (polarization_enabled(kg) && mnee_vertex_count == 0 && !bsdf_eval_is_zero(&bsdf_eval)) {
+    const auto sensitivity = polarization_surface_transport(kg, sd, ls.D,
+        polarization_path_read(state), true, nullptr, bsdf_eval_sum(&bsdf_eval), false, ls.shader);
+    bsdf_eval_mul(&bsdf_eval, sensitivity.value[0]);
+  }
+  /* The legacy direct-group estimator has a different path partition. In
+   * specular-connection mode only declared detector endpoints receive a
+   * coherent field; all other NEE remains ordinary incoherent radiometry. */
+  const bool coherent_source = (kernel_data.kernel_features & KERNEL_FEATURE_COHERENT_DIRECT) &&
+                               !kernel_data.integrator.coherent_specular_enabled &&
+                               mnee_vertex_count == 0 && ls.type == LIGHT_POINT &&
+                               kernel_data_fetch(lights, ls.prim).coherence_group != 0 &&
+                               kernel_data_fetch(lights, ls.prim).coherence_length > 0.0f;
+  Spectrum coherent_scale = one_spectrum();
+  if (coherent_source) {
+    coherent_scale = coherent_direct_light_scale(kg, state, sd, &ls);
+    if (sd->runtime_flag & SR_CACHE_MISS) {
+      return SHADER_EVAL_CACHE_MISS;
+    }
+  }
 #ifdef __KERNEL_METAL__
   const Spectrum guiding_scattering_throughput = INTEGRATOR_STATE(state, path, throughput) *
                                                  bsdf_eval_sum(&bsdf_eval);
@@ -449,7 +483,16 @@ ccl_device
 #else
     mis_weight = light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
 #endif
-    bsdf_eval_mul(&bsdf_eval, light_shader_eval * ls.eval_fac / ls.pdf * mis_weight);
+    /* Keep the ordinary radiometric MIS partition, including light subpaths.
+     * Only NEE estimates the additional direct-source cross terms. Thus its
+     * multiplier is w_NEE + (I_coherent / I_incoherent - 1), not w_NEE times
+     * that ratio. The correction may be negative; clamping it would erase
+     * destructive interference. For ordinary PT, point-source w_NEE is one. */
+    Spectrum direct_weight = make_spectrum(mis_weight);
+    if (coherent_source) {
+      direct_weight = coherent_scale + make_spectrum(mis_weight - 1.0f);
+    }
+    bsdf_eval_mul(&bsdf_eval, light_shader_eval * ls.eval_fac / ls.pdf * direct_weight);
 
     /* Path termination for constant light shader. */
     if (is_constant_light_shader && !(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_TREE)) {
@@ -507,6 +550,13 @@ ccl_device
                               guiding_gpu_surface_orientation(sd),
                               false,
                               ls.t);
+    if (coherent_source && bdpt_enabled_for_surface_path(state) && guiding_gpu_training()) {
+      /* The combined NEE baseline and cross-term estimator can be signed.
+       * Do not train a positive radiance proposal with this signed observation.
+       * Ordinary light-subpath observations continue to train the baseline. */
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_gpu_guiding, history_head) = ~0u;
+      INTEGRATOR_STATE_WRITE(shadow_state, shadow_gpu_guiding, direct_record_index) = ~0u;
+    }
   }
 #endif
 
@@ -580,10 +630,21 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
                                            uint(INTEGRATOR_STATE(state, path, sample)),
                                            bounce ^ 0x62647074u);
   const uint vertex_index = min(uint(select * float(vertex_count)), vertex_count - 1u);
+  const uint storage_index = kernel_integrator_state.bdpt_vertex_indices
+      [cache * kernel_integrator_state.bdpt_vertex_capacity + vertex_index];
   const ccl_global KernelBDPTVertex *light_vertex =
-      &kernel_integrator_state.bdpt_vertices
-           [kernel_integrator_state.bdpt_vertex_indices
-                [cache * kernel_integrator_state.bdpt_vertex_capacity + vertex_index]];
+      &kernel_integrator_state.bdpt_vertices[storage_index];
+  /* Ownership is attached to the light-side prefix ending at its marked detector.
+   * The camera suffix may contain any number of unmarked surfaces. Filtering only
+   * when the current camera vertex is a detector would count the same source
+   * class again through such suffixes. */
+  if (kernel_integrator_state.bdpt_coherent_history &&
+      coherent_history_owned_candidate(
+          kg, kernel_integrator_state.bdpt_coherent_history[storage_index],
+          light_vertex->emitter_object))
+  {
+    return false;
+  }
   /* Medium records have no triangle, UVs or surface closure. Their sensor strategy
    * is evaluated separately; never reconstruct one as a surface intersection. */
   if (light_vertex->type == PRIMITIVE_VOLUME) {
@@ -750,6 +811,15 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
   Spectrum connection = Spectrum(light_vertex->throughput) * spectral_weight *
                         bsdf_eval_sum(&camera_eval) * light_connection_eval *
                         (cache_scale * mis_weight / distance2);
+  if (polarization_enabled(kg)) {
+    const auto camera_sensitivity = polarization_surface_transport(kg, sd, direction,
+        polarization_path_read(state), true, nullptr, bsdf_eval_sum(&camera_eval), false);
+    const auto light_sensitivity = polarization_surface_transport(kg, &light_sd, -light_incoming,
+        camera_sensitivity, true, nullptr, bsdf_eval_sum(&light_adjoint_eval), false,
+        emitter_shader_flags);
+    connection *= polarization_spectrum_contract(light_sensitivity,
+        polarization_unpack(kernel_integrator_state.bdpt_polarization[storage_index]));
+  }
   if (!isfinite_safe(connection) || is_zero(connection)) {
     return false;
   }
@@ -841,6 +911,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;
     }
 #  endif
+    if (polarization_enabled(kg)) {
+      polarization_path_write(state, polarization_depolarized(polarization_path_read(state)));
+    }
     return subsurface_bounce(kg, state, sd, sc);
   }
 #endif
@@ -851,6 +924,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;
     }
 #endif
+    if (polarization_enabled(kg)) {
+      polarization_path_write(state, polarization_depolarized(polarization_path_read(state)));
+    }
     return integrate_surface_ray_portal(kg, state, sd, sc);
   }
 
@@ -944,7 +1020,16 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   const bool update_bdpt_mis = bdpt_enabled_for_surface_path(state) &&
                                !(label & LABEL_TRANSPARENT);
   if (update_bdpt_mis) {
-    reverse_pdf = (label & LABEL_SINGULAR) ? mis_pdf : bdpt_reverse_pdf(kg, state, sd, bsdf_wo);
+    const bool grating_delta = (label & LABEL_SINGULAR) &&
+        surface_shader_has_physical_grating(sd) &&
+        (sc->type == CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID || bsdf_microfacet_has_delta(sc));
+    if (grating_delta) {
+      /* Keep the forward mass supplied by the sampled closure mixture. */
+      reverse_pdf = bdpt_reverse_pdf(kg, state, sd, bsdf_wo, false, nullptr, true);
+    }
+    else {
+      reverse_pdf = (label & LABEL_SINGULAR) ? mis_pdf : bdpt_reverse_pdf(kg, state, sd, bsdf_wo);
+    }
     if (sd->runtime_flag & SR_CACHE_MISS) {
       return LABEL_CACHE_MISS;
     }
@@ -979,6 +1064,12 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
         kg, INTEGRATOR_STATE(state, ray, dD), bsdf_avg_roughness_squared);
     INTEGRATOR_STATE_WRITE(state, ray, dD) = dD;
 #endif
+  }
+
+  if (polarization_enabled(kg)) {
+    polarization_path_write(state, polarization_surface_transport(kg, sd, normalize(bsdf_wo),
+        polarization_path_read(state), true, sc, bsdf_eval_sum(&bsdf_eval),
+        (label & LABEL_SINGULAR) != 0));
   }
 
   /* Update throughput. */
@@ -1337,6 +1428,36 @@ ccl_device int integrate_surface(KernelGlobals kg,
     }
 #endif
     if (surface_stage < 2) {
+      if (surface_stage == 0 && kernel_data.integrator.coherent_specular_enabled &&
+          (sd.object_flag & SD_OBJECT_COHERENT_DETECTOR))
+      {
+        /* Diagonals and signed pairs for declared coherent source paths are
+         * owned here. Ordinary NEE/BDPT strategies for this class are
+         * filtered; unrelated light paths retain their estimators. */
+        Spectrum primary_direct;
+        const bool light_passes = kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES;
+        Spectrum intensity = coherent_specular_complete_intensity(
+            kg, state, &sd, light_passes ? &primary_direct : nullptr);
+        /* The declared Lambertian detector reradiates an unpolarized field.
+         * Camera-side analyzers therefore contract its intensity with A_I. */
+        const Spectrum detector_weight = polarization_emission_weight(kg, state);
+        intensity *= detector_weight;
+        if (light_passes) primary_direct *= detector_weight;
+        ccl_global float *buffer = film_pass_pixel_render_buffer(kg, state, render_buffer);
+        if (light_passes) {
+          const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
+          film_write_coherent_surface_light_passes(
+              kg, state, throughput * intensity, throughput * primary_direct, buffer);
+        }
+        if (!is_zero(intensity)) {
+          film_write_combined_pass(kg,
+                                   path_visibility,
+                                   path_flag,
+                                   INTEGRATOR_STATE(state, path, sample),
+                                   INTEGRATOR_STATE(state, path, throughput) * intensity,
+                                   buffer);
+        }
+      }
       /* Direct light. */
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_DIRECT_LIGHT);
       const ShaderEvalResult result = integrate_surface_direct_light<node_feature_mask>(

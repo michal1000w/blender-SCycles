@@ -1124,6 +1124,12 @@ struct SVMNodeGlossyBsdfData {
   SVMInputFloat roughness;
   SVMInputFloat anisotropy;
   SVMInputFloat rotation;
+  SVMInputFloat diffraction_weight;
+  SVMInputFloat diffraction_pitch;
+  SVMInputFloat diffraction_depth;
+  SVMInputFloat diffraction_duty;
+  SVMInputFloat diffraction_medium_ior;
+  int diffraction_albedo_handle;
   SVMStackOffset normal_offset;
   SVMStackOffset tangent_offset;
   uint8_t _pad[2];
@@ -1131,12 +1137,33 @@ struct SVMNodeGlossyBsdfData {
 static_assert(alignof(SVMNodeGlossyBsdfData) <= alignof(uint));
 static_assert(sizeof(SVMNodeGlossyBsdfData) % sizeof(uint) == 0);
 
+/* Physical smooth grating. Material constants must match the registered
+ * electromagnetic cache; only the shading frame is evaluated from the stack. */
+struct SVMNodeDiffractionSmoothBsdfData {
+  int cache_handle;
+  float pitch;
+  float upper_index;
+  float lower_index;
+  float depth, duty, phase_contrast, reflection_budget, transmission_budget, ridge_extinction;
+  int ridge_table, groove_table, substrate_table;
+  SVMStackOffset normal_offset;
+  SVMStackOffset tangent_offset;
+  uint8_t _pad[2];
+};
+static_assert(alignof(SVMNodeDiffractionSmoothBsdfData) <= alignof(uint));
+static_assert(sizeof(SVMNodeDiffractionSmoothBsdfData) % sizeof(uint) == 0);
+
 /* Refraction BSDF. */
 struct SVMNodeRefractionBsdfData {
   SVMInputFloat roughness;
   SVMInputFloat ior;
+  SVMInputFloat diffraction_weight;
+  SVMInputFloat diffraction_pitch;
+  SVMInputFloat diffraction_depth;
+  SVMInputFloat diffraction_duty;
   SVMStackOffset normal_offset;
-  uint8_t _pad[3];
+  SVMStackOffset tangent_offset;
+  uint8_t _pad[2];
 };
 static_assert(alignof(SVMNodeRefractionBsdfData) <= alignof(uint));
 static_assert(sizeof(SVMNodeRefractionBsdfData) % sizeof(uint) == 0);
@@ -1144,14 +1171,17 @@ static_assert(sizeof(SVMNodeRefractionBsdfData) % sizeof(uint) == 0);
 /* Glass BSDF. */
 struct SVMNodeGlassBsdfData {
   SVMInputFloat3 color;
+  SVMInputInt polarizer;
+  SVMInputFloat polarizer_angle;
   SVMInputFloat roughness;
   SVMInputFloat anisotropy;
   SVMInputFloat rotation;
   SVMInputFloat ior;
   SVMInputFloat thin_film_thickness;
   SVMInputFloat thin_film_ior;
-  SVMStackOffset normal_offset;
-  SVMStackOffset tangent_offset;
+  SVMInputFloat diffraction_weight, diffraction_pitch, diffraction_depth, diffraction_duty;
+  SVMStackOffset normal_offset, tangent_offset;
+  int diffraction_two_sided_handle;
   uint8_t _pad[2];
 };
 static_assert(alignof(SVMNodeGlassBsdfData) <= alignof(uint));
@@ -1167,6 +1197,8 @@ struct SVMNodeMetallicBsdfData {
   SVMInputFloat rotation;
   SVMInputFloat thin_film_thickness;
   SVMInputFloat thin_film_ior;
+  SVMInputFloat diffraction_weight, diffraction_pitch, diffraction_depth, diffraction_duty;
+  int diffraction_albedo_handle;
   SVMStackOffset normal_offset;
   SVMStackOffset tangent_offset;
   uint8_t _pad[2];
@@ -1247,6 +1279,12 @@ struct SVMNodePrincipledBsdfData {
   SVMInputFloat thin_film_ior;
   /* Thin wall. */
   SVMInputInt thin_wall;
+  SVMInputFloat diffraction_weight, diffraction_pitch, diffraction_depth, diffraction_duty;
+  int diffraction_albedo_handle;
+  int diffraction_two_sided_handle;
+  int diffraction_thin_sheet_handle_r;
+  int diffraction_thin_sheet_handle_g;
+  int diffraction_thin_sheet_handle_b;
 };
 static_assert(alignof(SVMNodePrincipledBsdfData) <= alignof(uint));
 static_assert(sizeof(SVMNodePrincipledBsdfData) % sizeof(uint) == 0);

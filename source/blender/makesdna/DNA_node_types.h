@@ -2777,6 +2777,22 @@ struct NodeShaderPrincipled {
   char _pad[3] = {};
 };
 
+struct NodeShaderDiffraction {
+  DNA_DEFINE_CXX_METHODS(NodeShaderDiffraction)
+
+  float pitch = 740.0f;
+  float depth = 0.0f;
+  float duty_cycle = 0.5f;
+  float incident_ior = 1.0f;
+  float ridge_ior = 1.5f;
+  float ridge_extinction = 0.0f;
+  float groove_ior = 1.0f;
+  float substrate_ior = 1.5f;
+  float substrate_extinction = 0.0f;
+  /* Zero preserves the physical model in files written before this selector. */
+  int quality = 0;
+};
+
 struct NodeShaderHairPrincipled {
   DNA_DEFINE_CXX_METHODS(NodeShaderHairPrincipled)
 

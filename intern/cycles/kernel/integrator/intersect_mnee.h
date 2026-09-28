@@ -23,7 +23,12 @@ integrate_surface_mnee(KernelGlobals kg,
   /* Kernel must only be scheduled for caustic receivers. */
   kernel_assert(sd->object_flag & SD_OBJECT_CAUSTICS_RECEIVER);
 
-  if (!kernel_data.integrator.use_direct_light) {
+  /* Shader setup has static flags here, but has not evaluated the closures yet.
+   * A proven delta-only receiver cannot contribute to the continuous manifold
+   * connection; avoid tracing and solving a manifold whose contribution is zero. */
+  if (!kernel_data.integrator.use_direct_light ||
+      (sd->shader_flag & SD_HAS_ONLY_DELTA_SURFACE))
+  {
     return SHADER_EVAL_OK;
   }
 
@@ -67,8 +72,11 @@ integrate_surface_mnee(KernelGlobals kg,
   Spectrum mnee_throughput = zero_spectrum();
   float3 mnee_wo = zero_float3();
   int mnee_vertex_count = 0;
+  PolarizationMueller polarization_chain{};
   const ShaderEvalResult result = kernel_path_mnee_sample(
-      kg, state, sd, emission_sd, rng_state, &ls, &mnee_throughput, &mnee_wo, mnee_vertex_count);
+      kg, state, sd, emission_sd, rng_state, &ls, &mnee_throughput, &mnee_wo, mnee_vertex_count,
+      nullptr, false, nullptr, -1.0f, false, nullptr,
+      polarization_enabled(kg) ? &polarization_chain : nullptr);
   if (result == SHADER_EVAL_CACHE_MISS) {
     return SHADER_EVAL_CACHE_MISS;
   }
@@ -76,6 +84,13 @@ integrate_surface_mnee(KernelGlobals kg,
   /* Store MNEE state in a shadow state, to avoid increasing path state size.
    * This is then turned into an actual shadow ray state in shade_surface, or discarded. */
   if (mnee_vertex_count > 0) {
+    if (polarization_enabled(kg)) {
+      BsdfEval receiver_eval; float roughness=0;
+      surface_shader_bsdf_eval(kg, state, sd, mnee_wo, &receiver_eval, ls.shader, roughness);
+      const auto receiver_sensitivity = polarization_surface_transport(kg, sd, mnee_wo,
+          polarization_path_read(state), true, nullptr, bsdf_eval_sum(&receiver_eval), false, ls.shader);
+      mnee_throughput *= polarization_spectrum_apply(polarization_chain, receiver_sensitivity, true).value[0];
+    }
     Ray ray ccl_optional_struct_init;
     light_sample_to_surface_shadow_ray(kg, emission_sd, &ls, &ray);
 

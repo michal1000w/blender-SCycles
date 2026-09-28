@@ -10,6 +10,7 @@
 #include "kernel/closure/bssrdf.h"
 #include "kernel/closure/emissive.h"
 #include "kernel/closure/volume.h"
+#include "kernel/light/coherent_detector.h"
 
 #include "kernel/geom/curve.h"
 #include "kernel/geom/object.h"
@@ -59,6 +60,9 @@ ccl_device_inline int svm_node_closure_bsdf_skip(int offset, const uint type)
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
     case CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID:
       offset += sizeof(SVMNodeGlossyBsdfData) / sizeof(uint);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID:
+      offset += sizeof(SVMNodeDiffractionSmoothBsdfData) / sizeof(uint);
       break;
     case CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID:
     case CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID:
@@ -219,7 +223,15 @@ ccl_device
       Spectrum weight = principled_bsdf_emission(
           kg, sd, stack, data, N, ray_visibility, path_flag, mix_weight);
 
-      const float3 base_color_rgb = max(stack_load(stack, data.base_color), zero_float3());
+      float3 base_color_rgb = stack_load(stack, data.base_color);
+      if (kernel_data.integrator.coherent_specular_enabled &&
+          (sd->object_flag & SD_OBJECT_COHERENT_DETECTOR))
+      {
+        base_color_rgb = coherent_detector_passive_color(base_color_rgb);
+      }
+      else {
+        base_color_rgb = max(base_color_rgb, zero_float3());
+      }
       const Spectrum base_color = rgb_to_spectrum(base_color_rgb);
       const Spectrum clamped_base_color = min(base_color, white);
       const float3 clamped_base_color_rgb = min(base_color_rgb, one_float3());
@@ -236,10 +248,11 @@ ccl_device
                                      fmaxf(stack_load(stack, data.thin_film_ior), 1e-5f) :
                                      0.0f;
 
+      const float diffraction=saturatef(stack_load(stack,data.diffraction_weight));
       float alpha_x = sqr(roughness);
       float alpha_y = sqr(roughness);
       float3 T = zero_float3();
-      if (anisotropic > 0.0f && stack_valid(data.tangent_offset)) {
+      if ((anisotropic > 0.0f || diffraction > 0.0f) && stack_valid(data.tangent_offset)) {
         T = stack_load_float3(stack, data.tangent_offset);
         const float aspect = sqrtf(1.0f - anisotropic * 0.9f);
         alpha_x /= aspect;
@@ -287,7 +300,22 @@ ccl_device
             /* setup bsdf */
             sd->runtime_flag |= bsdf_microfacet_ggx_setup(bsdf);
             const bool is_multiggx = (distribution == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
-            bsdf_microfacet_setup_fresnel_f82_tint(kg, bsdf, sd->wi, fresnel, f82, is_multiggx);
+            bsdf_microfacet_setup_fresnel_f82_tint(
+                kg, bsdf, sd->wi, fresnel, f82, is_multiggx && diffraction == 0.0f);
+            if (diffraction>0) {
+              if (is_multiggx) {
+                bsdf_diffraction_conductor_multiggx_split_setup(
+                    kg, sd, bsdf, T, stack_load(stack, data.diffraction_pitch),
+                    stack_load(stack, data.diffraction_depth),
+                    stack_load(stack, data.diffraction_duty), diffraction,
+                    data.diffraction_albedo_handle);
+              }
+              else {
+                bsdf_diffraction_conductor_split_setup(sd,bsdf,T,
+                    stack_load(stack,data.diffraction_pitch),stack_load(stack,data.diffraction_depth),
+                    stack_load(stack,data.diffraction_duty),diffraction);
+              }
+            }
           }
         }
         /* Attenuate other components */
@@ -304,24 +332,66 @@ ccl_device
           if (thin_wall) {
             const Spectrum transmission_color = bsdf_spectral_transmission_color(
                 kg, sd, clamped_base_color_rgb);
-            bsdf_thin_glass_setup(kg,
+            const float dispersion_scale = saturatef(
+                stack_load(stack, data.transmission_dispersion_scale));
+            const float abbe_number = fmaxf(
+                stack_load(stack, data.transmission_dispersion_abbe_number), 0.0f);
+            bsdf_diffraction_thin_glass_setup(kg,
                                   sd,
                                   reflective_caustics,
                                   refractive_caustics,
                                   {specular_tint, transmission_color},
                                   transmission_weight * weight,
                                   valid_reflection_N,
+                                  T,
                                   sqr(roughness),
                                   ior,
                                   thinfilm,
                                   ray_visibility,
-                                  path_flag);
+                                  path_flag,
+                                  diffraction,
+                                  stack_load(stack, data.diffraction_pitch),
+                                  stack_load(stack, data.diffraction_depth),
+                                  stack_load(stack, data.diffraction_duty),
+                                  safe_divide(dispersion_scale, abbe_number),
+                                  make_int3(data.diffraction_thin_sheet_handle_r,
+                                            data.diffraction_thin_sheet_handle_g,
+                                            data.diffraction_thin_sheet_handle_b));
           }
           else {
             const Spectrum transmission_color = bsdf_spectral_transmission_color(
                 kg, sd, sqrt(clamped_base_color_rgb));
+            const float dispersion_scale=saturatef(stack_load(stack,data.transmission_dispersion_scale));
+            const float abbe_number=fmaxf(stack_load(stack,data.transmission_dispersion_abbe_number),0.0f);
+            const float inv_abbe=safe_divide(dispersion_scale,abbe_number);
+            if (diffraction > 0.0f) {
+              const Spectrum grating_weight = transmission_weight * weight * diffraction;
+              if (distribution == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID &&
+                  data.diffraction_two_sided_handle >= 0)
+              {
+                bsdf_diffraction_principled_transmission_two_sided_setup(
+                    kg, sd, reflective_caustics ? grating_weight : zero_spectrum(),
+                    refractive_caustics ? grating_weight * saturate(transmission_color) :
+                                            zero_spectrum(),
+                    valid_reflection_N, T, roughness, ior,
+                    stack_load(stack, data.diffraction_pitch),
+                    stack_load(stack, data.diffraction_depth),
+                    stack_load(stack, data.diffraction_duty), specular_tint, inv_abbe,
+                    thinfilm_ior, thinfilm_thickness, data.diffraction_two_sided_handle);
+              }
+              else {
+                bsdf_diffraction_principled_transmission_setup(sd,
+                    reflective_caustics ? grating_weight : zero_spectrum(),
+                    refractive_caustics ? grating_weight * transmission_color : zero_spectrum(),
+                    valid_reflection_N, T, roughness, ior,
+                    stack_load(stack, data.diffraction_pitch),
+                    stack_load(stack, data.diffraction_depth),
+                    stack_load(stack, data.diffraction_duty), specular_tint, inv_abbe,
+                    thinfilm_ior, thinfilm_thickness);
+              }
+            }
             ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
-                sd, sizeof(MicrofacetBsdf), transmission_weight * weight);
+                sd, sizeof(MicrofacetBsdf), transmission_weight * weight * (1.0f - diffraction));
             ccl_private FresnelGeneralizedSchlick *fresnel =
                 (bsdf != nullptr) ? (ccl_private FresnelGeneralizedSchlick *)closure_alloc_extra(
                                         sd, sizeof(FresnelGeneralizedSchlick)) :
@@ -334,11 +404,6 @@ ccl_device
               bsdf->alpha_x = alpha_x;
               bsdf->alpha_y = alpha_y;
 
-              const float dispersion_scale = saturatef(
-                  stack_load(stack, data.transmission_dispersion_scale));
-              const float abbe_number = fmaxf(
-                  stack_load(stack, data.transmission_dispersion_abbe_number), 0.0f);
-              const float inv_abbe = safe_divide(dispersion_scale, abbe_number);
               bsdf->ior = backfacing ? 1.0f / ior : ior;
               bsdf->ior = bsdf_glass_ior(sd, bsdf->ior, inv_abbe);
 
@@ -380,6 +445,7 @@ ccl_device
 
       /* Specular component */
       if (reflective_caustics && (eta != 1.0f || thinfilm_thickness > 0.1f)) {
+        const int first_specular_closure = sd->num_closure;
         ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
             sd, sizeof(MicrofacetBsdf), weight);
         ccl_private FresnelGeneralizedSchlick *fresnel =
@@ -404,10 +470,30 @@ ccl_device
           sd->runtime_flag |= bsdf_microfacet_ggx_setup(bsdf);
           const bool is_multiggx = (distribution == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
           bsdf_microfacet_setup_fresnel_generalized_schlick(
-              kg, bsdf, sd->wi, fresnel, is_multiggx);
+              kg, bsdf, sd->wi, fresnel, is_multiggx && diffraction == 0.0f);
 
-          /* Attenuate lower layers */
-          const Spectrum albedo = closure_layer_albedo(kg, sd, (ccl_private ShaderClosure *)bsdf);
+          if (diffraction > 0.0f) {
+            if (is_multiggx) {
+              bsdf_diffraction_conductor_multiggx_split_setup(
+                  kg, sd, bsdf, T, stack_load(stack, data.diffraction_pitch),
+                  stack_load(stack, data.diffraction_depth),
+                  stack_load(stack, data.diffraction_duty), diffraction,
+                  data.diffraction_albedo_handle);
+            }
+            else {
+              bsdf_diffraction_conductor_split_setup(
+                  sd, bsdf, T, stack_load(stack, data.diffraction_pitch),
+                  stack_load(stack, data.diffraction_depth),
+                  stack_load(stack, data.diffraction_duty), diffraction);
+            }
+          }
+          /* The grating split may add a second closure. Layer against the
+           * combined native and returned directional energy, not only the
+           * original single-event carrier. */
+          Spectrum albedo = zero_spectrum();
+          for (int i = first_specular_closure; i < sd->num_closure; i++) {
+            albedo += closure_layer_albedo(kg, sd, &sd->closure[i]);
+          }
           weight = closure_layering_weight(albedo, weight);
         }
       }
@@ -469,7 +555,13 @@ ccl_device
       float3 N = stack_load_float3_default(stack, bsdf_data.normal_offset, sd->N);
       N = safe_normalize_fallback(N, sd->N);
 
-      const Spectrum weight = closure_weight * mix_weight;
+      Spectrum weight = closure_weight;
+      if (kernel_data.integrator.coherent_specular_enabled &&
+          (sd->object_flag & SD_OBJECT_COHERENT_DETECTOR))
+      {
+        weight = coherent_detector_passive_color(weight);
+      }
+      weight *= mix_weight;
       const float roughness = stack_load(stack, bsdf_data.roughness);
       if (diffuse_roughness_is_almost_zero(roughness)) {
         bsdf_diffuse_setup(sd, N, weight);
@@ -510,6 +602,7 @@ ccl_device
         break;
       }
 #endif
+      const float diffraction=saturatef(stack_load(stack,cdata.diffraction_weight));
       ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
           sd, sizeof(MicrofacetBsdf), rgb_to_spectrum(make_float3(mix_weight)));
 
@@ -521,7 +614,7 @@ ccl_device
         const float roughness = saturatef(stack_load(stack, cdata.roughness));
         bsdf->alpha_x = sqr(roughness);
         bsdf->alpha_y = sqr(roughness);
-        if (anisotropy > 0.0f && stack_valid(cdata.tangent_offset)) {
+        if ((anisotropy > 0.0f || diffraction > 0.0f) && stack_valid(cdata.tangent_offset)) {
           bsdf->T = stack_load_float3(stack, cdata.tangent_offset);
           const float aspect = sqrtf(1.0f - anisotropy * 0.9f);
           bsdf->alpha_x /= aspect;
@@ -568,7 +661,7 @@ ccl_device
           const float3 k = max(stack_load(stack, cdata.edge_tint_k), zero_float3());
 
           fresnel->ior = {rgb_to_spectrum(n), rgb_to_spectrum(k)};
-          bsdf_microfacet_setup_fresnel_conductor(kg, bsdf, sd->wi, fresnel, is_multiggx);
+          bsdf_microfacet_setup_fresnel_conductor(kg, bsdf, sd->wi, fresnel, is_multiggx && diffraction == 0.0f);
         }
         else {
           ccl_private FresnelF82Tint *fresnel = (ccl_private FresnelF82Tint *)closure_alloc_extra(
@@ -586,7 +679,19 @@ ccl_device
 
           fresnel->f0 = rgb_to_spectrum(color);
           const Spectrum f82 = rgb_to_spectrum(tint);
-          bsdf_microfacet_setup_fresnel_f82_tint(kg, bsdf, sd->wi, fresnel, f82, is_multiggx);
+          bsdf_microfacet_setup_fresnel_f82_tint(kg, bsdf, sd->wi, fresnel, f82, is_multiggx && diffraction == 0.0f);
+        }
+        if (diffraction>0) {
+          if (is_multiggx) {
+            bsdf_diffraction_conductor_multiggx_split_setup(kg, sd, bsdf, bsdf->T,
+                stack_load(stack, cdata.diffraction_pitch), stack_load(stack, cdata.diffraction_depth),
+                stack_load(stack, cdata.diffraction_duty), diffraction, cdata.diffraction_albedo_handle);
+          }
+          else {
+            bsdf_diffraction_conductor_split_setup(sd, bsdf, bsdf->T,
+                stack_load(stack, cdata.diffraction_pitch), stack_load(stack, cdata.diffraction_depth),
+                stack_load(stack, cdata.diffraction_duty), diffraction);
+          }
         }
       }
       break;
@@ -598,6 +703,27 @@ ccl_device
       const float3 position = stack_load_float3_default(stack, bsdf_data.position_offset, sd->P);
       const float3 direction = stack_load(stack, bsdf_data.direction);
       bsdf_ray_portal_setup(sd, weight, position, direction);
+      break;
+    }
+    case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID: {
+      const ccl_global SVMNodeDiffractionSmoothBsdfData &data =
+          svm_node_get<SVMNodeDiffractionSmoothBsdfData>(kg, &offset);
+      const float3 N = stack_load_float3_default(stack, data.normal_offset, sd->N);
+      const float3 T = stack_load_float3_default(stack, data.tangent_offset, sd->dPdu);
+      bsdf_diffraction_smooth_setup(kg,
+                                    sd,
+                                    closure_weight * mix_weight,
+                                    N,
+                                    T,
+                                    data.cache_handle,
+                                    data.pitch,
+                                    data.upper_index,
+                                    data.lower_index,
+                                    bool(sd->runtime_flag & SR_BACKFACING),
+                                    data.depth, data.duty, data.phase_contrast,
+                                    data.reflection_budget, data.transmission_budget,
+                                    data.ridge_extinction,
+                                    data.ridge_table, data.groove_table, data.substrate_table);
       break;
     }
     case CLOSURE_BSDF_MICROFACET_GGX_ID:
@@ -617,7 +743,45 @@ ccl_device
       float3 N = stack_load_float3_default(stack, bsdf_data.normal_offset, sd->N);
       N = safe_normalize_fallback(N, sd->N);
 
-      const Spectrum weight = closure_weight * mix_weight;
+      const float diffraction = saturatef(stack_load(stack, bsdf_data.diffraction_weight));
+      if (diffraction > 0.0f) {
+        const float alpha = sqr(saturatef(stack_load(stack, bsdf_data.roughness)));
+        const float aniso = clamp(stack_load(stack, bsdf_data.anisotropy), -0.99f, 0.99f);
+        const bool isotropic = !stack_valid(bsdf_data.tangent_offset) || fabsf(aniso) <= 1e-4f;
+        const float ax = isotropic ? alpha :
+            aniso < 0.0f ? alpha / (1.0f + aniso) : alpha * (1.0f - aniso);
+        const float ay = isotropic ? alpha :
+            aniso < 0.0f ? alpha * (1.0f + aniso) : alpha / (1.0f - aniso);
+        const float3 normal = maybe_ensure_valid_specular_reflection(sd, N);
+        float3 tangent = stack_load_float3_default(stack, bsdf_data.tangent_offset, sd->dPdu);
+        const float rotation = stack_load(stack, bsdf_data.rotation);
+        if (rotation != 0.0f) {
+          tangent = rotate_around_axis(tangent, normal, rotation * M_2PI_F);
+        }
+        if (type == CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID) {
+          bsdf_diffraction_ashikhmin_glossy_setup(
+              sd, closure_weight * (mix_weight * diffraction), normal, tangent,
+              ax, ay, stack_load(stack, bsdf_data.diffraction_pitch),
+              stack_load(stack, bsdf_data.diffraction_depth),
+              stack_load(stack, bsdf_data.diffraction_duty),
+              stack_load(stack, bsdf_data.diffraction_medium_ior));
+        }
+        else bsdf_diffraction_glossy_setup(kg,
+                               sd,
+                               closure_weight * (mix_weight * diffraction),
+                               normal,
+                               tangent,
+                               ax,
+                               ay,
+                               stack_load(stack, bsdf_data.diffraction_pitch),
+                               stack_load(stack, bsdf_data.diffraction_depth),
+                               stack_load(stack, bsdf_data.diffraction_duty),
+                               stack_load(stack, bsdf_data.diffraction_medium_ior),
+                               type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID,
+                               bsdf_data.diffraction_albedo_handle,
+                               rgb_to_spectrum(stack_load(stack, bsdf_data.color)));
+      }
+      const Spectrum weight = closure_weight * (mix_weight * (1.0f - diffraction));
       ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
           sd, sizeof(MicrofacetBsdf), weight);
 
@@ -692,8 +856,18 @@ ccl_device
       const Spectrum weight = bsdf_spectral_transmission_color(
                                   kg, sd, spectrum_to_rgb(closure_weight)) *
                               mix_weight;
+      const float diffraction=saturatef(stack_load(stack,bsdf_data.diffraction_weight));
+      if (diffraction>0) {
+        bsdf_diffraction_refraction_setup(sd,weight*diffraction,
+            maybe_ensure_valid_specular_reflection(sd,N),
+            stack_load_float3_default(stack,bsdf_data.tangent_offset,sd->dPdu),
+            stack_load(stack,bsdf_data.roughness),fmaxf(stack_load(stack,bsdf_data.ior),1e-5f),
+            stack_load(stack,bsdf_data.diffraction_pitch),stack_load(stack,bsdf_data.diffraction_depth),
+            stack_load(stack,bsdf_data.diffraction_duty),
+            type==CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID);
+      }
       ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
-          sd, sizeof(MicrofacetBsdf), weight);
+          sd, sizeof(MicrofacetBsdf), weight*(1.0f-diffraction));
 
       if (bsdf) {
         bsdf->N = maybe_ensure_valid_specular_reflection(sd, N);
@@ -743,11 +917,91 @@ ccl_device
       const float thinfilm_thickness = stack_load(stack, bsdf_data.thin_film_thickness);
       const float thinfilm_ior = fmaxf(stack_load(stack, bsdf_data.thin_film_ior), 1e-5f);
 
+      const float diffraction = saturatef(stack_load(stack, bsdf_data.diffraction_weight));
+      const bool polarizer = stack_load(stack, bsdf_data.polarizer) != 0;
+
+      if (diffraction > 0.0f) {
+        const int polarizer_first = sd->num_closure;
+        const int polarizer_left = sd->num_closure_left;
+        const bool two_sided = type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID &&
+                               bsdf_data.diffraction_two_sided_handle >= 0;
+        const float3 color = two_sided ? saturate(stack_load(stack, bsdf_data.color)) :
+                                         max(stack_load(stack, bsdf_data.color), zero_float3());
+        const Spectrum reflection_tint = rgb_to_spectrum(color);
+        const Spectrum transmission_tint = bsdf_spectral_transmission_color(kg, sd, color);
+        /* RGB-to-spectrum reconstruction can overshoot a unit tint. Keep the
+         * reciprocal return's per-wavelength tint passive before coverage. */
+        const Spectrum reflection = (two_sided ?
+                                         min(max(reflection_tint, zero_spectrum()), one_spectrum()) :
+                                         reflection_tint) *
+                                    (mix_weight * diffraction * float(reflective_caustics));
+        const Spectrum transmission = (two_sided ?
+                                           min(max(transmission_tint, zero_spectrum()), one_spectrum()) :
+                                           transmission_tint) *
+                                      (mix_weight * diffraction * float(refractive_caustics));
+        const float3 specular_normal = maybe_ensure_valid_specular_reflection(sd, N);
+        const float3 tangent = stack_load_float3_default(
+            stack, bsdf_data.tangent_offset, sd->dPdu);
+        const float roughness = stack_load(stack, bsdf_data.roughness);
+        const float ior = fmaxf(stack_load(stack, bsdf_data.ior), 1e-5f);
+        const float pitch = stack_load(stack, bsdf_data.diffraction_pitch);
+        const float depth = stack_load(stack, bsdf_data.diffraction_depth);
+        const float duty = stack_load(stack, bsdf_data.diffraction_duty);
+        if (two_sided)
+        {
+          bsdf_diffraction_glass_two_sided_setup(kg,
+                                                 sd,
+                                                 reflection,
+                                                 transmission,
+                                                 specular_normal,
+                                                 tangent,
+                                                 roughness,
+                                                 ior,
+                                                 pitch,
+                                                 depth,
+                                                 duty,
+                                                 bsdf_data.diffraction_two_sided_handle,
+                                                 thinfilm_ior,
+                                                 thinfilm_thickness);
+        }
+        else {
+          bsdf_diffraction_glass_setup(sd,
+                                       reflection,
+                                       transmission,
+                                       specular_normal,
+                                       tangent,
+                                       roughness,
+                                       ior,
+                                       pitch,
+                                       depth,
+                                       duty,
+                                       thinfilm_ior,
+                                       thinfilm_thickness,
+                                       type == CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID);
+        }
+        if (polarizer) {
+          const float angle = stack_load(stack, bsdf_data.polarizer_angle);
+          float3 axis = make_float3(cosf(angle), sinf(angle), 0);
+          object_dir_transform(kg, sd, &axis);
+          const bool attached = bsdf_diffraction_glass_set_polarizer(
+              sd, polarizer_first, safe_normalize(axis));
+          if (!attached) {
+            /* Capacity failure cannot silently render an unfiltered component. */
+            sd->num_closure = polarizer_first;
+            sd->num_closure_left = polarizer_left;
+          }
+          kernel_assert(attached);
+        }
+      }
+      if (diffraction == 1.0f) {
+        break;
+      }
+
       ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
-          sd, sizeof(MicrofacetBsdf), make_spectrum(mix_weight));
+          sd, sizeof(MicrofacetBsdf), make_spectrum(mix_weight * (1.0f - diffraction)));
       ccl_private FresnelGeneralizedSchlick *fresnel =
           (bsdf != nullptr) ? (ccl_private FresnelGeneralizedSchlick *)closure_alloc_extra(
-                                  sd, sizeof(FresnelGeneralizedSchlick)) :
+                                  sd, polarizer ? sizeof(FresnelGeneralizedSchlickPolarizer) : sizeof(FresnelGeneralizedSchlick)) :
                               nullptr;
 
       if (bsdf && fresnel) {
@@ -801,6 +1055,12 @@ ccl_device
         }
         const bool is_multiggx = (type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
         bsdf_microfacet_setup_fresnel_generalized_schlick(kg, bsdf, sd->wi, fresnel, is_multiggx);
+        if (polarizer) {
+          const float angle = stack_load(stack, bsdf_data.polarizer_angle);
+          float3 axis = make_float3(cosf(angle), sinf(angle), 0);
+          object_dir_transform(kg, sd, &axis);
+          bsdf_microfacet_set_polarizer(bsdf, safe_normalize(axis));
+        }
       }
       break;
     }

@@ -1952,6 +1952,39 @@ static wmOperatorStatus node_shader_script_update_exec(bContext *C, wmOperator *
   return OPERATOR_FINISHED;
 }
 
+static wmOperatorStatus node_diffraction_table_update_exec(bContext *C, wmOperator * /*op*/)
+{
+  const PointerRNA ptr = CTX_data_pointer_get_type(C, "node", RNA_ShaderNodeBsdfDiffraction);
+  SpaceNode *snode = CTX_wm_space_node(C);
+  bNodeTree *ntree = nullptr;
+  bNode *node = nullptr;
+  if (ptr) {
+    ntree = id_cast<bNodeTree *>(ptr.owner_id);
+    node = static_cast<bNode *>(ptr.data);
+  }
+  else if (snode && snode->edittree) {
+    ntree = snode->edittree;
+    node = bke::node_get_active(*ntree);
+  }
+  if (!ntree || !node || node->type_legacy != SH_NODE_BSDF_DIFFRACTION || !node->id) {
+    return OPERATOR_CANCELLED;
+  }
+  BKE_ntree_update_tag_node_property(ntree, node);
+  BKE_main_ensure_invariants(*CTX_data_main(C), ntree->id);
+  WM_event_add_notifier(C, NC_NODE | NA_EDITED, ntree);
+  return OPERATOR_FINISHED;
+}
+
+void NODE_OT_diffraction_table_update(wmOperatorType *ot)
+{
+  ot->name = "Refresh Diffraction Optical Constants";
+  ot->description = "Reload the conductor optical constants after editing the embedded CSV text";
+  ot->idname = "NODE_OT_diffraction_table_update";
+  ot->exec = node_diffraction_table_update_exec;
+  ot->poll = ED_operator_node_editable;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 void NODE_OT_shader_script_update(wmOperatorType *ot)
 {
   /* identifiers */

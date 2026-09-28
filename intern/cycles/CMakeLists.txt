@@ -405,7 +405,8 @@ add_subdirectory(subd)
 add_subdirectory(util)
 
 # TODO(sergey): Make this to work with standalone repository.
-if(WITH_GTESTS)
+option(WITH_CYCLES_DIFFRACTION_DEVICE_TEST "Build the diffraction device-memory integration test" OFF)
+if(WITH_GTESTS OR WITH_CYCLES_DIFFRACTION_DEVICE_TEST)
   add_subdirectory(test)
 endif()
 

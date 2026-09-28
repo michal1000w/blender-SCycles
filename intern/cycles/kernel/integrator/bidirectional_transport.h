@@ -87,6 +87,18 @@ template<int Exponent> struct BDPTMISLogRecurrence {
   {
     return expf(-sum(0.0f, sum(light_sum, camera_sum)));
   }
+
+  /* Connections cannot terminate at a delta vertex. Existing strategies still
+   * acquire its reverse/forward discrete branch probability ratio. */
+  ccl_device_inline_method static float2 scatter_delta(const float2 previous,
+                                                       const float cosine,
+                                                       const float forward_mass,
+                                                       const float reverse_mass)
+  {
+    return make_float2(-INFINITY,
+                       product(previous.y,
+                               product(factor(cosine), ratio(reverse_mass, forward_mass))));
+  }
 };
 
 /* A typed logarithmic MIS term prevents stored logs from being used as linear

@@ -306,6 +306,9 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   const bool is_caustics_receiver = get_boolean(cobject, "is_caustics_receiver");
   object->set_is_caustics_receiver(is_caustics_receiver);
 
+  object->set_coherent_interface(
+      static_cast<Object::CoherentInterface>(get_enum(cobject, "coherent_interface")));
+
   object->set_is_bake_target(b_ob_info.real_object == b_bake_target);
 
   /* sync the asset name for Cryptomatte */

@@ -6,9 +6,15 @@
 
 #include "kernel/svm/node_types.h"
 #include "kernel/svm/types.h"
+#include "kernel/util/diffraction_limits.h"
+#include "kernel/closure/bsdf_diffraction_interface.h"
 #include "kernel/types.h"
 
 #include "scene/constant_fold.h"
+#include "scene/diffraction_manager.h"
+#include "scene/diffraction_index.h"
+#include "scene/shader.h"
+#include "util/progress.h"
 #include "scene/film.h"
 #include "scene/image.h"
 #include "scene/image_sky.h"
@@ -28,6 +34,7 @@
 #include "util/math_base.h"
 #include "util/math_float3.h"
 #include "util/string.h"
+#include "util/time.h"
 #include "util/transform.h"
 
 #include "kernel/closure/bsdf_microfacet.h"
@@ -2230,6 +2237,209 @@ void BsdfNode::compile(OSLCompiler & /*compiler*/)
   assert(0);
 }
 
+NODE_DEFINE(DiffractionSmoothBsdfNode)
+{
+  NodeType *type = NodeType::add("diffraction_smooth_bsdf", create, NodeType::SHADER);
+  SOCKET_IN_COLOR(color, "Color", one_float3());
+  SOCKET_IN_NORMAL(normal, "Normal", zero_float3(), SocketType::LINK_NORMAL);
+  SOCKET_IN_VECTOR(tangent, "Tangent", zero_float3(), SocketType::LINK_TANGENT);
+  SOCKET_IN_FLOAT(surface_mix_weight, "SurfaceMixWeight", 0.0f, SocketType::SVM_INTERNAL);
+  SOCKET_OUT_CLOSURE(BSDF, "BSDF");
+  return type;
+}
+
+DiffractionSmoothBsdfNode::DiffractionSmoothBsdfNode() : BsdfNode(get_node_type())
+{
+  closure = CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID;
+  cache_options.bounds = {{-0.5, -1.5, 380}, {0.5, 1.5, 780}};
+}
+
+bool DiffractionSmoothBsdfNode::prepare(Scene *scene, Progress &progress)
+{
+  cache_handle_ = -1;
+  ridge_table_ = groove_table_ = substrate_table_ = -1;
+  for (auto &table : index_tables_) table.clear();
+  if (!optical_constants_error.empty()) {
+    progress.set_error("Diffraction optical constants: " + optical_constants_error);
+    return false;
+  }
+  if (use_fast_model) {
+    const FastDiffractionInterface parameters{380, float(profile.pitch), float(profile.depth),
+        float(profile.duty), float(profile.incident_ior), kernel_lower_index(),
+        fast_reflection_budget(), fast_transmission_budget(),
+        float(2*M_PI*profile.depth*(profile.ridge_ior.real()-profile.groove_ior.real())/380)};
+    if (!fast_diffraction_interface_valid(parameters) ||
+        !std::isfinite(profile.ridge_ior.imag()) || profile.ridge_ior.imag()<0 ||
+        !std::isfinite(profile.substrate_ior.real()) || profile.substrate_ior.real()<0 ||
+        !std::isfinite(profile.substrate_ior.imag()) || profile.substrate_ior.imag()<0 ||
+        profile.groove_ior.imag()!=0 ||
+        (!profile.absorbing_substrate_spectrum.empty() && !(profile.substrate_ior.imag() > 0))) {
+      progress.set_error("Fast diffraction: invalid parameters or unsupported absorbing groove");
+      return false;
+    }
+    const std::vector<DiffractionIndexSample> *tables[] = {
+        &profile.ridge_spectrum, &profile.groove_spectrum, &profile.absorbing_substrate_spectrum};
+    const double origins[] = {profile.ridge_ior.real(), profile.groove_ior.real(), 0};
+    vector<float> packed[3];
+    std::string error;
+    for (int i = 0; i < 3; ++i) {
+      if (!tables[i]->empty() &&
+          !diffraction_pack_index_table(*tables[i], origins[i], i == 1, i == 2, packed[i], error)) {
+        progress.set_error("Fast diffraction: " + error);
+        return false;
+      }
+    }
+    for (int i = 0; i < 3; ++i) {
+      index_tables_[i] = std::move(packed[i]);
+    }
+    cache_handle_ = DIFFRACTION_FAST_CACHE_HANDLE;
+    return true;
+  }
+  progress.set_substatus("Preparing diffraction material");
+  const double start_time = time_dt();
+  double next_report_time = start_time + 5;
+  const size_t initial_cache_count = scene->diffraction_manager->cache_count();
+  auto options = cache_options;
+  const auto cancelled = options.cancelled;
+  options.cancelled = [&progress, cancelled]() {
+    return progress.get_cancel_requested() || (cancelled && cancelled());
+  };
+  if (use_automatic_reference_orders) {
+    std::string bound_error;
+    options.retained_half_orders = diffraction_grating_reference_order_bound(profile, options, bound_error);
+    if (options.retained_half_orders < 0) {
+      progress.set_substatus("");
+      progress.set_error("Physical diffraction material: " + bound_error);
+      return false;
+    }
+  }
+  const auto callback = options.progress;
+  options.progress = [&](const DiffractionGratingCacheStats &stats) {
+    if (progress.get_cancel()) return false;
+    const double now = time_dt();
+    if (now >= next_report_time) {
+      LOG_INFO << "Preparing diffraction cache: seconds=" << now - start_time
+                << " visited_nodes=" << stats.visited_nodes
+                << " accepted_cells=" << stats.accepted_cells
+                << " reference_solves=" << stats.reference_solves
+                << " reference_cache_hits=" << stats.reference_cache_hits
+                << " peak_reference_matrix_bytes=" << stats.peak_reference_matrix_bytes
+                << " accepted_domain_fraction=" << stats.accepted_domain_fraction
+                << " depth=" << stats.last_depth;
+      progress.set_substatus(string_printf(
+          "Preparing diffraction cache: %zu cells, %zu solves, %.0f seconds",
+          stats.accepted_cells, stats.reference_solves, now - start_time));
+      next_report_time = now + 5;
+    }
+    return !callback || callback(stats);
+  };
+  DiffractionGratingCacheStats stats;
+  std::string error;
+  if (!options.reference_solver) {
+    Device *cache_device = nullptr;
+    scene->device->foreach_device([&](Device *device) {
+      if (!cache_device && device->info.type == DEVICE_METAL) cache_device = device;
+    });
+    if (cache_device) {
+      progress.set_substatus("Initializing Metal diffraction cache builder");
+      if (!cache_device->configure_diffraction_reference(options, error)) {
+        progress.set_substatus("");
+        progress.set_error("Metal diffraction cache: " + error);
+        return false;
+      }
+      LOG_INFO << "Diffraction cache backend: " << options.reference_backend_key
+               << "; device=" << cache_device->info.description;
+    }
+  }
+  cache_handle_ = scene->diffraction_manager->get_or_build(profile, options, stats, error, DIFFRACTION_MAX_CHANNELS);
+  progress.set_substatus("");
+  if (cache_handle_ < 0 && !progress.get_cancel()) {
+    LOG_ERROR << string_printf(
+        "Diffraction cache failed after %.3f seconds: %s; nodes=%zu, depth=%d, error=%.12g, "
+        "bounds=[%.9g,%.9g,%.9g]-[%.9g,%.9g,%.9g]",
+        time_dt() - start_time, error.c_str(), stats.visited_nodes, stats.last_depth,
+        stats.last_validation_error, stats.last_bounds.lower[0], stats.last_bounds.lower[1],
+        stats.last_bounds.lower[2], stats.last_bounds.upper[0], stats.last_bounds.upper[1],
+        stats.last_bounds.upper[2]);
+    progress.set_error("Physical diffraction material: " + error);
+  }
+  else if (cache_handle_ >= 0) {
+    const bool reused = scene->diffraction_manager->cache_count() == initial_cache_count;
+    LOG_INFO << (reused ? "Reused" : "Built") << " diffraction cache in "
+             << time_dt() - start_time << " seconds; stored_cells=" << stats.accepted_cells
+             << ", matrix_bytes=" << stats.matrix_bytes
+             << ", sampled_power_error=" << stats.maximum_accepted_error;
+  }
+  return cache_handle_ >= 0;
+}
+
+bool DiffractionSmoothBsdfNode::register_index_tables(Scene *scene, Progress &progress)
+{
+  int *handles[] = {&ridge_table_, &groove_table_, &substrate_table_};
+  for (int i = 0; i < 3; ++i) {
+    *handles[i] = -1;
+    if (!index_tables_[i].empty()) {
+      const size_t offset = scene->shader_manager->ensure_dynamic_bsdf_table(
+          &scene->dscene, scene, index_tables_[i]);
+      if (offset > size_t(std::numeric_limits<int>::max()) - index_tables_[i].size()) {
+        progress.set_error("Fast diffraction optical constants exceed int32 addressing");
+        return false;
+      }
+      *handles[i] = int(offset);
+    }
+  }
+  return true;
+}
+
+void DiffractionSmoothBsdfNode::compile(SVMCompiler &compiler)
+{
+  if (!register_index_tables(compiler.scene, compiler.progress)) return;
+  if (cache_handle_ < 0 && cache_handle_ != DIFFRACTION_FAST_CACHE_HANDLE) {
+    compiler.progress.set_error("Physical diffraction material was not prepared");
+    return;
+  }
+  BsdfNode::compile(compiler, SVMNodeDiffractionSmoothBsdfData{
+      .cache_handle = cache_handle_,
+      .pitch = float(profile.pitch),
+      .upper_index = float(profile.incident_ior),
+      .lower_index = kernel_lower_index(),
+      .depth = float(profile.depth),
+      .duty = float(profile.duty),
+      .phase_contrast = float(profile.ridge_ior.real()-profile.groove_ior.real()),
+      .reflection_budget = fast_reflection_budget(),
+      .transmission_budget = fast_transmission_budget(),
+      .ridge_extinction = float(profile.ridge_ior.imag()),
+      .ridge_table = ridge_table_,
+      .groove_table = groove_table_,
+      .substrate_table = substrate_table_,
+      .normal_offset = compiler.input_link("Normal"),
+      .tangent_offset = compiler.input_link("Tangent"),
+  });
+}
+
+void DiffractionSmoothBsdfNode::compile(OSLCompiler &compiler)
+{
+  if (!register_index_tables(compiler.scene, *compiler.progress)) return;
+  if (cache_handle_ < 0 && cache_handle_ != DIFFRACTION_FAST_CACHE_HANDLE) {
+    compiler.progress->set_error("Physical diffraction material was not prepared");
+    return;
+  }
+  compiler.parameter("cache_handle", cache_handle_);
+  compiler.parameter("pitch", float(profile.pitch));
+  compiler.parameter("upper_index", float(profile.incident_ior));
+  compiler.parameter("lower_index", kernel_lower_index());
+  compiler.parameter("depth", float(profile.depth));
+  compiler.parameter("duty", float(profile.duty));
+  compiler.parameter("phase_contrast", float(profile.ridge_ior.real()-profile.groove_ior.real()));
+  compiler.parameter("reflection_budget", fast_reflection_budget());
+  compiler.parameter("transmission_budget", fast_transmission_budget());
+  compiler.parameter("ridge_extinction", float(profile.ridge_ior.imag()));
+  compiler.parameter("ridge_table", ridge_table_);
+  compiler.parameter("groove_table", groove_table_);
+  compiler.parameter("substrate_table", substrate_table_);
+  compiler.add(this, "node_diffraction_smooth_bsdf");
+}
+
 /* Metallic BSDF Closure */
 
 NODE_DEFINE(MetallicBsdfNode)
@@ -2266,6 +2476,10 @@ NODE_DEFINE(MetallicBsdfNode)
   SOCKET_IN_FLOAT(thin_film_thickness, "Thin Film Thickness", 0.0f);
   SOCKET_IN_FLOAT(thin_film_ior, "Thin Film IOR", 1.33f);
 
+  SOCKET_IN_FLOAT(diffraction_weight, "Diffraction Weight", 0.0f);
+  SOCKET_IN_FLOAT(diffraction_pitch, "Diffraction Pitch", 1600.0f);
+  SOCKET_IN_FLOAT(diffraction_depth, "Diffraction Depth", 150.0f);
+  SOCKET_IN_FLOAT(diffraction_duty, "Diffraction Duty Cycle", 0.5f);
   SOCKET_OUT_CLOSURE(BSDF, "BSDF");
 
   return type;
@@ -2276,11 +2490,29 @@ MetallicBsdfNode::MetallicBsdfNode() : BsdfNode(get_node_type())
   closure = CLOSURE_BSDF_PHYSICAL_CONDUCTOR;
 }
 
+bool MetallicBsdfNode::has_dispersion()
+{
+  return input("Diffraction Weight")->link || diffraction_weight > 0.0f;
+}
+
+/* A known flat profile has no diffracted orders. Fold coverage away before
+ * distribution validation so the original native carrier, including its
+ * multiple-scattering compensation, remains exact. Linked depth is not assumed
+ * constant here; normal graph constant folding may resolve it separately. */
+template<typename Node> static void simplify_flat_diffraction(Node *node)
+{
+  if (!node->input("Diffraction Depth")->link && node->get_diffraction_depth() == 0.0f) {
+    ShaderInput *weight = node->input("Diffraction Weight");
+    if (weight->link) weight->disconnect();
+    node->set_diffraction_weight(0.0f);
+  }
+}
+
 bool MetallicBsdfNode::is_isotropic()
 {
   /* Keep in sync with the thresholds in OSL's node_conductor_bsdf and SVM's
    * svm_node_metallic_bsdf. */
-  return (!input("Anisotropy")->link && fabsf(anisotropy) <= 1e-4f);
+  return !has_dispersion() && (!input("Anisotropy")->link && fabsf(anisotropy) <= 1e-4f);
 }
 
 void MetallicBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
@@ -2296,10 +2528,57 @@ void MetallicBsdfNode::attributes(Shader *shader, AttributeRequestSet *attribute
 
 void MetallicBsdfNode::simplify_settings(Scene * /* scene */)
 {
+  simplify_flat_diffraction(this);
   /* If the anisotropy is close enough to zero, fall back to the isotropic case. */
   if (is_isotropic()) {
     disconnect_unused_input("Tangent");
   }
+}
+
+bool MetallicBsdfNode::prepare_diffraction_albedo(Scene *scene, Progress &progress)
+{
+  diffraction_albedo_handle_ = -1;
+  if (!has_dispersion() || distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) return true;
+  for (const char *name : {"Roughness", "Anisotropy", "Diffraction Pitch", "Diffraction Depth",
+                           "Diffraction Duty Cycle"}) {
+    if (input(name)->link) {
+      progress.set_error(string("Metallic Multiscatter GGX diffraction requires constant ") + name);
+      return false;
+    }
+  }
+  const float alpha = sqr(saturatef(roughness));
+  const float aniso = saturatef(anisotropy);
+  /* Match SVM's tangent-dependent anisotropy and GGX setup's alpha clamp. */
+  if (aniso > 0.0f && !input("Tangent")->link &&
+      !input("Tangent")->constant_folded_in) {
+    progress.set_error("Anisotropic Metallic Multiscatter GGX diffraction requires a linked Tangent");
+    return false;
+  }
+  const float aspect = sqrtf(1.0f - 0.9f * aniso);
+  const float ax = saturatef(alpha / aspect);
+  const float ay = saturatef(alpha * aspect);
+  if (ax * ay <= 2e-10f) return true; /* Singular facet limit has no masked loss. */
+  DiffractionAlbedoRequest request;
+  request.alpha_x = max(ax, 1e-4f);
+  request.alpha_y = max(ay, 1e-4f);
+  request.pitch_nm = diffraction_pitch;
+  request.depth_nm = diffraction_depth;
+  request.duty = saturatef(diffraction_duty);
+  request.medium_ior = 1.0f;
+  Device *builder = nullptr;
+  scene->device->foreach_device([&](Device *device) {
+    if (!builder && device->info.type == DEVICE_METAL) builder = device;
+  });
+  progress.set_substatus("Building Metallic diffraction multiscattering albedo");
+  string error;
+  diffraction_albedo_handle_ = scene->diffraction_manager->get_or_build_albedo(
+      request, builder, error, [&]() { return progress.get_cancel(); });
+  progress.set_substatus("");
+  if (diffraction_albedo_handle_ < 0) {
+    if (!progress.get_cancel()) progress.set_error("Metallic diffraction albedo: " + error);
+    return false;
+  }
+  return true;
 }
 
 void MetallicBsdfNode::compile(SVMCompiler &compiler)
@@ -2322,6 +2601,11 @@ void MetallicBsdfNode::compile(SVMCompiler &compiler)
           .rotation = compiler.input_float("Rotation"),
           .thin_film_thickness = compiler.input_float("Thin Film Thickness"),
           .thin_film_ior = compiler.input_float("Thin Film IOR"),
+          .diffraction_weight = compiler.input_float("Diffraction Weight"),
+          .diffraction_pitch = compiler.input_float("Diffraction Pitch"),
+          .diffraction_depth = compiler.input_float("Diffraction Depth"),
+          .diffraction_duty = compiler.input_float("Diffraction Duty Cycle"),
+          .diffraction_albedo_handle = diffraction_albedo_handle_,
           .normal_offset = compiler.input_link("Normal"),
           .tangent_offset = compiler.input_link("Tangent"),
       });
@@ -2329,6 +2613,7 @@ void MetallicBsdfNode::compile(SVMCompiler &compiler)
 
 void MetallicBsdfNode::compile(OSLCompiler &compiler)
 {
+  compiler.parameter("diffraction_albedo_handle_plus_one", diffraction_albedo_handle_ + 1);
   compiler.parameter(this, "distribution");
   compiler.parameter(this, "fresnel_type");
   compiler.add(this, "node_metallic_bsdf");
@@ -2357,6 +2642,12 @@ NODE_DEFINE(GlossyBsdfNode)
   SOCKET_IN_FLOAT(anisotropy, "Anisotropy", 0.0f);
   SOCKET_IN_FLOAT(rotation, "Rotation", 0.0f);
 
+  SOCKET_IN_FLOAT(diffraction_weight, "Diffraction Weight", 0.0f);
+  SOCKET_IN_FLOAT(diffraction_pitch, "Diffraction Pitch", 1600.0f);
+  SOCKET_IN_FLOAT(diffraction_depth, "Diffraction Depth", 150.0f);
+  SOCKET_IN_FLOAT(diffraction_duty, "Diffraction Duty Cycle", 0.5f);
+  SOCKET_IN_FLOAT(diffraction_medium_ior, "Diffraction Medium IOR", 1.0f);
+
   SOCKET_OUT_CLOSURE(BSDF, "BSDF");
 
   return type;
@@ -2371,7 +2662,12 @@ bool GlossyBsdfNode::is_isotropic()
 {
   /* Keep in sync with the thresholds in OSL's node_glossy_bsdf and SVM's svm_node_closure_bsdf.
    */
-  return (!input("Anisotropy")->link && fabsf(anisotropy) <= 1e-4f);
+  return !has_dispersion() && (!input("Anisotropy")->link && fabsf(anisotropy) <= 1e-4f);
+}
+
+bool GlossyBsdfNode::has_dispersion()
+{
+  return input("Diffraction Weight")->link || diffraction_weight > 0.0f;
 }
 
 void GlossyBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
@@ -2387,14 +2683,69 @@ void GlossyBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
 
 void GlossyBsdfNode::simplify_settings(Scene * /* scene */)
 {
+  simplify_flat_diffraction(this);
   /* If the anisotropy is close enough to zero, fall back to the isotropic case. */
   if (is_isotropic()) {
     disconnect_unused_input("Tangent");
   }
 }
 
+bool GlossyBsdfNode::prepare_diffraction_albedo(Scene *scene, Progress &progress)
+{
+  diffraction_albedo_handle_ = -1;
+  if (!has_dispersion() || distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) return true;
+  for (const char *name : {"Roughness", "Anisotropy", "Diffraction Pitch", "Diffraction Depth",
+                           "Diffraction Duty Cycle", "Diffraction Medium IOR"}) {
+    if (input(name)->link) {
+      progress.set_error(string("Multiscatter GGX diffraction requires constant ") + name);
+      return false;
+    }
+  }
+  const float alpha = sqr(saturatef(roughness));
+  const float aniso = clamp(anisotropy, -0.99f, 0.99f);
+  /* SVMCompiler::input_link also preserves values folded from linked nodes.
+   * Such constants define the same grating frame as a live tangent link. */
+  if (fabsf(aniso) > 1e-4f && !input("Tangent")->link &&
+      !input("Tangent")->constant_folded_in) {
+    progress.set_error("Anisotropic Multiscatter GGX diffraction requires a linked Tangent");
+    return false;
+  }
+  const bool isotropic = fabsf(aniso) <= 1e-4f;
+  const float ax = saturatef(isotropic ? alpha : aniso < 0 ? alpha / (1 + aniso) : alpha * (1 - aniso));
+  const float ay = saturatef(isotropic ? alpha : aniso < 0 ? alpha * (1 + aniso) : alpha / (1 - aniso));
+  if (ax * ay <= 2e-10f) return true; /* Singular facet limit has no masked loss. */
+  DiffractionAlbedoRequest request;
+  request.alpha_x = max(ax, 1e-4f);
+  request.alpha_y = max(ay, 1e-4f);
+  request.pitch_nm = diffraction_pitch;
+  request.depth_nm = diffraction_depth;
+  request.duty = saturatef(diffraction_duty);
+  request.medium_ior = diffraction_medium_ior;
+  Device *builder = nullptr;
+  scene->device->foreach_device([&](Device *device) {
+    if (!builder && device->info.type == DEVICE_METAL) builder = device;
+  });
+  progress.set_substatus("Building diffraction multiscattering albedo");
+  string error;
+  diffraction_albedo_handle_ = scene->diffraction_manager->get_or_build_albedo(
+      request, builder, error, [&]() { return progress.get_cancel(); });
+  progress.set_substatus("");
+  if (diffraction_albedo_handle_ < 0) {
+    if (!progress.get_cancel()) progress.set_error("Diffraction albedo: " + error);
+    return false;
+  }
+  return true;
+}
+
 void GlossyBsdfNode::compile(SVMCompiler &compiler)
 {
+  if (has_dispersion() && distribution != CLOSURE_BSDF_MICROFACET_GGX_ID &&
+      distribution != CLOSURE_BSDF_MICROFACET_BECKMANN_ID &&
+      distribution != CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID &&
+      distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) {
+    (compiler.progress).set_error("Glossy diffraction requires GGX, Beckmann, or Ashikhmin-Shirley distribution");
+    return;
+  }
   closure = distribution;
 
   /* TODO: Just use weight for legacy MultiGGX? Would also simplify OSL. */
@@ -2406,6 +2757,12 @@ void GlossyBsdfNode::compile(SVMCompiler &compiler)
                         .roughness = compiler.input_float("Roughness"),
                         .anisotropy = compiler.input_float("Anisotropy"),
                         .rotation = compiler.input_float("Rotation"),
+                        .diffraction_weight = compiler.input_float("Diffraction Weight"),
+                        .diffraction_pitch = compiler.input_float("Diffraction Pitch"),
+                        .diffraction_depth = compiler.input_float("Diffraction Depth"),
+                        .diffraction_duty = compiler.input_float("Diffraction Duty Cycle"),
+                        .diffraction_medium_ior = compiler.input_float("Diffraction Medium IOR"),
+                        .diffraction_albedo_handle = diffraction_albedo_handle_,
                         .normal_offset = compiler.input_link("Normal"),
                         .tangent_offset = compiler.input_link("Tangent"),
                     });
@@ -2413,6 +2770,14 @@ void GlossyBsdfNode::compile(SVMCompiler &compiler)
 
 void GlossyBsdfNode::compile(OSLCompiler &compiler)
 {
+  if (has_dispersion() && distribution != CLOSURE_BSDF_MICROFACET_GGX_ID &&
+      distribution != CLOSURE_BSDF_MICROFACET_BECKMANN_ID &&
+      distribution != CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID &&
+      distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) {
+    (*compiler.progress).set_error("Glossy diffraction requires GGX, Beckmann, or Ashikhmin-Shirley distribution");
+    return;
+  }
+  compiler.parameter("diffraction_albedo_handle", diffraction_albedo_handle_);
   compiler.parameter(this, "distribution");
   compiler.add(this, "node_glossy_bsdf");
 }
@@ -2433,9 +2798,8 @@ NODE_DEFINE(GlassBsdfNode)
   distribution_enum.insert("multi_ggx", CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
   SOCKET_ENUM(
       distribution, "Distribution", distribution_enum, CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID);
-
-  SOCKET_IN_VECTOR(tangent, "Tangent", zero_float3(), SocketType::LINK_TANGENT);
-
+  SOCKET_IN_INT(polarizer, "Polarizer", 0);
+  SOCKET_IN_FLOAT(polarizer_angle, "Polarizer Angle", 0.0f);
   SOCKET_IN_FLOAT(roughness, "Roughness", 0.0f);
   SOCKET_IN_FLOAT(anisotropy, "Anisotropy", 0.0f);
   SOCKET_IN_FLOAT(rotation, "Rotation", 0.0f);
@@ -2444,6 +2808,11 @@ NODE_DEFINE(GlassBsdfNode)
   SOCKET_IN_FLOAT(thin_film_thickness, "Thin Film Thickness", 0.0f);
   SOCKET_IN_FLOAT(thin_film_ior, "Thin Film IOR", 1.33f);
 
+  SOCKET_IN_VECTOR(tangent, "Tangent", zero_float3(), SocketType::LINK_TANGENT);
+  SOCKET_IN_FLOAT(diffraction_weight, "Diffraction Weight", 0.0f);
+  SOCKET_IN_FLOAT(diffraction_pitch, "Diffraction Pitch", 1600.0f);
+  SOCKET_IN_FLOAT(diffraction_depth, "Diffraction Depth", 150.0f);
+  SOCKET_IN_FLOAT(diffraction_duty, "Diffraction Duty Cycle", 0.5f);
   SOCKET_OUT_CLOSURE(BSDF, "BSDF");
 
   return type;
@@ -2454,29 +2823,102 @@ GlassBsdfNode::GlassBsdfNode() : BsdfNode(get_node_type())
   closure = CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID;
 }
 
-bool GlassBsdfNode::is_isotropic()
+void GlassBsdfNode::simplify_settings(Scene * /* scene */)
 {
-  /* Keep in sync with the thresholds in OSL's node_glass_bsdf and SVM's svm_node_closure_bsdf. */
-  return (!input("Anisotropy")->link && fabsf(anisotropy) <= 1e-4f);
+  simplify_flat_diffraction(this);
+}
+
+bool GlassBsdfNode::has_dispersion()
+{
+  return input("Diffraction Weight")->link || diffraction_weight > 0.0f;
 }
 
 void GlassBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
 {
-  if (shader->has_surface_link()) {
-    if (!input("Tangent")->link && !is_isotropic()) {
-      attributes->add(ATTR_STD_GENERATED);
-    }
+  if (shader->has_surface_link() && has_dispersion() && !input("Tangent")->link) {
+    attributes->add(ATTR_STD_GENERATED);
   }
-
   ShaderNode::attributes(shader, attributes);
 }
 
-void GlassBsdfNode::simplify_settings(Scene * /* scene */)
+bool GlassBsdfNode::prepare_diffraction_two_sided_albedo(Scene *scene, Progress &progress)
 {
-  /* If the anisotropy is close enough to zero, fall back to the isotropic case. */
-  if (is_isotropic()) {
-    disconnect_unused_input("Tangent");
+  diffraction_two_sided_handle_ = -1;
+  /* A rough index-matched coated interface has a finite integrated transmission
+   * atom. The current native film sampler cannot supply its polarized mass. */
+  const bool filter_possible = polarizer || input("Polarizer")->link;
+  const bool rough_possible = roughness > 0.0f || input("Roughness")->link;
+  const bool film_possible = thin_film_thickness > THINFILM_THICKNESS_CUTOFF ||
+                             input("Thin Film Thickness")->link;
+  const bool matched_possible = IOR == 1.0f || input("IOR")->link;
+  if (filter_possible && rough_possible && film_possible && matched_possible) {
+    progress.set_error("Rough index-matched Glass polarizers with thin film require an "
+                       "integrated transmission atom; use smooth Glass, no film, or a "
+                       "constant IOR different from 1");
+    return false;
   }
+  if (!has_dispersion() || distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID)
+    return true;
+  for (const char *name : {"Roughness", "IOR", "Thin Film Thickness", "Thin Film IOR",
+                           "Diffraction Pitch", "Diffraction Depth", "Diffraction Duty Cycle"}) {
+    if (input(name)->link) {
+      progress.set_error(string("Glass Multiscatter GGX diffraction requires constant ") + name);
+      return false;
+    }
+  }
+  if (!input("Color")->link &&
+      (!isfinite_safe(color.x) || !isfinite_safe(color.y) || !isfinite_safe(color.z) ||
+       color.x < 0.0f || color.y < 0.0f || color.z < 0.0f || color.x > 1.0f ||
+       color.y > 1.0f || color.z > 1.0f)) {
+    progress.set_error("Glass Multiscatter GGX diffraction requires constant Color components in [0, 1]");
+    return false;
+  }
+  if (!isfinite_safe(thin_film_thickness) || thin_film_thickness < 0.0f ||
+      !isfinite_safe(thin_film_ior) || thin_film_ior < 1.0f || thin_film_ior > 10.0f) {
+    progress.set_error("Glass Multiscatter GGX diffraction requires a finite lossless film IOR in [1, 10]");
+    return false;
+  }
+  if (!isfinite_safe(roughness) || !isfinite_safe(IOR) || IOR <= 1.0f || IOR > 10.0f) {
+    progress.set_error("Glass Multiscatter GGX diffraction requires finite roughness and IOR > 1");
+    return false;
+  }
+  const float alpha = sqr(saturatef(roughness));
+  if (alpha < 1.0e-4f) {
+    return true; /* The cache minimum alpha is 1e-4; keep exact single events below it. */
+  }
+  DiffractionTwoSidedAlbedoRequest request;
+  request.alpha_x = request.alpha_y = alpha;
+  request.pitch_nm = diffraction_pitch;
+  request.depth_nm = diffraction_depth;
+  request.duty = saturatef(diffraction_duty);
+  request.inside_ior = IOR;
+  request.film_ior = thin_film_thickness > 0.0f ? thin_film_ior : 1.0f;
+  request.film_thickness_nm = thin_film_thickness;
+  if (thin_film_thickness > 0.0f) {
+    const double optical_thickness_nm = double(thin_film_ior) * double(thin_film_thickness);
+    const double minimum_nodes = std::ceil(1.0 + 400.0 * 16.0 * optical_thickness_nm /
+                                                   (380.0 * 380.0));
+    if (!std::isfinite(minimum_nodes) || minimum_nodes > 256.0) {
+      progress.set_error("Glass Multiscatter GGX diffraction film exceeds the 256-node spectral cache limit");
+      return false;
+    }
+    const int nodes = std::max(16, int(minimum_nodes));
+    request.wavelength_count = ((nodes + 7) / 8) * 8;
+  }
+  Device *builder = nullptr;
+  scene->device->foreach_device([&](Device *device) {
+    if (!builder && device->info.type == DEVICE_METAL) builder = device;
+  });
+  progress.set_substatus("Building two-sided Glass diffraction multiscattering albedo");
+  string error;
+  diffraction_two_sided_handle_ = scene->diffraction_manager->get_or_build_two_sided_albedo(
+      request, builder, error, [&]() { return progress.get_cancel(); });
+  progress.set_substatus("");
+  if (diffraction_two_sided_handle_ < 0) {
+    if (!progress.get_cancel()) progress.set_error("Glass diffraction albedo: " + error);
+    return false;
+  }
+  return true;
 }
 
 void GlassBsdfNode::compile(SVMCompiler &compiler)
@@ -2485,19 +2927,27 @@ void GlassBsdfNode::compile(SVMCompiler &compiler)
   BsdfNode::compile(compiler,
                     SVMNodeGlassBsdfData{
                         .color = compiler.input_float3("Color"),
+                        .polarizer = compiler.input_int("Polarizer"),
+                        .polarizer_angle = compiler.input_float("Polarizer Angle"),
                         .roughness = compiler.input_float("Roughness"),
                         .anisotropy = compiler.input_float("Anisotropy"),
                         .rotation = compiler.input_float("Rotation"),
                         .ior = compiler.input_float("IOR"),
                         .thin_film_thickness = compiler.input_float("Thin Film Thickness"),
                         .thin_film_ior = compiler.input_float("Thin Film IOR"),
+                        .diffraction_weight = compiler.input_float("Diffraction Weight"),
+                        .diffraction_pitch = compiler.input_float("Diffraction Pitch"),
+                        .diffraction_depth = compiler.input_float("Diffraction Depth"),
+                        .diffraction_duty = compiler.input_float("Diffraction Duty Cycle"),
                         .normal_offset = compiler.input_link("Normal"),
                         .tangent_offset = compiler.input_link("Tangent"),
+                        .diffraction_two_sided_handle = diffraction_two_sided_handle_,
                     });
 }
 
 void GlassBsdfNode::compile(OSLCompiler &compiler)
 {
+  compiler.parameter("diffraction_two_sided_handle_plus_one", diffraction_two_sided_handle_ + 1);
   compiler.parameter(this, "distribution");
   compiler.add(this, "node_glass_bsdf");
 }
@@ -2521,6 +2971,11 @@ NODE_DEFINE(RefractionBsdfNode)
   SOCKET_IN_FLOAT(roughness, "Roughness", 0.0f);
   SOCKET_IN_FLOAT(IOR, "IOR", 0.3f);
 
+  SOCKET_IN_VECTOR(tangent, "Tangent", zero_float3(), SocketType::LINK_TANGENT);
+  SOCKET_IN_FLOAT(diffraction_weight, "Diffraction Weight", 0.0f);
+  SOCKET_IN_FLOAT(diffraction_pitch, "Diffraction Pitch", 1600.0f);
+  SOCKET_IN_FLOAT(diffraction_depth, "Diffraction Depth", 150.0f);
+  SOCKET_IN_FLOAT(diffraction_duty, "Diffraction Duty Cycle", 0.5f);
   SOCKET_OUT_CLOSURE(BSDF, "BSDF");
 
   return type;
@@ -2531,6 +2986,24 @@ RefractionBsdfNode::RefractionBsdfNode() : BsdfNode(get_node_type())
   closure = CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID;
 }
 
+void RefractionBsdfNode::simplify_settings(Scene * /* scene */)
+{
+  simplify_flat_diffraction(this);
+}
+
+bool RefractionBsdfNode::has_dispersion()
+{
+  return input("Diffraction Weight")->link || diffraction_weight>0.0f;
+}
+
+void RefractionBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
+{
+  if (shader->has_surface_link() && has_dispersion() && !input("Tangent")->link) {
+    attributes->add(ATTR_STD_GENERATED);
+  }
+  ShaderNode::attributes(shader,attributes);
+}
+
 void RefractionBsdfNode::compile(SVMCompiler &compiler)
 {
   closure = distribution;
@@ -2538,7 +3011,12 @@ void RefractionBsdfNode::compile(SVMCompiler &compiler)
                     SVMNodeRefractionBsdfData{
                         .roughness = compiler.input_float("Roughness"),
                         .ior = compiler.input_float("IOR"),
+                        .diffraction_weight = compiler.input_float("Diffraction Weight"),
+                        .diffraction_pitch = compiler.input_float("Diffraction Pitch"),
+                        .diffraction_depth = compiler.input_float("Diffraction Depth"),
+                        .diffraction_duty = compiler.input_float("Diffraction Duty Cycle"),
                         .normal_offset = compiler.input_link("Normal"),
+                        .tangent_offset = compiler.input_link("Tangent"),
                     });
 }
 
@@ -2733,6 +3211,10 @@ NODE_DEFINE(PrincipledBsdfNode)
   SOCKET_IN_FLOAT(thin_film_thickness, "Thin Film Thickness", 0.0f);
   SOCKET_IN_FLOAT(thin_film_ior, "Thin Film IOR", 1.33f);
 
+  SOCKET_IN_FLOAT(diffraction_weight, "Diffraction Weight", 0.0f);
+  SOCKET_IN_FLOAT(diffraction_pitch, "Diffraction Pitch", 1600.0f);
+  SOCKET_IN_FLOAT(diffraction_depth, "Diffraction Depth", 150.0f);
+  SOCKET_IN_FLOAT(diffraction_duty, "Diffraction Duty Cycle", 0.5f);
   SOCKET_IN_FLOAT(surface_mix_weight, "SurfaceMixWeight", 0.0f, SocketType::SVM_INTERNAL);
 
   SOCKET_OUT_CLOSURE(BSDF, "BSDF");
@@ -2748,6 +3230,7 @@ PrincipledBsdfNode::PrincipledBsdfNode() : BsdfBaseNode(get_node_type())
 
 void PrincipledBsdfNode::simplify_settings(Scene * /* scene */)
 {
+  simplify_flat_diffraction(this);
   if (!has_surface_emission()) {
     /* Emission will be zero, so optimize away any connected emission input. */
     disconnect_unused_input("Emission Color");
@@ -2780,7 +3263,7 @@ void PrincipledBsdfNode::simplify_settings(Scene * /* scene */)
     disconnect_unused_input("Sheen Tint");
   }
 
-  if (!has_nonzero_weight("Anisotropic")) {
+  if (!has_nonzero_weight("Anisotropic") && !has_diffraction()) {
     disconnect_unused_input("Anisotropic");
     disconnect_unused_input("Anisotropic Rotation");
     disconnect_unused_input("Tangent");
@@ -2850,8 +3333,9 @@ bool PrincipledBsdfNode::has_surface_bssrdf()
 
 bool PrincipledBsdfNode::has_dispersion()
 {
-  return has_nonzero_weight("Transmission Dispersion Scale") &&
-         has_nonzero_weight("Transmission Weight");
+  return has_diffraction() ||
+         (has_nonzero_weight("Transmission Dispersion Scale") &&
+          has_nonzero_weight("Transmission Weight"));
 }
 
 bool PrincipledBsdfNode::has_spectral_transmission()
@@ -2885,10 +3369,239 @@ void PrincipledBsdfNode::attributes(Shader *shader, AttributeRequestSet *attribu
   ShaderNode::attributes(shader, attributes);
 }
 
+bool PrincipledBsdfNode::supports_diffraction_transmission()
+{
+  return true;
+}
+
+bool PrincipledBsdfNode::prepare_diffraction_thin_sheet_albedo(Scene *scene, Progress &progress)
+{
+  diffraction_thin_sheet_handles_ = make_int3(-1, -1, -1);
+  if (!has_diffraction() || !is_thin_wall() ||
+      !has_nonzero_weight("Transmission Weight") ||
+      (!input("Metallic")->link && metallic >= 1.0f))
+  {
+    return true;
+  }
+  /* Retain the existing uncached sheet approximation for spatially varying
+   * cache inputs. Never substitute a white or unrelated constant table. */
+  for (const char *name : {"Roughness", "IOR", "Diffraction Pitch", "Diffraction Depth",
+                           "Diffraction Duty Cycle", "Base Color", "Specular Tint",
+                           "Thin Film Thickness", "Thin Film IOR",
+                           "Transmission Dispersion Scale", "Transmission Dispersion Abbe Number"})
+  {
+    if (input(name)->link) {
+      LOG_INFO << "Thin Wall diffraction retains uncached approximation for linked " << name;
+      return true;
+    }
+  }
+  const float alpha = sqr(saturatef(roughness));
+  if (!(diffraction_depth > 0.0f)) return true;
+  if (!isfinite_safe(base_color) || !isfinite_safe(specular_tint) ||
+      reduce_min(specular_tint) < 0.0f || reduce_max(specular_tint) > 1.0f)
+  {
+    LOG_INFO << "Thin Wall diffraction retains uncached approximation for nonpassive tint";
+    return true;
+  }
+  DiffractionAlbedoRequest request;
+  request.thin_sheet = true;
+  request.mu_count = 24;
+  request.facet_samples = 512;
+  request.alpha_x = alpha;
+  request.alpha_y = bsdf_thin_glass_transmission_roughness(alpha, ior);
+  request.pitch_nm = diffraction_pitch;
+  request.depth_nm = diffraction_depth;
+  request.duty = saturatef(diffraction_duty);
+  request.inside_ior = ior;
+  request.inv_abbe = safe_divide(saturatef(transmission_dispersion_scale),
+                                 max(transmission_dispersion_abbe_number, 0.0f));
+  request.film_thickness_nm = thin_film_thickness > THINFILM_THICKNESS_CUTOFF ?
+                                 thin_film_thickness : 0.0f;
+  request.film_ior = request.film_thickness_nm > 0.0f ? thin_film_ior : 1.0f;
+  const float3 color = saturate(base_color);
+  request.transmission_bt709 = max(scene->shader_manager->scene_linear_to_rec709(color),
+                                    zero_float3());
+  request.transmission_is_spectral = reduce_max(request.transmission_bt709) -
+                                    reduce_min(request.transmission_bt709) > CLOSURE_WEIGHT_CUTOFF;
+  if (request.film_thickness_nm > 0.0f) {
+    const double nodes = std::ceil(1.0 + 400.0 * 16.0 * double(request.film_ior) *
+                                           double(request.film_thickness_nm) / (380.0 * 380.0));
+    if (!std::isfinite(nodes) || nodes > 256.0) {
+      LOG_INFO << "Thin Wall diffraction retains uncached approximation beyond spectral cache limit";
+      return true;
+    }
+    request.wavelength_count = ((std::max(16, int(nodes)) + 7) / 8) * 8;
+  }
+  string error;
+  if (!diffraction_albedo_validate_request(request, error)) {
+    LOG_INFO << "Thin Wall diffraction retains uncached approximation: " << error;
+    return true;
+  }
+  Device *builder = nullptr;
+  scene->device->foreach_device([&](Device *device) {
+    if (!builder && device->info.type == DEVICE_METAL) builder = device;
+  });
+  progress.set_substatus("Building Thin Wall diffraction return cache");
+  int handles[3];
+  for (int channel = 0; channel < 3; ++channel) {
+    request.reflection_tint = channel == 0 ? specular_tint.x : channel == 1 ? specular_tint.y : specular_tint.z;
+    request.transmission_tint = channel == 0 ? color.x : channel == 1 ? color.y : color.z;
+    /* This field is ignored for spectral transmission; keep identical keys
+     * when only the source RGB channel changes so cache deduplication works. */
+    if (request.transmission_is_spectral) request.transmission_tint = 1.0f;
+    handles[channel] = scene->diffraction_manager->get_or_build_albedo(
+        request, builder, error, [&]() { return progress.get_cancel(); });
+    if (handles[channel] < 0) {
+      progress.set_substatus("");
+      if (!progress.get_cancel()) progress.set_error("Thin Wall diffraction return cache: " + error);
+      return false;
+    }
+  }
+  progress.set_substatus("");
+  diffraction_thin_sheet_handles_ = make_int3(handles[0], handles[1], handles[2]);
+  return true;
+}
+
+bool PrincipledBsdfNode::prepare_diffraction_albedo(Scene *scene, Progress &progress)
+{
+  diffraction_albedo_handle_ = -1;
+  diffraction_two_sided_handle_ = -1;
+  if (!prepare_diffraction_thin_sheet_albedo(scene, progress)) return false;
+  if (!has_diffraction() || distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID)
+  {
+    return true;
+  }
+
+  for (const char *name : {"Roughness", "Anisotropic", "Diffraction Pitch", "Diffraction Depth",
+                           "Diffraction Duty Cycle"}) {
+    if (input(name)->link) {
+      progress.set_error(string("Principled Multiscatter GGX diffraction requires constant ") + name);
+      return false;
+    }
+  }
+
+  const float alpha = sqr(saturatef(roughness));
+  const float aniso = saturatef(anisotropic);
+  if (aniso > 0.0f && !input("Tangent")->link &&
+      !input("Tangent")->constant_folded_in) {
+    progress.set_error("Anisotropic Principled Multiscatter GGX diffraction requires a linked Tangent");
+    return false;
+  }
+  const float aspect = sqrtf(1.0f - 0.9f * aniso);
+  const float ax = saturatef(alpha / aspect);
+  const float ay = saturatef(alpha * aspect);
+  if (ax * ay <= 2e-10f) return true;
+
+  DiffractionAlbedoRequest request;
+  request.alpha_x = max(ax, 1e-4f);
+  request.alpha_y = max(ay, 1e-4f);
+  request.pitch_nm = diffraction_pitch;
+  request.depth_nm = diffraction_depth;
+  request.duty = saturatef(diffraction_duty);
+  request.medium_ior = 1.0f;
+  Device *builder = nullptr;
+  scene->device->foreach_device([&](Device *device) {
+    if (!builder && device->info.type == DEVICE_METAL) builder = device;
+  });
+  progress.set_substatus("Building Principled diffraction multiscattering albedo");
+  string error;
+  diffraction_albedo_handle_ = scene->diffraction_manager->get_or_build_albedo(
+      request, builder, error, [&]() { return progress.get_cancel(); });
+  progress.set_substatus("");
+  if (diffraction_albedo_handle_ < 0) {
+    if (!progress.get_cancel()) progress.set_error("Principled diffraction albedo: " + error);
+    return false;
+  }
+  /* Metallic and transmission weights remain runtime mixture factors. Do not
+   * validate or build a dielectric return that is provably multiplied by zero. */
+  const bool dielectric_weight = input("Metallic")->link || metallic < 1.0f;
+  const bool transmission_active = dielectric_weight &&
+      (input("Transmission Weight")->link || transmission_weight > CLOSURE_WEIGHT_CUTOFF);
+  if (!transmission_active || alpha < 1.0e-4f) return true;
+  /* Thin sheets use their own completed cache or the explicitly retained
+   * uncached sheet approximation, never the solid-interface return below. */
+  if (is_thin_wall()) return true;
+  if (input("Thin Wall")->link || thin_wall != 0) {
+    progress.set_error("Principled Multiscatter GGX diffraction transmission requires a solid interface");
+    return false;
+  }
+  const bool generalized_tint = input("Specular Tint")->link ||
+      specular_tint.x != 1.0f || specular_tint.y != 1.0f || specular_tint.z != 1.0f;
+  for (const char *name : {"Transmission Dispersion Scale", "Transmission Dispersion Abbe Number"}) {
+    if (input(name)->link) {
+      progress.set_error(string("Principled Multiscatter GGX diffraction requires constant ") + name);
+      return false;
+    }
+  }
+  if (!isfinite_safe(transmission_dispersion_scale) ||
+      !isfinite_safe(transmission_dispersion_abbe_number)) {
+    progress.set_error("Principled Multiscatter GGX diffraction requires finite dispersion parameters");
+    return false;
+  }
+  const float inv_abbe = safe_divide(saturatef(transmission_dispersion_scale),
+                                    max(transmission_dispersion_abbe_number, 0.0f));
+  /* Bare generalized coefficients are affine in F0, so two material-independent
+   * bases support runtime, including linked, Specular Tint. Coated generalized
+   * coefficients require a separately validated nonlinear F0 grid. */
+  for (const char *name : {"IOR", "Thin Film Thickness", "Thin Film IOR"}) {
+    if (input(name)->link) {
+      progress.set_error(string("Principled Multiscatter GGX diffraction transmission requires constant ") + name);
+      return false;
+    }
+  }
+  if (!isfinite_safe(ior) || ior <= 1.0f || ior > 10.0f ||
+      !isfinite_safe(thin_film_thickness) || thin_film_thickness < 0.0f ||
+      !isfinite_safe(thin_film_ior) || thin_film_ior < 1.0f || thin_film_ior > 10.0f) {
+    progress.set_error("Principled Multiscatter GGX diffraction transmission requires finite IOR > 1 and lossless film");
+    return false;
+  }
+  /* The current physical transmission first event is isotropic even when its
+   * separately layered reflective lobe is anisotropic. Match that event. */
+  /* Match the native Principled film cutoff without changing the socket. */
+  const float effective_film_thickness = thin_film_thickness > THINFILM_THICKNESS_CUTOFF ?
+      thin_film_thickness : 0.0f;
+  DiffractionTwoSidedAlbedoRequest transmission_request;
+  transmission_request.alpha_x = transmission_request.alpha_y = alpha;
+  transmission_request.pitch_nm = diffraction_pitch;
+  transmission_request.depth_nm = diffraction_depth;
+  transmission_request.duty = saturatef(diffraction_duty);
+  transmission_request.inside_ior = ior;
+  transmission_request.inv_abbe = inv_abbe;
+  transmission_request.generalized_f0_count = (generalized_tint || inv_abbe != 0.0f) ?
+      (effective_film_thickness > 0.0f ? 16 : 2) : 0;
+  transmission_request.film_ior = effective_film_thickness > 0.0f ? thin_film_ior : 1.0f;
+  transmission_request.film_thickness_nm = effective_film_thickness;
+  if (effective_film_thickness > 0.0f) {
+    const double optical_thickness_nm = double(thin_film_ior) * double(effective_film_thickness);
+    const double minimum_nodes = std::ceil(1.0 + 400.0 * 16.0 * optical_thickness_nm /
+                                                   (380.0 * 380.0));
+    if (!std::isfinite(minimum_nodes) || minimum_nodes > 256.0) {
+      progress.set_error("Principled Multiscatter GGX diffraction film exceeds the 256-node spectral cache limit");
+      return false;
+    }
+    const int nodes = std::max(16, int(minimum_nodes));
+    transmission_request.wavelength_count = ((nodes + 7) / 8) * 8;
+  }
+  progress.set_substatus("Building Principled two-sided diffraction multiscattering albedo");
+  diffraction_two_sided_handle_ = scene->diffraction_manager->get_or_build_two_sided_albedo(
+      transmission_request, builder, error, [&]() { return progress.get_cancel(); });
+  progress.set_substatus("");
+  if (diffraction_two_sided_handle_ < 0) {
+    if (!progress.get_cancel()) progress.set_error("Principled transmission diffraction albedo: " + error);
+    return false;
+  }
+  return true;
+}
+
 void PrincipledBsdfNode::compile(SVMCompiler &compiler)
 {
+  if (has_diffraction() && distribution != CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID &&
+      distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID) {
+    (compiler.progress).set_error("Principled diffraction requires GGX");
+    return;
+  }
   SVMStackOffset tangent_offset = SVM_STACK_INVALID;
-  if (has_nonzero_weight("Anisotropic")) {
+  if (has_nonzero_weight("Anisotropic") || has_diffraction()) {
     tangent_offset = compiler.input_link("Tangent");
   }
 
@@ -2945,13 +3658,32 @@ void PrincipledBsdfNode::compile(SVMCompiler &compiler)
           .thin_film_ior = compiler.input_float("Thin Film IOR"),
           /* Thin wall. */
           .thin_wall = compiler.input_int("Thin Wall"),
+          .diffraction_weight = compiler.input_float("Diffraction Weight"),
+          .diffraction_pitch = compiler.input_float("Diffraction Pitch"),
+          .diffraction_depth = compiler.input_float("Diffraction Depth"),
+          .diffraction_duty = compiler.input_float("Diffraction Duty Cycle"),
+          .diffraction_albedo_handle = diffraction_albedo_handle_,
+          .diffraction_two_sided_handle = diffraction_two_sided_handle_,
+          .diffraction_thin_sheet_handle_r = diffraction_thin_sheet_handles_.x,
+          .diffraction_thin_sheet_handle_g = diffraction_thin_sheet_handles_.y,
+          .diffraction_thin_sheet_handle_b = diffraction_thin_sheet_handles_.z,
       });
 }
 
 void PrincipledBsdfNode::compile(OSLCompiler &compiler)
 {
+  if (has_diffraction() && distribution != CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID &&
+      distribution != CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID) {
+    (*compiler.progress).set_error("Principled diffraction requires GGX");
+    return;
+  }
   compiler.parameter(this, "distribution");
   compiler.parameter(this, "subsurface_method");
+  compiler.parameter("diffraction_albedo_handle_plus_one", diffraction_albedo_handle_ + 1);
+  compiler.parameter("diffraction_two_sided_handle_plus_one", diffraction_two_sided_handle_ + 1);
+  compiler.parameter("diffraction_thin_sheet_r_plus_one", diffraction_thin_sheet_handles_.x + 1);
+  compiler.parameter("diffraction_thin_sheet_g_plus_one", diffraction_thin_sheet_handles_.y + 1);
+  compiler.parameter("diffraction_thin_sheet_b_plus_one", diffraction_thin_sheet_handles_.z + 1);
   compiler.add(this, "node_principled_bsdf");
 }
 

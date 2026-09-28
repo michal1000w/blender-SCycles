@@ -135,7 +135,7 @@ ccl_device_inline
                                         kernel_data_fetch(prim_object, prim_addr) :
                                         object;
             const int prim = kernel_data_fetch(prim_index, prim_addr);
-            if (intersection_skip_self_shadow(ray->self, prim_object, prim)) {
+            if (intersection_skip_self_shadow_coherent_point(kg, ray->self, prim_object, prim, type)) {
               continue;
             }
 

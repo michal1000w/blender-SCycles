@@ -1,0 +1,25 @@
+{
+  "repository_commit": "37773dce8128ccabcd9d5108d9958d6041244661",
+  "files": {
+    "Al_Rakic_1995.yml": {
+      "url": "https://raw.githubusercontent.com/polyanskiy/refractiveindex.info-database/37773dce8128ccabcd9d5108d9958d6041244661/database/data/main/Al/nk/Rakic.yml",
+      "sha256": "e93b31fe821551836e5b000949c67c633b8a1ca1f2c5549f4db0f1c03b24844d"
+    },
+    "LICENSE_CC0.txt": {
+      "url": "https://raw.githubusercontent.com/polyanskiy/refractiveindex.info-database/37773dce8128ccabcd9d5108d9958d6041244661/LICENSE",
+      "sha256": "36ffd9dc085d529a7e60e1276d73ae5a030b020313e6c5408593a6ae2af39673"
+    }
+  },
+  "paper_doi": "10.1364/AO.34.004755",
+  "source_wavelength_unit": "micrometer",
+  "solver_wavelength_unit": "nanometer",
+  "conversion_factor": 1000,
+  "description": "Published reconstructed intrinsic optical constants for aluminum films; not raw measurements or a complete disc coating model.",
+  "derived": {
+    "Al_Rakic_1995_nm.csv": {
+      "sha256": "4d4aeb7fc8c8202147ea98ff44ca9dacabe641bc19b77738ed5de7580077b61a",
+      "rows": 206,
+      "transformation": "All original rows; decimal wavelength multiplied by 1000, n and k unchanged; no interpolation or filtering."
+    }
+  }
+}

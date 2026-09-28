@@ -18,6 +18,11 @@ set(SRC
   camera.cpp
   constant_fold.cpp
   devicescene.cpp
+  diffraction_albedo.cpp
+  diffraction.cpp
+  diffraction_tensor.cpp
+  diffraction_manager.cpp
+  diffraction_manager_device.cpp
   film.cpp
   geometry.cpp
   geometry_attributes.cpp
@@ -65,7 +70,15 @@ set(SRC_HEADERS
   background.h
   camera.h
   constant_fold.h
+  coherent_planar_cluster.h
+  coherent_sphere_host.h
   devicescene.h
+  diffraction_albedo.h
+  diffraction.h
+  diffraction_index.h
+  diffraction_convergence.h
+  diffraction_tensor.h
+  diffraction_manager.h
   film.h
   geometry.h
   hair.h
@@ -111,9 +124,10 @@ set(LIB
 )
 
 if(CYCLES_STANDALONE_REPOSITORY)
-  list(APPEND LIB PRIVATE extern_sky)
+  find_package(Eigen3 REQUIRED CONFIG)
+  list(APPEND LIB PRIVATE extern_sky Eigen3::Eigen)
 else()
-  list(APPEND LIB PRIVATE bf_intern_sky)
+  list(APPEND LIB PRIVATE bf_intern_sky bf::dependencies::eigen)
 endif()
 
 if(WITH_CYCLES_OSL)

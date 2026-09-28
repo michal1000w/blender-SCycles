@@ -189,6 +189,11 @@ class ShaderNode : public Node {
   {
     return false;
   }
+
+  virtual int get_extra_closure_count()
+  {
+    return 0;
+  }
   virtual bool has_spectral_transmission()
   {
     return false;

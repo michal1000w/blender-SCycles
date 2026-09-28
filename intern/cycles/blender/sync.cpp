@@ -320,6 +320,21 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
                             const int height,
                             const DeviceInfo &denoise_device_info)
 {
+  blender::PointerRNA scene_rna_ptr = RNA_id_pointer_create(&b_scene->id);
+  blender::PointerRNA cscene = RNA_pointer_get(&scene_rna_ptr, "cycles");
+  const bool effects = get_boolean(cscene, "use_diffraction_effects");
+  const bool material = get_boolean(cscene, "use_material_diffraction");
+  const bool polarization = get_boolean(cscene, "use_polarization");
+  const bool coherence = get_boolean(cscene, "use_coherent_interference");
+  const bool diffraction_settings_changed = effects != use_diffraction_effects_ ||
+      material != use_material_diffraction_ || polarization != use_polarization_ ||
+      coherence != use_coherent_interference_;
+  use_diffraction_effects_ = effects;
+  use_material_diffraction_ = material;
+  use_polarization_ = polarization;
+  use_coherent_interference_ = coherence;
+  has_updates_ |= diffraction_settings_changed;
+
   /* For auto refresh images. */
   ImageManager *image_manager = scene->image_manager.get();
   const float frame = BKE_scene_frame_get(b_scene);
@@ -347,7 +362,8 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
   sync_view_layer(b_view_layer);
   sync_integrator(b_view_layer, background, denoise_device_info);
   sync_film(b_view_layer, b_screen, b_v3d);
-  sync_shaders(b_depsgraph, b_screen, b_v3d, auto_refresh_update, frame_update);
+  sync_shaders(b_depsgraph, b_screen, b_v3d,
+               auto_refresh_update || diffraction_settings_changed, frame_update);
   sync_images();
 
   geometry_synced.clear(); /* use for objects and motion sync */
@@ -400,6 +416,16 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
   integrator->set_use_bidirectional_path_tracing(
       get_boolean(cscene, "use_bidirectional_path_tracing"));
+  integrator->set_use_coherent_specular_connections(
+      get_boolean(cscene, "use_diffraction_effects") &&
+      get_boolean(cscene, "use_coherent_interference") &&
+      get_boolean(cscene, "use_coherent_specular_connections"));
+  integrator->set_coherent_transport_mode(
+      get_enum(cscene, "coherent_transport_mode", 2, 0));
+  integrator->set_coherent_polarization_mode(
+      get_enum(cscene, "coherent_polarization_mode", 2, 0));
+  integrator->set_coherent_max_interface_events(
+      get_int(cscene, "coherent_max_interface_events"));
   integrator->set_bdpt_light_paths(get_int(cscene, "bdpt_light_paths"));
   const int64_t bdpt_reference_pixels = int64_t(max(render_resolution_x(b_scene->r), 1)) *
                                         int64_t(max(render_resolution_y(b_scene->r), 1));

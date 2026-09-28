@@ -42,6 +42,13 @@ class Light : public Geometry {
 
   NODE_SOCKET_API(int, max_bounces)
 
+  /* Experimental direct point-source coherence. Group zero is disabled. */
+  NODE_SOCKET_API(int, coherence_group)
+  NODE_SOCKET_API(float, coherence_phase)
+  NODE_SOCKET_API(float, coherence_wavelength)
+  NODE_SOCKET_API(float, coherence_wavelength_low)
+  NODE_SOCKET_API(float, coherence_length)
+
   /* Normalize power by the surface area of the light. */
   NODE_SOCKET_API(bool, normalize)
 
