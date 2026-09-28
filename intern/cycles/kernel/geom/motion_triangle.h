@@ -30,7 +30,7 @@ ccl_device_inline void motion_triangle_verts_for_step(KernelGlobals kg,
                                                       const int numverts,
                                                       const int numsteps,
                                                       int step,
-                                                      float3 verts[3])
+                                                      ccl_private float3 verts[3])
 {
   const int center_step = (numsteps - 1) / 2;
   if (step == center_step) {
@@ -57,7 +57,7 @@ ccl_device_inline void motion_triangle_normals_for_step(KernelGlobals kg,
                                                         int offset,
                                                         const int numsteps,
                                                         int step,
-                                                        float3 normals[3])
+                                                        ccl_private float3 normals[3])
 {
   const int center_step = (numsteps - 1) / 2;
   if (step == center_step) {
@@ -121,7 +121,7 @@ ccl_device_inline void motion_triangle_vertices(KernelGlobals kg,
                                                 const int numverts,
                                                 const int step,
                                                 const float t,
-                                                float3 verts[3])
+                                                ccl_private float3 verts[3])
 {
   /* Fetch vertex coordinates. */
   const int offset = kernel_data_fetch(objects, object).position_offset;
@@ -136,7 +136,7 @@ ccl_device_inline void motion_triangle_vertices(KernelGlobals kg,
 }
 
 ccl_device_inline void motion_triangle_vertices(
-    KernelGlobals kg, const int object, const int prim, const float time, float3 verts[3])
+    KernelGlobals kg, const int object, const int prim, const float time, ccl_private float3 verts[3])
 {
   int numsteps;
   int step;
@@ -155,7 +155,7 @@ ccl_device_inline void motion_triangle_normals(KernelGlobals kg,
                                                const int numsteps,
                                                const int step,
                                                const float t,
-                                               float3 normals[3])
+                                               ccl_private float3 normals[3])
 {
   /* Fetch normals. */
   const int object_flag = kernel_data_fetch(object_flag, object);
@@ -174,8 +174,8 @@ ccl_device_inline void motion_triangle_normals(KernelGlobals kg,
 
 ccl_device_inline void motion_triangle_vertices_and_normals(KernelGlobals kg,
                                                             const ccl_private ShaderData *sd,
-                                                            float3 verts[3],
-                                                            float3 normals[3])
+                                                            ccl_private float3 verts[3],
+                                                            ccl_private float3 normals[3])
 {
   const int object = sd->object;
   int numsteps, step;

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include <cstdlib>
+#include <climits>
 
 #include "bvh/bvh.h"
 
@@ -13,12 +14,16 @@
 #include "scene/camera.h"
 #include "scene/curves.h"
 #include "scene/devicescene.h"
+#include "scene/coherent_planar_cluster.h"
+#include "scene/coherent_sphere_host.h"
+#include "scene/diffraction_manager.h"
 #include "scene/film.h"
 #include "scene/hair.h"
 #include "scene/integrator.h"
 #include "scene/light.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
+#include "scene/pass.h"
 #include "scene/osl.h"
 #include "scene/particles.h"
 #include "scene/pointcloud.h"
@@ -26,9 +31,13 @@
 #include "scene/scene.h"
 #include "scene/scene_attributes.h"
 #include "scene/shader.h"
+#include "scene/shader_graph.h"
+#include "scene/shader_nodes.h"
 #include "scene/svm.h"
 #include "scene/tables.h"
 #include "scene/volume.h"
+
+#include "kernel/light/coherent_geometry.h"
 
 #include "session/session.h"
 
@@ -36,7 +45,790 @@
 #include "util/log.h"
 #include "util/progress.h"
 
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <vector>
+
 CCL_NAMESPACE_BEGIN
+
+/* Detector phase belongs to the declared Lambertian receiver model. Color is
+ * a passive radiometric factor, including linked color evaluated at the hit. */
+static bool coherent_detector_shader(ShaderNode *node)
+{
+  const bool principled = node->type == PrincipledBsdfNode::get_node_type();
+  if (!principled && node->type != DiffuseBsdfNode::get_node_type()) return false;
+  const ShaderInput *color = node->input(principled ? "Base Color" : "Color");
+  const ShaderInput *normal = node->input("Normal");
+  const ShaderInput *roughness = node->input("Roughness");
+  const bool geometry_normal = normal && normal->link &&
+                               normal->link->parent->type == GeometryNode::get_node_type() &&
+                               normal->link == normal->link->parent->output("Normal");
+  if (!color || !normal || !roughness ||
+      (!principled && (roughness->link || node->get_float(roughness->socket_type) != 0.0f)) ||
+      (normal->link ? !geometry_normal :
+                      !is_zero(node->get_float3(normal->socket_type))))
+  {
+    return false;
+  }
+  if (!color->link) {
+    const float3 value = node->get_float3(color->socket_type);
+    if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z) ||
+        value.x < 0.0f || value.y < 0.0f || value.z < 0.0f ||
+        value.x > 1.0f || value.y > 1.0f || value.z > 1.0f)
+    {
+      return false;
+    }
+  }
+  if (!principled) return true;
+  /* No additional lobes or rough diffuse response may participate. Linked
+   * weights cannot be proved zero, even if their socket default is zero. */
+  for (const char *name : {"Diffuse Roughness", "Metallic", "Transmission Weight",
+                           "Specular IOR Level", "Coat Weight", "Sheen Weight",
+                           "Subsurface Weight", "Emission Strength"})
+  {
+    const ShaderInput *input = node->input(name);
+    if (!input || input->link || node->get_float(input->socket_type) != 0.0f) return false;
+  }
+  /* Specular IOR Level zero suppresses the bare specular lobe, but an
+   * effective film recreates that lobe independently of its level. */
+  const ShaderInput *film = node->input("Thin Film Thickness");
+  if (!film || film->link) return false;
+  const float film_thickness = node->get_float(film->socket_type);
+  if (!std::isfinite(film_thickness) || film_thickness < 0.0f || film_thickness > 0.1f) {
+    return false;
+  }
+  const ShaderInput *alpha = node->input("Alpha");
+  if (!alpha || alpha->link || node->get_float(alpha->socket_type) != 1.0f) return false;
+  const ShaderInput *coat_normal = node->input("Coat Normal");
+  if (coat_normal && coat_normal->link &&
+      !(coat_normal->link->parent->type == GeometryNode::get_node_type() &&
+        coat_normal->link == coat_normal->link->parent->output("Normal")))
+  {
+    return false;
+  }
+  return true;
+}
+
+/* Only exact, single-node ideal graphs can participate. Optical phase is
+ * supplied by the declared interface model, never inferred from RGB color. */
+static bool coherent_interface_shader(const Shader *shader,
+                                      const Object::CoherentInterface mode,
+                                      float &ior)
+{
+  if (!shader || !shader->graph || shader->graph->output()->input("Volume")->link ||
+      shader->graph->output()->input("Displacement")->link)
+  {
+    return false;
+  }
+  const ShaderOutput *surface = shader->graph->output()->input("Surface")->link;
+  if (!surface) return false;
+  ShaderNode *node = surface->parent;
+  if (mode == Object::COHERENT_INTERFACE_DETECTOR) return coherent_detector_shader(node);
+  const ShaderInput *color = node->input("Color");
+  const ShaderInput *normal = node->input("Normal");
+  const ShaderInput *roughness = node->input("Roughness");
+  const bool default_geometry_normal = normal && normal->link &&
+                                       normal->link->parent->type == GeometryNode::get_node_type() &&
+                                       normal->link == normal->link->parent->output("Normal");
+  if (!color || !normal || !roughness || color->link ||
+      (normal->link && !default_geometry_normal) || roughness->link ||
+      !isequal(node->get_float3(color->socket_type), one_float3()) ||
+      node->get_float(roughness->socket_type) != 0.0f)
+  {
+    return false;
+  }
+  if (mode == Object::COHERENT_INTERFACE_MIRROR) {
+    if (node->type != GlossyBsdfNode::get_node_type()) return false;
+    GlossyBsdfNode *glossy = static_cast<GlossyBsdfNode *>(node);
+    return glossy->get_distribution() == CLOSURE_BSDF_MICROFACET_GGX_ID &&
+           glossy->get_diffraction_weight() == 0.0f && !glossy->input("Diffraction Weight")->link &&
+           glossy->get_anisotropy() == 0.0f && !glossy->input("Anisotropy")->link;
+  }
+  if (mode == Object::COHERENT_INTERFACE_GLASS) {
+    if (node->type != GlassBsdfNode::get_node_type()) return false;
+    GlassBsdfNode *glass = static_cast<GlassBsdfNode *>(node);
+    if (glass->get_distribution() != CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID ||
+        glass->get_diffraction_weight() != 0.0f || glass->input("Diffraction Weight")->link ||
+        glass->get_thin_film_thickness() != 0.0f || glass->input("Thin Film Thickness")->link ||
+        glass->input("IOR")->link || !(glass->get_IOR() > 0.0f) ||
+        !std::isfinite(glass->get_IOR()))
+    {
+      return false;
+    }
+    ior = glass->get_IOR();
+    return true;
+  }
+  return false;
+}
+
+/* Polarizer orientation belongs to the physical object, never to a flipped
+ * incident normal. The runtime projector uses this same world direction. */
+static bool coherent_patch_polarizer(const Shader *shader,
+                                    const Object *object,
+                                    KernelCoherentPatch &patch)
+{
+  if (!shader || !shader->graph) return true;
+  const ShaderOutput *surface = shader->graph->output()->input("Surface")->link;
+  if (!surface || surface->parent->type != GlassBsdfNode::get_node_type()) return true;
+  GlassBsdfNode *glass = static_cast<GlassBsdfNode *>(surface->parent);
+  if (glass->input("Polarizer")->link) return false;
+  patch.polarizer = glass->get_polarizer() != 0;
+  if (!patch.polarizer) return true;
+  if (glass->input("Polarizer Angle")->link) return false;
+  const float angle = glass->get_polarizer_angle();
+  if (!std::isfinite(angle)) return false;
+  const Transform tfm = object->get_tfm();
+  const float3 axis = transform_direction(&tfm, make_float3(cosf(angle), sinf(angle), 0.0f));
+  if (!isfinite_safe(axis) || !(len_squared(axis) > 1.0e-12f)) return false;
+  patch.polarizer_axis = normalize(axis);
+  return true;
+}
+
+/* These passes describe the camera-visible surface, not a decomposition of
+ * incident illumination. Coherent fields do not change their native writers.
+ * Light passes still need an explicit convention for cross-path pair terms. */
+static bool coherent_specular_pass_supported(const PassType type)
+{
+  switch (type) {
+    case PASS_COMBINED:
+    case PASS_DIFFUSE:
+    case PASS_DIFFUSE_DIRECT:
+    case PASS_DIFFUSE_INDIRECT:
+    case PASS_GLOSSY:
+    case PASS_GLOSSY_DIRECT:
+    case PASS_GLOSSY_INDIRECT:
+    case PASS_TRANSMISSION:
+    case PASS_TRANSMISSION_DIRECT:
+    case PASS_TRANSMISSION_INDIRECT:
+    case PASS_EMISSION:
+    case PASS_BACKGROUND:
+    case PASS_DEPTH:
+    case PASS_POSITION:
+    case PASS_NORMAL:
+    case PASS_ROUGHNESS:
+    case PASS_UV:
+    case PASS_OBJECT_ID:
+    case PASS_MATERIAL_ID:
+    case PASS_CRYPTOMATTE:
+    case PASS_AOV_COLOR:
+    case PASS_AOV_VALUE:
+    case PASS_SAMPLE_COUNT:
+    case PASS_DIFFUSE_COLOR:
+    case PASS_GLOSSY_COLOR:
+    case PASS_TRANSMISSION_COLOR:
+    case PASS_MIST:
+    case PASS_DENOISING_ALBEDO:
+    case PASS_DENOISING_SPECULAR_ALBEDO:
+    case PASS_DENOISING_NORMAL:
+    case PASS_DENOISING_ROUGHNESS:
+    case PASS_DENOISING_DEPTH:
+    case PASS_MOTION:
+    case PASS_MOTION_WEIGHT:
+    case PASS_DENOISING_BACKWARD_MOTION:
+    case PASS_DENOISING_SPECULAR_MOTION:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, Progress &progress)
+{
+  KernelIntegrator &ki = dscene->data.integrator;
+  ki.coherent_specular_enabled = 0;
+  ki.coherent_patch_count = 0;
+  ki.coherent_candidate_count = 0;
+  ki.coherent_max_interface_events = 0;
+  if (!scene->integrator->get_use_coherent_specular_connections()) {
+    dscene->coherent_patches.free();
+    dscene->coherent_patch_primitives.free();
+    dscene->coherent_candidates.free();
+    return true;
+  }
+  const bool stream_facets = scene->integrator->get_coherent_transport_mode() == 1;
+  const int max_events = scene->integrator->get_coherent_max_interface_events();
+  if (stream_facets && (max_events < 1 || max_events > 2)) {
+    progress.set_error("Streamed Mirror Facets requires Max Interface Events 1 or 2; two reflections cost O(triangles squared)");
+    return false;
+  }
+  if (max_events < 1 || max_events > 4) {
+    progress.set_error("Coherent specular connections require 1 to 4 interface events");
+    return false;
+  }
+  if (scene->device->info.type != DEVICE_METAL) {
+    progress.set_error("Coherent specular connections currently require Metal");
+    return false;
+  }
+  if (scene->integrator->get_max_bounce() < max_events + 1 ||
+      (scene->integrator->use_bidirectional_path_tracing_on_device(scene->device) &&
+       scene->integrator->get_bdpt_max_bounces() < max_events + 1))
+  {
+    progress.set_error("Coherent connections require sufficient global and enabled BDPT interface bounce limits");
+    return false;
+  }
+  if (scene->integrator->get_sample_clamp_direct() != 0.0f ||
+      scene->integrator->get_sample_clamp_indirect() != 0.0f ||
+      scene->integrator->get_use_photon_mapping() || scene->has_shadow_catcher())
+  {
+    progress.set_error("Coherent specular connections require zero sample clamps, no photon mapping, and no shadow catcher");
+    return false;
+  }
+  for (const Pass *pass : scene->passes) {
+    if (!coherent_specular_pass_supported(pass->get_type()) || !pass->get_lightgroup().empty()) {
+      progress.set_error(string("Coherent specular connections support Combined, signed surface light decomposition and surface data passes; this pass or lightgroup is unsupported: ") +
+                         pass_type_as_string(pass->get_type()));
+      return false;
+    }
+  }
+
+  std::vector<KernelCoherentPatch> patches;
+  std::vector<int> patch_primitives;
+  int detector_count = 0;
+  for (const Object *object : scene->objects) {
+    if (progress.get_cancel()) return false;
+    if (object->has_light_linking()) {
+      progress.set_error(string("Coherent specular connections do not support light linking on object ") + object->name.c_str());
+      return false;
+    }
+    if (object->has_shadow_linking()) {
+      progress.set_error(string("Coherent specular connections do not support shadow linking on object ") + object->name.c_str());
+      return false;
+    }
+    if (!object->get_lightgroup().empty()) {
+      progress.set_error(string("Coherent specular connections do not support light group on object ") + object->name.c_str());
+      return false;
+    }
+    if (object->get_is_shadow_catcher() && !object->get_geometry()->is_light()) {
+      progress.set_error(string("Coherent specular connections do not support shadow catcher on object ") + object->name.c_str());
+      return false;
+    }
+    const Geometry *geometry = object->get_geometry();
+    if (geometry->has_volume) {
+      progress.set_error("Coherent specular connections do not support volumes");
+      return false;
+    }
+    const Object::CoherentInterface mode = object->get_coherent_interface();
+    for (Node *shader_node : geometry->get_used_shaders()) {
+      const Shader *shader = static_cast<const Shader *>(shader_node);
+      if (mode != Object::COHERENT_INTERFACE_GLASS &&
+          shader->has_surface_shadow_transparency())
+      {
+        progress.set_error(string("Coherent connections require opaque shadows on unmarked or non-glass object ") +
+                           object->name.c_str());
+        return false;
+      }
+    }
+    if (mode == Object::COHERENT_INTERFACE_OFF) continue;
+    const uint required_visibility = PATH_RAY_VISIBILITY_CAMERA |
+                                     PATH_RAY_VISIBILITY_DIFFUSE |
+                                     PATH_RAY_VISIBILITY_GLOSSY |
+                                     PATH_RAY_VISIBILITY_SHADOW_OPAQUE;
+    if ((object->get_visibility() & required_visibility) != required_visibility) {
+      progress.set_error(string("Coherent interface requires camera, diffuse, glossy, and opaque-shadow visibility on object ") +
+                         object->name.c_str());
+      return false;
+    }
+    if (object->use_motion() || geometry->get_use_motion_blur() ||
+        geometry->has_true_displacement())
+    {
+      progress.set_error("Coherent interfaces require static undisplaced geometry");
+      return false;
+    }
+    if (stream_facets && mode != Object::COHERENT_INTERFACE_DETECTOR &&
+        (mode != Object::COHERENT_INTERFACE_MIRROR || !geometry->is_mesh())) {
+      progress.set_error("Streamed Mirror Facets supports flat triangle Mirror objects and Lambertian detectors only");
+      return false;
+    }
+    if (geometry->is_pointcloud()) {
+      if (mode != Object::COHERENT_INTERFACE_MIRROR && mode != Object::COHERENT_INTERFACE_GLASS) {
+        progress.set_error("Coherent native spheres require ideal Mirror or Glass materials");
+        return false;
+      }
+      if (mode == Object::COHERENT_INTERFACE_GLASS && max_events < 2) {
+        progress.set_error("Coherent native Glass spheres require at least two events");
+        return false;
+      }
+      const PointCloud *points = static_cast<const PointCloud *>(geometry);
+      if (points->num_points() == 0 || patches.size() + points->num_points() > 64) {
+        progress.set_error("Coherent native sphere interfaces require 1 to 64 bounded patches");
+        return false;
+      }
+      if (points->prim_offset > size_t(INT_MAX) ||
+          points->num_points() > size_t(INT_MAX) - points->prim_offset ||
+          patch_primitives.size() > size_t(INT_MAX) - points->num_points())
+      {
+        progress.set_error("Coherent native sphere primitive IDs exceed supported integer range");
+        return false;
+      }
+      const auto &used_shaders = points->get_used_shaders();
+      const auto &shader_indices = points->get_shader();
+      Shader *material = nullptr;
+      for (size_t i = 0; i < points->num_points(); ++i) {
+        const int index = shader_indices[i];
+        if (index < 0 || size_t(index) >= used_shaders.size()) {
+          progress.set_error("Coherent native sphere has an unassigned material point");
+          return false;
+        }
+        Shader *point_material = static_cast<Shader *>(used_shaders[index]);
+        if (material && material != point_material) {
+          progress.set_error("Coherent native sphere points must use one material");
+          return false;
+        }
+        material = point_material;
+      }
+      float sphere_ior = 1.0f;
+      if (!coherent_interface_shader(material, mode, sphere_ior)) {
+        progress.set_error("Coherent native sphere requires a white smooth single-node ideal shader");
+        return false;
+      }
+      if (mode == Object::COHERENT_INTERFACE_GLASS &&
+          (scene->integrator->get_coherent_polarization_mode() != 1 || !(sphere_ior > 1.0f))) {
+        progress.set_error("Coherent native Glass spheres require the vector polarization model and IOR greater than one");
+        return false;
+      }
+      const Transform tfm = object->get_tfm();
+      /* A baked point primitive is exactly the world sphere stored by Cycles.
+       * Unbaked general affine transforms represent ellipsoids, including
+       * approximately orthogonal float matrices. Do not silently fit these. */
+      float scale = 1.0f;
+      if (!points->transform_applied) {
+        std::array<std::array<float, 3>, 3> columns;
+        for (int column = 0; column < 3; ++column) {
+          const float3 axis = transform_get_column(&tfm, column);
+          columns[column] = {axis.x, axis.y, axis.z};
+        }
+        if (!coherent_sphere_transform_scale(columns, scale)) {
+          progress.set_error("Coherent instanced native spheres require an exact axis-aligned uniform transform; bake rotations and nonrepresentable scaled radii");
+          return false;
+        }
+      }
+      const packed_float3 *centers = points->get_position();
+      const float *radii = points->get_radius();
+      for (size_t i = 0; i < points->num_points(); ++i) {
+        const float3 center = points->transform_applied ? float3(centers[i]) :
+                                                        transform_point(&tfm, centers[i]);
+        float radius = 0.0f;
+        const bool valid_radius = coherent_sphere_world_radius(
+            radii[i], scale, points->transform_applied, radius);
+        if (!std::isfinite(center.x) || !std::isfinite(center.y) ||
+            !std::isfinite(center.z) || !valid_radius)
+        {
+          progress.set_error("Coherent native spheres require finite positive exactly represented world radii; bake nonrepresentable scaled radii");
+          return false;
+        }
+        KernelCoherentPatch patch{};
+        patch.center = center;
+        patch.tangent_u = make_float3(1.0f, 0.0f, 0.0f);
+        patch.tangent_v = make_float3(0.0f, 1.0f, 0.0f);
+        patch.outside_ior = 1.0f;
+        patch.inside_ior = sphere_ior;
+        patch.object = object->index;
+        patch.mode = int(mode);
+        if (!coherent_patch_polarizer(material, object, patch)) {
+          progress.set_error("Coherent polarizers require a finite constant angle and unlinked checkbox");
+          return false;
+        }
+        patch.primitive_offset = int(patch_primitives.size());
+        patch.primitive_count = 1;
+        patch.shape = 1;
+        patch.radius = radius;
+        patch.primitive_type = PRIMITIVE_POINT;
+        patch_primitives.push_back(int(points->prim_offset + i));
+        patches.push_back(patch);
+      }
+      continue;
+    }
+    if (!geometry->is_mesh()) {
+      progress.set_error("Coherent interfaces require triangle meshes or declared native Mirror point spheres");
+      return false;
+    }
+    const Mesh *mesh = static_cast<const Mesh *>(geometry);
+    /* Geometry Nodes may export an empty mesh companion beside a real point
+     * component. It carries the original object's optical declaration but
+     * has no intersections to own. Do not reject that empty component or
+     * manufacture a planar patch; the final scene guard still requires a
+     * nonempty ideal interface and a nonempty Lambertian detector. */
+    if (mode != Object::COHERENT_INTERFACE_DETECTOR && mesh->num_triangles() == 0) {
+      continue;
+    }
+    if (mode == Object::COHERENT_INTERFACE_DETECTOR &&
+        (object->get_shadow_terminator_shading_offset() != 0.0f ||
+         mesh->attributes.find(ATTR_STD_CORNER_NORMAL)))
+    {
+      progress.set_error("Coherent Lambertian detectors require flat normals and zero shading terminator offset");
+      return false;
+    }
+    if (mesh->num_triangles() == 0 || mesh->get_subdivision_type() != Mesh::SUBDIVISION_NONE) {
+      progress.set_error("Coherent interfaces require nonempty ordinary triangle meshes");
+      return false;
+    }
+    if (mode != Object::COHERENT_INTERFACE_DETECTOR &&
+        mesh->attributes.find(ATTR_STD_CORNER_NORMAL)) {
+      progress.set_error("Coherent ideal interfaces require geometric flat normals");
+      return false;
+    }
+    const auto &used_shaders = mesh->get_used_shaders();
+    const auto &shader_indices = mesh->get_shader();
+    Shader *material = nullptr;
+    for (size_t i = 0; i < mesh->num_triangles(); ++i) {
+      if (mode == Object::COHERENT_INTERFACE_DETECTOR && mesh->get_smooth()[i]) {
+        progress.set_error("Coherent Lambertian detectors require flat normals and zero shading terminator offset");
+        return false;
+      }
+      if (mode != Object::COHERENT_INTERFACE_DETECTOR && mesh->get_smooth()[i]) {
+        progress.set_error("Coherent ideal interfaces cannot use smooth shading normals");
+        return false;
+      }
+      const int index = shader_indices[i];
+      if (index < 0 || size_t(index) >= used_shaders.size()) {
+        progress.set_error("Coherent interface has an unassigned material triangle");
+        return false;
+      }
+      Shader *triangle_material = static_cast<Shader *>(used_shaders[index]);
+      if (material && triangle_material != material) {
+        progress.set_error("Coherent interface triangles must use one material");
+        return false;
+      }
+      material = triangle_material;
+    }
+    float inside_ior = 1.0f;
+    if (!coherent_interface_shader(material, mode, inside_ior)) {
+      progress.set_error(string("Coherent interface on object ") + object->name.c_str() +
+                         (mode == Object::COHERENT_INTERFACE_DETECTOR ?
+                              " requires one passive Lambertian Diffuse or pure diffuse Principled shader" :
+                              " requires a matching white, smooth, single-node ideal shader"));
+      return false;
+    }
+    if (mode == Object::COHERENT_INTERFACE_DETECTOR) {
+      ++detector_count;
+      continue;
+    }
+    if (mode == Object::COHERENT_INTERFACE_GLASS) {
+      if (scene->integrator->get_coherent_polarization_mode() != 1) {
+        progress.set_error("Coherent Glass interfaces require the Vector Dipole Ensemble polarization model");
+        return false;
+      }
+      if (!(inside_ior >= 1.0f)) {
+        progress.set_error("Coherent planar Glass interface IOR must be at least exterior air IOR 1");
+        return false;
+      }
+    }
+
+    const packed_float3 *positions = mesh->get_position();
+    const Transform tfm = object->get_tfm();
+    std::vector<CoherentPlanarTriangle> triangles;
+    triangles.reserve(mesh->num_triangles());
+    /* Geometry update has finalized global primitive offsets before this scene
+     * preparation. Preserve vertex IDs for topology, including instances. */
+    if (mesh->prim_offset > size_t(INT_MAX) ||
+        mesh->num_triangles() > size_t(INT_MAX) - mesh->prim_offset)
+    {
+      progress.set_error("Coherent interface primitive IDs exceed supported integer range");
+      return false;
+    }
+    for (size_t i = 0; i < mesh->num_triangles(); ++i) {
+      const Mesh::Triangle tri = mesh->get_triangle(i);
+      if (!tri.valid(positions)) {
+        progress.set_error("Coherent interface contains a degenerate triangle");
+        return false;
+      }
+      CoherentPlanarTriangle triangle{};
+      triangle.primitive = int(mesh->prim_offset + i);
+      for (int j = 0; j < 3; ++j) {
+        float3 point = positions[tri.v[j]];
+        if (!mesh->transform_applied)
+          point = transform_point(&tfm, point);
+        if (stream_facets && !isfinite_safe(point)) {
+          progress.set_error("Streamed mirror facets require finite world vertices");
+          return false;
+        }
+        triangle.point[j] = {double(point.x), double(point.y), double(point.z)};
+        triangle.vertex[j] = tri.v[j];
+      }
+      triangles.push_back(triangle);
+    }
+    if (stream_facets) {
+      if (patches.size() >= size_t(INT_MAX)) {
+        progress.set_error("Streamed mirror object count exceeds integer range");
+        return false;
+      }
+      KernelCoherentPatch patch{};
+      patch.object = object->index;
+      patch.mode = int(mode);
+      patch.shape = 2; /* One mesh range, not a planar patch. */
+      patch.primitive_type = PRIMITIVE_TRIANGLE;
+      patch.primitive_offset = int(mesh->prim_offset);
+      patch.primitive_count = int(mesh->num_triangles());
+      patches.push_back(patch);
+      continue;
+    }
+    std::vector<CoherentPlanarCluster> clusters;
+    std::string cluster_error;
+    if (!coherent_planar_cluster_build(triangles, clusters, cluster_error)) {
+      progress.set_error(cluster_error);
+      return false;
+    }
+    if (patches.size() + clusters.size() > 64) {
+      progress.set_error("Coherent interfaces exceed the 64 planar patch history limit");
+      return false;
+    }
+    for (const CoherentPlanarCluster &cluster : clusters) {
+      if (patch_primitives.size() > size_t(INT_MAX) ||
+          cluster.primitives.size() > size_t(INT_MAX) - patch_primitives.size())
+      {
+        progress.set_error("Coherent triangle membership exceeds supported integer range");
+        return false;
+      }
+      KernelCoherentPatch patch{};
+      const double center_u = 0.5 * (cluster.min_u + cluster.max_u);
+      const double center_v = 0.5 * (cluster.min_v + cluster.max_v);
+      patch.center = make_float3(float(cluster.origin[0] + cluster.tangent_u[0] * center_u +
+                                       cluster.tangent_v[0] * center_v),
+                                 float(cluster.origin[1] + cluster.tangent_u[1] * center_u +
+                                       cluster.tangent_v[1] * center_v),
+                                 float(cluster.origin[2] + cluster.tangent_u[2] * center_u +
+                                       cluster.tangent_v[2] * center_v));
+      patch.tangent_u = make_float3(
+          float(cluster.tangent_u[0]), float(cluster.tangent_u[1]), float(cluster.tangent_u[2]));
+      patch.tangent_v = make_float3(
+          float(cluster.tangent_v[0]), float(cluster.tangent_v[1]), float(cluster.tangent_v[2]));
+      patch.half_u = float(0.5 * (cluster.max_u - cluster.min_u));
+      patch.half_v = float(0.5 * (cluster.max_v - cluster.min_v));
+      patch.outside_ior = 1.0f;
+      patch.inside_ior = inside_ior;
+      patch.object = object->index;
+      patch.mode = int(mode);
+      if (!coherent_patch_polarizer(material, object, patch)) {
+        progress.set_error("Coherent polarizers require a finite constant angle and unlinked checkbox");
+        return false;
+      }
+      patch.primitive_offset = int(patch_primitives.size());
+      patch.primitive_count = int(cluster.primitives.size());
+      patch.shape = 0;
+      patch.primitive_type = PRIMITIVE_TRIANGLE;
+      patch_primitives.insert(
+          patch_primitives.end(), cluster.primitives.begin(), cluster.primitives.end());
+      patches.push_back(patch);
+    }
+  }
+  if (detector_count == 0 || patches.empty()) {
+    progress.set_error(
+        "Coherent specular connections require a marked Lambertian detector and at least one "
+        "ideal interface");
+    return false;
+  }
+  bool has_mirror = false, has_glass = false;
+  for (const KernelCoherentPatch &patch : patches) {
+    has_mirror |= patch.mode == Object::COHERENT_INTERFACE_MIRROR;
+    has_glass |= patch.mode == Object::COHERENT_INTERFACE_GLASS;
+  }
+  if (has_mirror && (!scene->integrator->get_caustics_reflective() ||
+                     scene->integrator->get_max_glossy_bounce() < 1))
+  {
+    progress.set_error("Coherent Mirror interfaces require reflective caustics and at least one glossy bounce");
+    return false;
+  }
+  if (has_glass && (!scene->integrator->get_caustics_refractive() ||
+                    scene->integrator->get_max_transmission_bounce() < 1))
+  {
+    progress.set_error("Coherent Glass interfaces require refractive caustics and at least one transmission bounce");
+    return false;
+  }
+
+  constexpr size_t candidate_limit = 64;
+  constexpr size_t search_limit = 256;
+  std::vector<KernelCoherentCandidate> candidates;
+  size_t searched_states = 0;
+  const KernelLight *lights = dscene->lights.data();
+  for (int lamp = 0; lamp < ki.num_lights; ++lamp) {
+    if (progress.get_cancel()) return false;
+    const KernelLight &light = lights[lamp];
+    if (light.coherence_group <= 0 || light.coherence_length <= 0.0f) continue;
+    if (stream_facets && light.coherence_length < 32.0f*FLT_MIN) {
+      progress.set_error("Streamed Gaussian coherence length is below normal float arithmetic range");
+      return false;
+    }
+    for (const KernelCoherentPatch &patch : patches) {
+      if (patch.shape == 1 &&
+          !coherent_sphere_source_outside({light.co.x, light.co.y, light.co.z},
+                                          {patch.center.x, patch.center.y, patch.center.z},
+                                          patch.radius))
+      {
+        progress.set_error("Coherent native sphere sources must lie strictly outside every declared sphere");
+        return false;
+      }
+    }
+    if ((light.shader_id & (SHADER_EXCLUDE_DIFFUSE | SHADER_EXCLUDE_GLOSSY)) != 0 ||
+        light.max_bounces < float(max_events + 1))
+    {
+      progress.set_error("Coherent participating lights require unrestricted visibility and sufficient light bounce limits");
+      return false;
+    }
+    if (!stream_facets && candidates.size() >= candidate_limit) {
+      progress.set_error("Coherent specular connection candidate count exceeds 64");
+      return false;
+    }
+    KernelCoherentCandidate direct{};
+    direct.light = lamp;
+    candidates.push_back(direct);
+    if (stream_facets) continue;
+    std::function<bool(const KernelCoherentCandidate &, int, float, int, int)> enumerate =
+        [&](const KernelCoherentCandidate &candidate,
+            const int depth,
+            const float medium_ior,
+            const int reflections,
+            const int transmissions) {
+          if (depth == max_events) return true;
+          for (size_t patch = 0; patch < patches.size(); ++patch) {
+            if (progress.get_cancel()) return false;
+            const KernelCoherentPatch &interface = patches[patch];
+            if (depth > 0 && candidate.patch[depth - 1] == int(patch) &&
+                !(interface.shape == 1 && interface.mode == Object::COHERENT_INTERFACE_GLASS &&
+                  medium_ior == interface.inside_ior)) continue;
+            const bool is_glass = interface.mode == Object::COHERENT_INTERFACE_GLASS;
+            int incident_side = 0;
+            float opposite_ior = medium_ior;
+            if (is_glass) {
+              /* A matched analyzer has no medium boundary and is physically
+               * two-sided. Geometry still checks R/T side topology; history
+               * treats expected side zero as a wildcard. */
+              if (interface.inside_ior == interface.outside_ior &&
+                  medium_ior == interface.outside_ior) {
+                incident_side = 0;
+                opposite_ior = medium_ior;
+              }
+              else if (fabsf(medium_ior - interface.outside_ior) <= 1e-5f) {
+                incident_side = 1;
+                opposite_ior = interface.inside_ior;
+              }
+              else if (fabsf(medium_ior - interface.inside_ior) <= 1e-5f) {
+                incident_side = -1;
+                opposite_ior = interface.outside_ior;
+              }
+              else {
+                continue;
+              }
+            }
+            for (int event = COHERENT_GEOMETRY_REFLECT;
+                 event <= (is_glass ? COHERENT_GEOMETRY_TRANSMIT : COHERENT_GEOMETRY_REFLECT);
+                 ++event)
+            {
+              const bool transmit = event == COHERENT_GEOMETRY_TRANSMIT;
+              if (transmit) {
+                if (!scene->integrator->get_caustics_refractive() ||
+                    transmissions >= scene->integrator->get_max_transmission_bounce())
+                {
+                  continue;
+                }
+              }
+              else if (!scene->integrator->get_caustics_reflective() ||
+                       reflections >= scene->integrator->get_max_glossy_bounce())
+              {
+                continue;
+              }
+              /* Curved ownership is a finite declared model: exactly one exterior
+               * sphere reflection or one contiguous T-R^m-T block (m<=2),
+               * surrounded by planar reflections in air. Unsupported histories
+               * retain their native writer, never enter coherent ownership. */
+              int curved_first = -1, curved_count = 0;
+              for (int k = 0; k < depth; k++) {
+                if (patches[candidate.patch[k]].shape == 1) {
+                  if (curved_first < 0) curved_first = k;
+                  curved_count++;
+                }
+              }
+              if (interface.shape == 1) {
+                if (curved_count > 0 &&
+                    !(curved_first + curved_count == depth &&
+                      candidate.patch[depth - 1] == int(patch) &&
+                      interface.mode == Object::COHERENT_INTERFACE_GLASS &&
+                      medium_ior == interface.inside_ior &&
+                      candidate.event[curved_first] == COHERENT_GEOMETRY_TRANSMIT &&
+                      (transmit || curved_count < 3))) continue;
+                if (curved_count == 0) {
+                  bool prefix_mirrors_in_air = medium_ior == 1.0f;
+                  for (int k = 0; k < depth; k++)
+                    prefix_mirrors_in_air &= candidate.event[k] == COHERENT_GEOMETRY_REFLECT &&
+                                             candidate.ior_before[k] == 1.0f;
+                  if (!prefix_mirrors_in_air) continue;
+                }
+              }
+              else if (curved_count > 0 && (transmit || medium_ior != 1.0f)) continue;
+              if (++searched_states > search_limit) {
+                progress.set_error("Coherent specular connection search exceeds 256 states");
+                return false;
+              }
+              const float next_medium = transmit ? opposite_ior : medium_ior;
+              KernelCoherentCandidate next = candidate;
+              next.patch[depth] = int(patch);
+              next.event[depth] = event;
+              next.expected_incident_side[depth] = incident_side;
+              next.ior_before[depth] = medium_ior;
+              next.ior_after[depth] = next_medium;
+              next.ior_opposite[depth] = opposite_ior;
+              next.count = depth + 1;
+              /* The declared source and Lambertian detector are in exterior air. A prefix ending
+               * inside a glass medium cannot reach that detector without an exit interface. */
+              if (fabsf(next_medium - 1.0f) <= 1e-5f) {
+                bool sphere_transmission = false;
+                for (int k = 0; k <= depth; k++)
+                  sphere_transmission |= patches[next.patch[k]].shape == 1 &&
+                                         next.event[k] == COHERENT_GEOMETRY_TRANSMIT;
+                int sphere_events = 0;
+                for (int k=0;k<=depth;k++) sphere_events += patches[next.patch[k]].shape == 1;
+                /* Each of p interior chords has at most three isolated roots
+                 * over its winding; reserve the proved 3*p bound, not a seed. */
+                const int branches = sphere_transmission ? 3*(sphere_events-1) : 1;
+                if (candidates.size() + branches > candidate_limit) {
+                  progress.set_error("Coherent specular connection candidate count exceeds 64");
+                  return false;
+                }
+                for (int branch = 0; branch < branches; branch++) {
+                  next.sphere_branch = branch;
+                  candidates.push_back(next);
+                }
+              }
+              if (!enumerate(next,
+                             depth + 1,
+                             next_medium,
+                             reflections + !transmit,
+                             transmissions + transmit))
+              {
+                return false;
+              }
+            }
+          }
+          return true;
+        };
+    if (!enumerate(direct, 0, 1.0f, 0, 0)) {
+      if (!progress.get_cancel() && !progress.get_error()) {
+        progress.set_error("Coherent specular connection candidate count exceeds 64");
+      }
+      return false;
+    }
+  }
+  if (candidates.empty()) {
+    progress.set_error("Coherent specular connections require an active positive-length coherent point-light group");
+    return false;
+  }
+
+  KernelCoherentPatch *device_patches = dscene->coherent_patches.alloc(patches.size());
+  int *device_primitives = dscene->coherent_patch_primitives.alloc(patch_primitives.size());
+  KernelCoherentCandidate *device_candidates = dscene->coherent_candidates.alloc(candidates.size());
+  std::copy(patches.begin(), patches.end(), device_patches);
+  std::copy(candidates.begin(), candidates.end(), device_candidates);
+  std::copy(patch_primitives.begin(), patch_primitives.end(), device_primitives);
+  dscene->coherent_patches.copy_to_device();
+  dscene->coherent_patch_primitives.copy_to_device();
+  dscene->coherent_candidates.copy_to_device();
+  ki.coherent_patch_count = int(patches.size());
+  ki.coherent_candidate_count = int(candidates.size());
+  ki.coherent_max_interface_events = max_events;
+  ki.coherent_specular_enabled = 1;
+  return true;
+}
 
 static bool scene_has_true_displacement(const Scene *scene)
 {
@@ -83,6 +875,7 @@ Scene ::Scene(const SceneParams &params_, Device *device)
   camera = create_node<Camera>();
   dicing_camera = create_node<Camera>();
   lookup_tables = make_unique<LookupTables>();
+  diffraction_manager = make_unique<DiffractionManager>();
   film = create_node<Film>();
   background = create_node<Background>();
   integrator = create_node<Integrator>();
@@ -153,6 +946,12 @@ void Scene::free_memory(bool final)
     shader_manager->device_free(device, &dscene, this);
     osl_manager->device_free(device, &dscene, this);
     light_manager->device_free(device, &dscene);
+    dscene.coherent_patches.free();
+    dscene.coherent_patch_primitives.free();
+    dscene.coherent_candidates.free();
+    dscene.data.integrator.coherent_specular_enabled = 0;
+    dscene.data.integrator.coherent_patch_count = 0;
+    dscene.data.integrator.coherent_candidate_count = 0;
     particle_system_manager->device_free(device, &dscene);
     bake_manager->device_free(device, &dscene);
     volume_manager->device_free(&dscene);
@@ -164,10 +963,12 @@ void Scene::free_memory(bool final)
       image_manager->device_free_builtin(this);
     }
 
+    diffraction_manager->device_free(&dscene);
     lookup_tables->device_free(device, &dscene);
   }
 
   if (final) {
+    diffraction_manager.reset();
     lookup_tables.reset();
     object_manager.reset();
     geometry_manager.reset();
@@ -233,6 +1034,12 @@ void Scene::device_update(Device *device_, Progress &progress)
 
     /* Update kernel features. After shaders and passes since those affect features. */
     update_kernel_features();
+    if ((dscene.data.kernel_features & KERNEL_FEATURE_POLARIZATION) &&
+        integrator->get_use_photon_mapping())
+    {
+      progress.set_error("Glass Polarizer requires Path Tracing or BDPT; Photon Mapping does not transport polarization");
+      return;
+    }
 
     device->set_scene_pixel_displacement(integrator->get_use_pixel_displacement() &&
                                              scene_has_true_displacement(this),
@@ -374,6 +1181,7 @@ void Scene::device_update(Device *device_, Progress &progress)
   }
 
   progress.set_status("Updating Lookup Tables");
+  diffraction_manager->device_update(&dscene);
   lookup_tables->device_update(device, &dscene, this);
 
   if (progress.get_cancel() || device->have_error()) {
@@ -385,6 +1193,10 @@ void Scene::device_update(Device *device_, Progress &progress)
   light_manager->device_update(device, &dscene, this, progress);
 
   if (progress.get_cancel() || device->have_error()) {
+    return;
+  }
+
+  if (!scene_prepare_coherent_specular(this, &dscene, progress)) {
     return;
   }
 
@@ -404,6 +1216,7 @@ void Scene::device_update(Device *device_, Progress &progress)
 
   /* Update lookup tables a second time for film tables. */
   progress.set_status("Updating Lookup Tables");
+  diffraction_manager->device_update(&dscene);
   lookup_tables->device_update(device, &dscene, this);
 
   if (progress.get_cancel() || device->have_error()) {
@@ -506,12 +1319,13 @@ bool Scene::need_update()
 
 bool Scene::need_data_update()
 {
-  return (
-      background->is_modified() || image_manager->need_update() || object_manager->need_update() ||
-      geometry_manager->need_update() || light_manager->need_update() ||
-      lookup_tables->need_update() || integrator->is_modified() || shader_manager->need_update() ||
-      particle_system_manager->need_update() || bake_manager->need_update() ||
-      film->is_modified() || procedural_manager->need_update() || scene_attribute->is_modified());
+  return (background->is_modified() || image_manager->need_update() ||
+          object_manager->need_update() || geometry_manager->need_update() ||
+          light_manager->need_update() || lookup_tables->need_update() ||
+          diffraction_manager->need_update() || integrator->is_modified() ||
+          shader_manager->need_update() || particle_system_manager->need_update() ||
+          bake_manager->need_update() || film->is_modified() ||
+          procedural_manager->need_update() || scene_attribute->is_modified());
 }
 
 bool Scene::need_reset(const bool check_camera)
@@ -568,6 +1382,10 @@ void Scene::update_kernel_features()
    * so could be done selective magic for the viewport as well. */
   uint64_t kernel_features = shader_manager->get_kernel_features(this);
 
+  if (integrator->get_use_coherent_specular_connections()) {
+    kernel_features |= KERNEL_FEATURE_COHERENT_SPECULAR;
+  }
+
   const bool use_motion = need_motion() == Scene::MotionType::MOTION_BLUR;
   kernel_features |= KERNEL_FEATURE_PATH_TRACING;
 
@@ -615,6 +1433,11 @@ void Scene::update_kernel_features()
     }
     else if (geom->is_light()) {
       const Light *light = static_cast<const Light *>(object->get_geometry());
+      /* Conservatively include disabled lights too: enabled-light classification
+       * is updated later. Never specialize away an active source group. */
+      if (light->get_coherence_group() > 0 && light->get_coherence_length() > 0.0f) {
+        kernel_features |= KERNEL_FEATURE_COHERENT_DIRECT;
+      }
       if (light->get_use_caustics()) {
         has_caustics_light = true;
       }

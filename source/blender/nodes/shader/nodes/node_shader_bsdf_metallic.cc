@@ -80,6 +80,16 @@ static void node_declare(NodeDeclarationBuilder &b)
       .min(1.0f)
       .max(1000.0f)
       .description("Index of refraction (IOR) of the thin film");
+  PanelDeclarationBuilder &grating=b.add_panel("Diffraction"_ustr).default_closed(true);
+  grating.add_input<decl::Float>("Diffraction Weight"_ustr)
+      .default_value(0.0f).min(0.0f).max(1.0f).subtype(PROP_FACTOR)
+      .description("Cycles: Fast scalar grating coverage; requires GGX or Beckmann");
+  grating.add_input<decl::Float>("Diffraction Pitch"_ustr)
+      .default_value(1600.0f).min(1.0f).max(1000000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Depth"_ustr)
+      .default_value(150.0f).min(0.0f).max(100000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Duty Cycle"_ustr)
+      .default_value(0.5f).min(0.0f).max(1.0f).subtype(PROP_FACTOR);
 }
 
 static void node_shader_buts_metallic(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)

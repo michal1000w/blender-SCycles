@@ -12,6 +12,7 @@
 #include "kernel/constants.h"
 #include "kernel/sample/mapping.h"
 #include "kernel/util/lookup_table.h"
+#include "kernel/util/dielectric_dispersion.h"
 
 #include "util/math_fast.h"
 
@@ -29,6 +30,7 @@ enum MicrofacetFresnel {
   CONDUCTOR,
   GENERALIZED_SCHLICK,
   F82_TINT,
+  GENERALIZED_SCHLICK_POLARIZER,
 };
 
 struct FresnelCoeff {
@@ -94,6 +96,14 @@ struct FresnelGeneralizedSchlick {
   float exponent;
 };
 
+/* Optional suffix allocated only for an enabled Glass polarizer. */
+struct FresnelGeneralizedSchlickPolarizer {
+  FresnelGeneralizedSchlick base;
+  float3 axis;
+};
+static_assert(sizeof(FresnelGeneralizedSchlickPolarizer) <= 2*sizeof(ShaderClosure),
+              "Optional Glass polarizer uses at most two Fresnel extra slots");
+
 struct FresnelF82Tint {
   FresnelThinFilm thin_film;
 
@@ -117,10 +127,20 @@ struct MicrofacetBsdf {
   /* Fresnel model to apply, as well as the extra data for it.
    * For NONE and DIELECTRIC, no extra storage is needed, so the pointer is nullptr for them. */
   int fresnel_type;
+  /* Occupies existing pointer-alignment padding. Nonzero only for a
+   * wavelength-dependent diffraction reflector and its uncovered portion. */
+  float diffraction_wavelength_nm;
   ccl_private void *fresnel;
 
   float3 T;
 };
+
+ccl_device_inline void bsdf_microfacet_set_polarizer(ccl_private MicrofacetBsdf *bsdf,
+                                                      const float3 world_axis)
+{
+  ((ccl_private FresnelGeneralizedSchlickPolarizer *)bsdf->fresnel)->axis = world_axis;
+  bsdf->fresnel_type = MicrofacetFresnel::GENERALIZED_SCHLICK_POLARIZER;
+}
 
 static_assert(sizeof(ShaderClosure) >= sizeof(MicrofacetBsdf), "MicrofacetBsdf is too large!");
 
@@ -348,22 +368,7 @@ ccl_device_inline float bsdf_glass_ior(ccl_private ShaderData *sd, float ior, co
   sd->runtime_flag |= SR_BSDF_HAS_DISPERSION;
   ior = backfacing ? 1.0f / ior : ior;
 
-  /* Wavelengths of the Fraunhofer spectral lines in um. */
-  constexpr float lambda_d = 0.5876f;
-  constexpr float lambda_C = 0.6563f;
-  constexpr float lambda_F = 0.4861f;
-
-  constexpr float fac = 1.0f / (1.0f / (lambda_F * lambda_F) - 1.0f / (lambda_C * lambda_C));
-  constexpr float inv_lambda_d_sq = 1.0f / (lambda_d * lambda_d);
-
-  /* OpenPBR Surface specification v1.1.1, Eq. (56). */
-  const float B = (ior - 1.0f) * inv_abbe * fac;
-  const float A = ior - B * inv_lambda_d_sq;
-
-  const float wavelength = sample_wavelength(sd->rand_wavelength);
-
-  /* OpenPBR Surface specification v1.1.1, Eq. (55). */
-  ior = A + B / sqr(wavelength);
+  ior = dielectric_ior_at_wavelength(ior, inv_abbe, sample_wavelength(sd->rand_wavelength));
   return backfacing ? 1.0f / ior : ior;
 #else
   (void)sd;
@@ -439,6 +444,26 @@ generalized_schlick_fresnel(KernelGlobals kg,
  * the incoming angle `cos_theta_i`.
  * Also returns the cosine of the angle between the normal and the refracted ray as `r_cos_theta_t`
  * if provided. */
+/* Fast reflectance reconstruction must precede the signed wavelength RGB
+ * sensor basis. Multiplying that basis by chromatic RGB Fresnel can produce
+ * negative photometric energy. Native non-diffractive materials stay RGB. */
+ccl_device_inline Spectrum microfacet_diffraction_spectral_reflectance(
+    KernelGlobals kg, const Spectrum reflectance, const float wavelength_nm)
+{
+#ifdef __SPECTRAL__
+  if (wavelength_nm > 0.0f) {
+    const float3 bt709 = max(rgb_to_rec709(kg, spectrum_to_rgb(reflectance)), zero_float3());
+    const float low = reduce_min(bt709), high = reduce_max(bt709);
+    if (high - low > CLOSURE_WEIGHT_CUTOFF) {
+      const float scale = max(high, 1.0f);
+      return make_spectrum(bt709_to_spectral_transmission(
+          saturate(bt709 / scale), dielectric_wavelength_um(wavelength_nm)) * scale);
+    }
+  }
+#endif
+  return reflectance;
+}
+
 ccl_device_forceinline FresnelCoeff microfacet_fresnel(KernelGlobals kg,
                                                        const ccl_private MicrofacetBsdf *bsdf,
                                                        const float cos_theta_i,
@@ -504,7 +529,8 @@ ccl_device_forceinline FresnelCoeff microfacet_fresnel(KernelGlobals kg,
       coeff.reflectance = fresnel_f82(cos_theta_i, fresnel->f0, fresnel->b);
     }
   }
-  else if (bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK) {
+  else if ((bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK ||
+       bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK_POLARIZER)) {
     ccl_private FresnelGeneralizedSchlick *fresnel = (ccl_private FresnelGeneralizedSchlick *)
                                                          bsdf->fresnel;
     coeff *= generalized_schlick_fresnel(kg, fresnel, bsdf->ior, cos_theta_i, r_cos_theta_t);
@@ -528,6 +554,15 @@ ccl_device_forceinline FresnelCoeff microfacet_fresnel(KernelGlobals kg,
     }
   }
 
+  if (bsdf->diffraction_wavelength_nm > 0.0f &&
+      (bsdf->fresnel_type == MicrofacetFresnel::CONDUCTOR ||
+       bsdf->fresnel_type == MicrofacetFresnel::F82_TINT ||
+       ((bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK ||
+       bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK_POLARIZER) && !has_transmission)))
+  {
+    coeff.reflectance = microfacet_diffraction_spectral_reflectance(
+        kg, coeff.reflectance, bsdf->diffraction_wavelength_nm);
+  }
   return coeff;
 }
 
@@ -612,7 +647,8 @@ ccl_device Spectrum bsdf_microfacet_estimate_albedo(KernelGlobals kg,
   /* Use lookup tables for generalized Schlick reflection, otherwise assume smooth surface.
    * Note that even if the reflectance or tranmissitance would evaluate to zero for
    * #microfacet_fresnel, we still compute it because this contributes to albedo passes. */
-  if (bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK) {
+  if ((bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK ||
+       bsdf->fresnel_type == MicrofacetFresnel::GENERALIZED_SCHLICK_POLARIZER)) {
     ccl_private FresnelGeneralizedSchlick *fresnel = (ccl_private FresnelGeneralizedSchlick *)
                                                          bsdf->fresnel;
 
@@ -997,7 +1033,12 @@ ccl_device int bsdf_microfacet_sample(KernelGlobals kg,
     *eval = coeff.transmittance;
     *pdf = 1.0f - pdf_reflect;
     /* If the IOR is close enough to 1.0, just treat the interaction as specular. */
-    m_singular = m_singular || (fabsf(m_eta - 1.0f) < 1e-4f);
+    /* The native near-index window is an approximation: at eta!=1 the
+     * transmitted direction still varies with H. Polarized mixture transport
+     * therefore retains its continuous density; exact eta1 is a null atom. */
+    const bool matched_atom = (kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) ?
+                                  m_eta == 1.0f : fabsf(m_eta - 1.0f) < 1e-4f;
+    m_singular = m_singular || matched_atom;
   }
   else {
     *eval = coeff.reflectance;
@@ -1033,8 +1074,16 @@ ccl_device int bsdf_microfacet_sample(KernelGlobals kg,
       lambdaI = bsdf_aniso_lambda<m_type>(alpha_x, alpha_y, local_I);
     }
 
+    float transmission_denominator = cos_HO + cos_HI * m_inv_eta;
+    if ((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) && do_refract &&
+        fabsf(m_eta-1.0f)<1e-4f && m_eta!=1.0f)
+    {
+      /* Rationalize the difference of almost equal Snell cosines. */
+      transmission_denominator = (1.0f-m_eta)*(1.0f+m_eta) /
+          (sqr(m_eta)*(cos_HI*m_inv_eta-cos_HO));
+    }
     const float common = D / cos_NI *
-                         (do_refract ? fabsf(cos_HI * cos_HO) / sqr(cos_HO + cos_HI * m_inv_eta) :
+                         (do_refract ? fabsf(cos_HI * cos_HO) / sqr(transmission_denominator) :
                                        0.25f);
 
     *pdf *= common / (1.0f + lambdaI);
@@ -1167,6 +1216,7 @@ ccl_device void bsdf_microfacet_setup_fresnel_dielectric(KernelGlobals kg,
 
 ccl_device int bsdf_microfacet_ggx_setup(ccl_private MicrofacetBsdf *bsdf)
 {
+  bsdf->diffraction_wavelength_nm = 0.0f;
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
   bsdf->alpha_y = saturatef(bsdf->alpha_y);
 
@@ -1179,6 +1229,7 @@ ccl_device int bsdf_microfacet_ggx_setup(ccl_private MicrofacetBsdf *bsdf)
 
 ccl_device int bsdf_microfacet_ggx_refraction_setup(ccl_private MicrofacetBsdf *bsdf)
 {
+  bsdf->diffraction_wavelength_nm = 0.0f;
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
   bsdf->alpha_y = bsdf->alpha_x;
 
@@ -1191,6 +1242,7 @@ ccl_device int bsdf_microfacet_ggx_refraction_setup(ccl_private MicrofacetBsdf *
 
 ccl_device int bsdf_microfacet_ggx_glass_setup(ccl_private MicrofacetBsdf *bsdf)
 {
+  bsdf->diffraction_wavelength_nm = 0.0f;
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
   bsdf->alpha_y = bsdf->alpha_x;
 
@@ -1243,6 +1295,7 @@ ccl_device int bsdf_microfacet_ggx_sample(KernelGlobals kg,
 
 ccl_device int bsdf_microfacet_beckmann_setup(ccl_private MicrofacetBsdf *bsdf)
 {
+  bsdf->diffraction_wavelength_nm = 0.0f;
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
   bsdf->alpha_y = saturatef(bsdf->alpha_y);
 
@@ -1254,6 +1307,7 @@ ccl_device int bsdf_microfacet_beckmann_setup(ccl_private MicrofacetBsdf *bsdf)
 
 ccl_device int bsdf_microfacet_beckmann_refraction_setup(ccl_private MicrofacetBsdf *bsdf)
 {
+  bsdf->diffraction_wavelength_nm = 0.0f;
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
   bsdf->alpha_y = bsdf->alpha_x;
 
@@ -1265,6 +1319,7 @@ ccl_device int bsdf_microfacet_beckmann_refraction_setup(ccl_private MicrofacetB
 
 ccl_device int bsdf_microfacet_beckmann_glass_setup(ccl_private MicrofacetBsdf *bsdf)
 {
+  bsdf->diffraction_wavelength_nm = 0.0f;
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
   bsdf->alpha_y = bsdf->alpha_x;
 

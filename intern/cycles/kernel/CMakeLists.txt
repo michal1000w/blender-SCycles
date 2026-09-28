@@ -27,6 +27,16 @@ set(SRC_KERNEL_CLOSURE_HEADERS
   closure/bsdf_burley.h
   closure/bsdf_diffuse.h
   closure/bsdf_diffuse_ramp.h
+  closure/bsdf_diffraction_util.h
+  closure/bsdf_diffraction_interface.h
+  closure/bsdf_diffraction_smooth.h
+  closure/bsdf_diffraction.h
+  closure/bsdf_diffraction_ashikhmin.h
+  closure/bsdf_diffraction_conductor.h
+  closure/bsdf_diffraction_dielectric.h
+  closure/bsdf_diffraction_thin_sheet.h
+  closure/diffraction_thin_sheet_model.h
+  closure/diffraction_thin_film.h
   closure/bsdf_microfacet.h
   closure/bsdf_microfacet_manifold.h
   closure/bsdf_oren_nayar.h
@@ -141,6 +151,7 @@ set(SRC_KERNEL_GEOM_HEADERS
   geom/pixel_displacement_shader.h
   geom/point.h
   geom/point_intersect.h
+  geom/point_intersect_policy.h
   geom/primitive.h
   geom/shader_data.h
   geom/triangle.h
@@ -196,6 +207,8 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/guiding_gpu.h
   integrator/megakernel.h
   integrator/mnee.h
+  integrator/polarization_state.h
+  integrator/polarization_surface.h
   integrator/path_state.h
   integrator/photon_mapping.h
   integrator/bidirectional.h
@@ -226,6 +239,27 @@ set(SRC_KERNEL_LIGHT_HEADERS
   light/area.h
   light/background.h
   light/common.h
+  light/coherent.h
+  light/coherent_detector.h
+  light/coherent_polarizer.h
+  light/polarization_math.h
+  light/coherent_field.h
+  light/coherent_feasibility.h
+  light/coherent_curved_geometry.h
+  light/coherent_sphere_transmit_geometry.h
+  light/coherent_unfold_geometry.h
+  light/coherent_sphere_internal_geometry.h
+  light/coherent_unfold_internal_geometry.h
+  light/coherent_geometry.h
+  light/coherent_history.h
+  light/coherent_history_kernel.h
+  light/coherent_patch_membership.h
+  light/coherent_facet_stream.h
+  light/coherent_facet_integrator.h
+  light/coherent_path_field.h
+  light/coherent_passes.h
+  light/coherent_specular.h
+  light/coherent_util.h
   light/distribution.h
   light/light.h
   light/point.h
@@ -266,6 +300,27 @@ set(SRC_KERNEL_UTIL_HEADERS
   util/ies.h
   util/image_2d.h
   util/image_3d.h
+  util/diffraction_albedo.h
+  util/dielectric_dispersion.h
+  util/dielectric_f0_cache.h
+  util/diffraction_two_sided.h
+  util/diffraction_two_sided_lookup.h
+  util/diffraction_cache.h
+  util/diffraction_cache_view.h
+  util/diffraction_scene_data.h
+  util/diffraction_limits.h
+  util/diffraction_index.h
+  util/diffraction_scene.h
+  util/diffraction_coordinates.h
+  util/diffraction_evaluate.h
+  util/diffraction_direction.h
+  util/diffraction_sample.h
+  util/diffraction_boundary.h
+  util/diffraction_admittance.h
+  util/diffraction_tensor.h
+  util/diffraction_reference.h
+  util/diffraction_grid.h
+  util/diffraction_table.h
   util/lookup_table.h
   util/nanovdb.h
   util/profiler.h

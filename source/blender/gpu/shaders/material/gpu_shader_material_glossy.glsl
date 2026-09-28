@@ -13,6 +13,11 @@ void node_bsdf_glossy(float4 color,
                       float3 N,
                       float3 T,
                       float weight,
+                      float diffraction_weight,
+                      float diffraction_pitch,
+                      float diffraction_depth,
+                      float diffraction_duty,
+                      float diffraction_medium_ior,
                       const float do_multiscatter,
                       Closure &result)
 {

@@ -38,6 +38,15 @@ shader node_principled_bsdf(string distribution = "multi_ggx",
                             int ThinWall = 0,
                             float ThinFilmThickness = 0.0,
                             float ThinFilmIOR = 1.33,
+                            float DiffractionWeight = 0.0,
+                            float DiffractionPitch = 1600.0,
+                            float DiffractionDepth = 150.0,
+                            float DiffractionDutyCycle = 0.5,
+                            int diffraction_albedo_handle_plus_one = 0,
+                            int diffraction_two_sided_handle_plus_one = 0,
+                            int diffraction_thin_sheet_r_plus_one = 0,
+                            int diffraction_thin_sheet_g_plus_one = 0,
+                            int diffraction_thin_sheet_b_plus_one = 0,
                             normal Normal = N,
                             normal CoatNormal = N,
                             normal Tangent = normalize(dPdu),
@@ -66,7 +75,7 @@ shader node_principled_bsdf(string distribution = "multi_ggx",
 
   /* Handle anisotropy. */
   vector T = Tangent;
-  if (Anisotropic > 0.0) {
+  if (Anisotropic > 0.0 || DiffractionWeight > 0.0) {
     float aspect = sqrt(1.0 - clamp(Anisotropic, 0.0, 1.0) * 0.9);
     alpha_x /= aspect;
     alpha_y *= aspect;
@@ -133,7 +142,13 @@ shader node_principled_bsdf(string distribution = "multi_ggx",
                                             "thinfilm_thickness",
                                             ThinFilmThickness,
                                             "thinfilm_ior",
-                                            ThinFilmIOR),
+                                            ThinFilmIOR,
+                                            "diffraction_weight", DiffractionWeight,
+                                            "diffraction_pitch", DiffractionPitch,
+                                            "diffraction_depth", DiffractionDepth,
+                                            "diffraction_duty", DiffractionDutyCycle,
+                                            "diffraction_albedo_handle_plus_one",
+                                            diffraction_albedo_handle_plus_one),
                    BSDF);
     }
   }
@@ -143,14 +158,24 @@ shader node_principled_bsdf(string distribution = "multi_ggx",
     float thinfilm_ior = is_backfacing ? ThinFilmIOR / eta : ThinFilmIOR;
     eta = is_backfacing ? 1.0 / eta : eta;
     if (ThinWall) {
+      float dispersion_scale = clamp(TransmissionDispersionScale, 0.0, 1.0);
+      float abbe_number = max(TransmissionDispersionAbbeNumber, 0.0);
       closure color ThinGlassBSDF = thin_glass(Normal,
-                                               vector(0.0),
+                                               T,
                                                specular_tint,
                                                clamped_base_color,
                                                eta,
                                                r2,
                                                ThinFilmThickness,
-                                               thinfilm_ior);
+                                               thinfilm_ior,
+                                               "diffraction_weight", DiffractionWeight,
+                                               "diffraction_pitch", DiffractionPitch,
+                                               "diffraction_depth", DiffractionDepth,
+                                               "diffraction_duty", DiffractionDutyCycle,
+                                               "inv_abbe", safe_divide(dispersion_scale, abbe_number),
+                                               "diffraction_thin_sheet_r_plus_one", diffraction_thin_sheet_r_plus_one,
+                                               "diffraction_thin_sheet_g_plus_one", diffraction_thin_sheet_g_plus_one,
+                                               "diffraction_thin_sheet_b_plus_one", diffraction_thin_sheet_b_plus_one);
       BSDF = mix(ThinGlassBSDF, BSDF, 1.0 - transmission);
     }
     else {
@@ -175,6 +200,15 @@ shader node_principled_bsdf(string distribution = "multi_ggx",
                                                                 thinfilm_ior,
                                                                 "inv_abbe",
                                                                 inv_abbe);
+      float grating_weight = clamp(DiffractionWeight, 0.0, 1.0);
+      if (grating_weight > 0.0) {
+        closure color grating = diffraction_glass(Normal, T, sqrt(clamped_base_color),
+            Roughness, max(IOR, 1e-5), DiffractionPitch, DiffractionDepth,
+            DiffractionDutyCycle, ThinFilmIOR, ThinFilmThickness, 0, "principled_transmission", 1,
+            "specular_tint", specular_tint, "inv_abbe", inv_abbe,
+            "diffraction_two_sided_handle_plus_one", diffraction_two_sided_handle_plus_one);
+        TransmissionBSDF = (1.0 - grating_weight) * TransmissionBSDF + grating_weight * grating;
+      }
       BSDF = mix(TransmissionBSDF, BSDF, 1.0 - transmission);
     }
   }
@@ -193,7 +227,13 @@ shader node_principled_bsdf(string distribution = "multi_ggx",
                                        "thinfilm_thickness",
                                        ThinFilmThickness,
                                        "thinfilm_ior",
-                                       ThinFilmIOR);
+                                       ThinFilmIOR,
+                                       "diffraction_weight", DiffractionWeight,
+                                       "diffraction_pitch", DiffractionPitch,
+                                       "diffraction_depth", DiffractionDepth,
+                                       "diffraction_duty", DiffractionDutyCycle,
+                                       "diffraction_albedo_handle_plus_one",
+                                       diffraction_albedo_handle_plus_one);
     BSDF = mix(MetallicBSDF, BSDF, 1.0 - metallic);
   }
 

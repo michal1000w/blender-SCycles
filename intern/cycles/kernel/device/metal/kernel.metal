@@ -362,7 +362,17 @@ inline TReturnType metalrt_visibility_test(
   }
 #  endif
 
-  if (payload.self_object == object && payload.self_prim == prim) {
+  bool two_sided_point = false;
+#  ifdef __POINTCLOUD__
+  if constexpr (intersection_type == METALRT_HIT_BOUNDING_BOX) {
+    MetalKernelContext context(launch_params_metal);
+    two_sided_point = kernel_data.integrator.coherent_specular_enabled &&
+                      context.point_coherent_glass_two_sided(
+                          true, kernel_data_fetch(object_flag, object),
+                          kernel_data_fetch(objects, object).primitive_type);
+  }
+#  endif
+  if (payload.self_object == object && payload.self_prim == prim && !two_sided_point) {
     result.accept = false;
     result.continue_search = true;
     return result;
@@ -424,7 +434,10 @@ inline TReturnType metalrt_visibility_test_shadow(
   }
 #  endif
 
-  if (context.intersection_skip_self_shadow(payload.self, object, prim)) {
+  const int type = (intersection_type == METALRT_HIT_BOUNDING_BOX) ?
+                       kernel_data_fetch(objects, object).primitive_type : 0;
+  if (context.intersection_skip_self_shadow_coherent_point(
+          nullptr, payload.self, object, prim, type)) {
     result.accept = false;
     result.continue_search = true;
     return result;

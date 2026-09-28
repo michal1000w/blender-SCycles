@@ -8,6 +8,7 @@
 #include "kernel/svm/node_types.h"
 #include "kernel/svm/types.h"
 #include "scene/image.h"
+#include "scene/diffraction.h"
 #include "scene/shader_graph.h"
 
 #include "util/array.h"
@@ -17,6 +18,7 @@
 
 CCL_NAMESPACE_BEGIN
 
+class Progress;
 class ImageManager;
 class LightManager;
 class Scene;
@@ -528,6 +530,51 @@ class BsdfNode : public BsdfBaseNode {
   NODE_SOCKET_API(float, surface_mix_weight)
 };
 
+/* Internal physical material node. Host graph construction supplies the
+ * profile and numerical request; Blender socket/UI mapping is separate. */
+class DiffractionSmoothBsdfNode : public BsdfNode {
+ public:
+  SHADER_NODE_CLASS(DiffractionSmoothBsdfNode)
+  NODE_SOCKET_API(float3, tangent)
+  DiffractionGratingProfile profile{200, 0, 0.5, 1, 1.5, 1, 1.5};
+  DiffractionGratingCacheOptions cache_options;
+  bool use_automatic_reference_orders = false;
+  bool use_fast_model = false;
+  std::string optical_constants_error;
+  bool prepare(Scene *scene, Progress &progress);
+  bool has_dispersion() override { return true; }
+  int get_extra_closure_count() override
+  {
+    /* FastDiffractionInterface is allocated separately from the BSDF closure. */
+    return use_fast_model ? 1 : 0;
+  }
+
+ private:
+  float fast_reflection_budget() const
+  {
+    return float(std::norm(profile.substrate_ior - profile.incident_ior) /
+                 std::norm(profile.substrate_ior + profile.incident_ior));
+  }
+  float fast_transmission_budget() const
+  {
+    return profile.substrate_ior.imag() > 0 ? 0 : 1-fast_reflection_budget();
+  }
+  float kernel_lower_index() const
+  {
+    /* Absorbing substrates have no far-field ports. The evaluator requires a
+     * positive value for that unused boundary, not the real part of a
+     * complex index interpreted as a lossless transmission medium. */
+    return float(profile.substrate_ior.imag() == 0 ? profile.substrate_ior.real() :
+                                                    profile.incident_ior);
+  }
+  int cache_handle_ = -1;
+  int ridge_table_ = -1;
+  int groove_table_ = -1;
+  int substrate_table_ = -1;
+  vector<float> index_tables_[3];
+  bool register_index_tables(Scene *scene, Progress &progress);
+};
+
 class DiffuseBsdfNode : public BsdfNode {
  public:
   SHADER_NODE_CLASS(DiffuseBsdfNode)
@@ -544,7 +591,9 @@ class PrincipledBsdfNode : public BsdfBaseNode {
  public:
   SHADER_NODE_CLASS(PrincipledBsdfNode)
 
+  bool prepare_diffraction_albedo(Scene *scene, Progress &progress);
   bool is_thin_wall();
+  bool prepare_diffraction_thin_sheet_albedo(Scene *scene, Progress &progress);
   bool subsurface_has_positive_weight();
   bool has_surface_bssrdf() override;
   bool has_bssrdf_bump() override;
@@ -586,6 +635,20 @@ class PrincipledBsdfNode : public BsdfBaseNode {
   NODE_SOCKET_API(float, surface_mix_weight)
   NODE_SOCKET_API(float, thin_film_thickness)
   NODE_SOCKET_API(float, thin_film_ior)
+  NODE_SOCKET_API(float, diffraction_weight)
+  NODE_SOCKET_API(float, diffraction_pitch)
+  NODE_SOCKET_API(float, diffraction_depth)
+  NODE_SOCKET_API(float, diffraction_duty)
+  bool has_diffraction()
+  {
+    return input("Diffraction Weight")->link != nullptr || diffraction_weight > 0.0f;
+  }
+  bool supports_diffraction_transmission();
+  int get_extra_closure_count() override { return has_diffraction() ? (is_thin_wall() ? 12 : 10) : 0; }
+
+  int diffraction_albedo_handle_ = -1;
+  int diffraction_two_sided_handle_ = -1;
+  int3 diffraction_thin_sheet_handles_ = make_int3(-1, -1, -1);
 
  public:
   void attributes(Shader *shader, AttributeRequestSet *attributes) override;
@@ -654,6 +717,7 @@ class MetallicBsdfNode : public BsdfNode {
   SHADER_NODE_CLASS(MetallicBsdfNode)
 
   void simplify_settings(Scene *scene) override;
+  bool prepare_diffraction_albedo(Scene *scene, Progress &progress);
   ClosureType get_closure_type() override
   {
     return closure;
@@ -677,6 +741,13 @@ class MetallicBsdfNode : public BsdfNode {
     return true;
   }
 
+  NODE_SOCKET_API(float, diffraction_weight)
+  NODE_SOCKET_API(float, diffraction_pitch)
+  NODE_SOCKET_API(float, diffraction_depth)
+  NODE_SOCKET_API(float, diffraction_duty)
+  int diffraction_albedo_handle_ = -1;
+  bool has_dispersion() override;
+  int get_extra_closure_count() override { return has_dispersion() ? 4 : 0; }
   bool is_isotropic();
 };
 
@@ -685,6 +756,7 @@ class GlossyBsdfNode : public BsdfNode {
   SHADER_NODE_CLASS(GlossyBsdfNode)
 
   void simplify_settings(Scene *scene) override;
+  bool prepare_diffraction_albedo(Scene *scene, Progress &progress);
   ClosureType get_closure_type() override
   {
     return distribution;
@@ -694,6 +766,11 @@ class GlossyBsdfNode : public BsdfNode {
   NODE_SOCKET_API(float, roughness)
   NODE_SOCKET_API(float, anisotropy)
   NODE_SOCKET_API(float, rotation)
+  NODE_SOCKET_API(float, diffraction_weight)
+  NODE_SOCKET_API(float, diffraction_pitch)
+  NODE_SOCKET_API(float, diffraction_depth)
+  NODE_SOCKET_API(float, diffraction_duty)
+  NODE_SOCKET_API(float, diffraction_medium_ior)
   NODE_SOCKET_API(ClosureType, distribution)
 
   void attributes(Shader *shader, AttributeRequestSet *attributes) override;
@@ -702,18 +779,49 @@ class GlossyBsdfNode : public BsdfNode {
     return true;
   }
 
+  int diffraction_albedo_handle_ = -1;
   bool is_isotropic();
+  bool has_dispersion() override;
+  int get_extra_closure_count() override
+  {
+    return has_dispersion() ? 3 : 0;
+  }
 };
 
 class GlassBsdfNode : public BsdfNode {
  public:
   SHADER_NODE_CLASS(GlassBsdfNode)
+  void simplify_settings(Scene *scene) override;
+  bool prepare_diffraction_two_sided_albedo(Scene *scene, Progress &progress);
 
   ClosureType get_closure_type() override
   {
     return distribution;
   }
 
+  NODE_SOCKET_API(float3, tangent)
+  NODE_SOCKET_API(float, diffraction_weight)
+  NODE_SOCKET_API(float, diffraction_pitch)
+  NODE_SOCKET_API(float, diffraction_depth)
+  NODE_SOCKET_API(float, diffraction_duty)
+  uint64_t get_feature() override
+  {
+    return BsdfNode::get_feature() |
+           ((polarizer || input("Polarizer")->link) ? KERNEL_FEATURE_POLARIZATION : 0);
+  }
+  bool has_dispersion() override;
+  void attributes(Shader *shader, AttributeRequestSet *attributes) override;
+  bool has_attribute_dependency() override { return true; }
+  /* A coated diffraction pair needs five slots, including the two-slot
+   * return extra. Partial coverage also retains the native two-slot Glass. */
+  int get_extra_closure_count() override
+  {
+    /* Polarizer suffix needs a second Fresnel slot only when enabled. */
+    return (has_dispersion() ? 5 : 0) + ((polarizer || input("Polarizer")->link) ? 1 : 0);
+  }
+
+  NODE_SOCKET_API(int, polarizer)
+  NODE_SOCKET_API(float, polarizer_angle)
   NODE_SOCKET_API(float, roughness)
   NODE_SOCKET_API(float, IOR)
   NODE_SOCKET_API(float, thin_film_thickness)
@@ -725,16 +833,30 @@ class GlassBsdfNode : public BsdfNode {
     return input("Color")->link != nullptr ||
            reduce_max(color) - reduce_min(color) > CLOSURE_WEIGHT_CUTOFF;
   }
+
+ private:
+  int diffraction_two_sided_handle_ = -1;
 };
 
 class RefractionBsdfNode : public BsdfNode {
  public:
   SHADER_NODE_CLASS(RefractionBsdfNode)
+  void simplify_settings(Scene *scene) override;
 
   ClosureType get_closure_type() override
   {
     return distribution;
   }
+
+  NODE_SOCKET_API(float3, tangent)
+  NODE_SOCKET_API(float, diffraction_weight)
+  NODE_SOCKET_API(float, diffraction_pitch)
+  NODE_SOCKET_API(float, diffraction_depth)
+  NODE_SOCKET_API(float, diffraction_duty)
+  bool has_dispersion() override;
+  void attributes(Shader *shader, AttributeRequestSet *attributes) override;
+  bool has_attribute_dependency() override { return true; }
+  int get_extra_closure_count() override { return has_dispersion() ? 2 : 0; }
 
   NODE_SOCKET_API(float, roughness)
   NODE_SOCKET_API(float, IOR)

@@ -13,6 +13,9 @@ static void node_declare(NodeDeclarationBuilder &b)
   const bNodeTree *ntree = b.tree_or_null();
   const bool is_gpu_internal = ntree && (ntree->flag & NTREE_IS_GPU_SHADER_INTERNAL);
 
+  b.use_custom_socket_order();
+  b.add_output<decl::Shader>("BSDF"_ustr);
+  b.add_default_layout();
   b.add_input<decl::Color>("Color"_ustr).default_value({1.0f, 1.0f, 1.0f, 1.0f});
   b.add_input<decl::Float>("Roughness"_ustr)
       .default_value(0.0f)
@@ -22,7 +25,18 @@ static void node_declare(NodeDeclarationBuilder &b)
   b.add_input<decl::Float>("IOR"_ustr).default_value(1.45f).min(0.0f).max(1000.0f);
   b.add_input<decl::Vector>("Normal"_ustr).hide_value();
   b.add_input<decl::Float>("Weight"_ustr).available(is_gpu_internal);
-  b.add_output<decl::Shader>("BSDF"_ustr);
+  PanelDeclarationBuilder &grating=b.add_panel("Diffraction"_ustr).default_closed(true);
+  grating.add_input<decl::Float>("Diffraction Weight"_ustr)
+      .default_value(0.0f).min(0.0f).max(1.0f).subtype(PROP_FACTOR)
+      .description("Cycles: coverage of a Fast transmission grating without Fresnel weighting");
+  grating.add_input<decl::Float>("Diffraction Pitch"_ustr)
+      .default_value(1600.0f).min(1.0f).max(1000000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Depth"_ustr)
+      .default_value(150.0f).min(0.0f).max(100000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Duty Cycle"_ustr)
+      .default_value(0.5f).min(0.0f).max(1.0f).subtype(PROP_FACTOR);
+  grating.add_input<decl::Vector>("Tangent"_ustr).hide_value()
+      .description("Direction across the grating grooves");
 }
 
 static void node_shader_init_refraction(bNodeTree * /*ntree*/, bNode *node)

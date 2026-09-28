@@ -28,6 +28,7 @@
 
 #include "kernel/types.h"
 #include "kernel/types_guiding.h"
+#include "kernel/light/coherent_history.h"
 
 #include "util/types.h"
 
@@ -102,6 +103,7 @@ struct IntegratorQueueCounter {
   int num_queued[DEVICE_GPU_KERNEL_INTEGRATOR_NUM];
   int cache_miss;
   uint bdpt_error;
+  uint coherent_error;
 };
 
 #if defined(__INTEGRATOR_GPU_PACKED_STATE__) && defined(__KERNEL_GPU__)
@@ -217,6 +219,8 @@ struct IntegratorStateGPU {
 
   /* Metal bidirectional light-vertex cache. */
   ccl_global KernelBDPTVertex *bdpt_vertices;
+  ccl_global CoherentPathHistory *bdpt_coherent_history;
+  ccl_global KernelPolarizationState *bdpt_polarization;
   ccl_global uint *bdpt_vertex_indices;
   ccl_global uint *bdpt_vertex_count;
 

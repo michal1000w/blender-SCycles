@@ -238,6 +238,10 @@ NODE_DEFINE(Integrator)
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
 
   SOCKET_BOOLEAN(use_bidirectional_path_tracing, "Bidirectional Path Tracing", false);
+  SOCKET_BOOLEAN(use_coherent_specular_connections, "Coherent Specular Connections", false);
+  SOCKET_INT(coherent_transport_mode, "Coherent Transport Mode", 0);
+  SOCKET_INT(coherent_polarization_mode, "Coherent Polarization Mode", 0);
+  SOCKET_INT(coherent_max_interface_events, "Coherent Max Interface Events", 1);
   SOCKET_INT(bdpt_light_paths, "BDPT Light Paths", 65536);
   SOCKET_INT(bdpt_reference_pixels, "BDPT Reference Pixels", 1);
   SOCKET_INT(bdpt_max_bounces, "BDPT Max Bounces", 8);
@@ -408,6 +412,10 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   kintegrator->caustics_reflective = caustics_reflective;
   kintegrator->caustics_refractive = caustics_refractive;
+  kintegrator->coherent_specular_enabled = use_coherent_specular_connections;
+  kintegrator->coherent_transport_mode = clamp(coherent_transport_mode, 0, 1);
+  kintegrator->coherent_polarization_mode = clamp(coherent_polarization_mode, 0, 1);
+  kintegrator->coherent_max_interface_events = clamp(coherent_max_interface_events, 1, 4);
   kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX : 1.0f / filter_glossy;
   kintegrator->differential_widen_scale = min(1.0f, filter_glossy);
 

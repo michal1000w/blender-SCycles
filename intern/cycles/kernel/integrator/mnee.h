@@ -735,7 +735,8 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
                                                           ccl_private float3 *r_light_wo,
                                                           ccl_private float *r_light_distance,
                                                           const bool volume_endpoint,
-                                                          ccl_private float3 *r_vertices)
+                                                          ccl_private float3 *r_vertices,
+                                                          ccl_private PolarizationMueller *r_polarization)
 {
   float wo_len;
   float3 wo = normalize_len(vertices[0].p - sd->P, &wo_len);
@@ -743,6 +744,10 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
   /* Initialize throughput. */
   *r_receiver_wo = wo;
   *throughput = one_spectrum();
+  if (r_polarization) {
+    *r_polarization = {};
+    for (int i=0;i<4;i++) r_polarization->value[i][i]=1;
+  }
 
   /* Update light sample with new position / direction and keep pdf in vertex area measure. */
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
@@ -792,8 +797,10 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
   /* Receiver bsdf eval in shade_surface already contains |n.wo|. */
   const float dw0_dx1 = fabsf(dot(wo, vertices[0].n)) / sqr(wo_len);
 
-  /* Clamp since it has a tendency to be unstable. */
-  const float G = volume_endpoint ? dw0_dx1 * dx1_dxlight : fminf(dw0_dx1 * dx1_dxlight, 2.f);
+  /* This term has inverse-area units. An absolute cap changes radiance when
+   * otherwise identical scenes are scaled (notably thin protective covers).
+   * Singular systems are rejected by the transfer solve above. */
+  const float G = dw0_dx1 * dx1_dxlight;
   *throughput *= G;
 
   /* Specular reflectance. */
@@ -886,6 +893,18 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
       return SHADER_EVAL_CACHE_MISS;
     }
 
+    /* The seed stores a closure slot, not a retained Fresnel pointer. Its
+     * reevaluated payload must still be a matching refractive closure. */
+    const int closure_index = int(v.bsdf - sd_mnee->closure);
+    if (polarization_enabled(kg) && (closure_index < 0 || closure_index >= sd_mnee->num_closure ||
+        !(CLOSURE_IS_REFRACTION(v.bsdf->type) || CLOSURE_IS_GLASS(v.bsdf->type))))
+    {
+      INTEGRATOR_STATE_WRITE(state, path, transmission_bounce) = transmission_bounce;
+      INTEGRATOR_STATE_WRITE(state, path, diffuse_bounce) = diffuse_bounce;
+      INTEGRATOR_STATE_WRITE(state, path, bounce) = bounce;
+      return SHADER_EVAL_EMPTY;
+    }
+
     /* Set light looking direction. */
     wo = (vi == vertex_count - 1) ? (light_fixed_direction ? ls->D : ls->P - v.p) :
                                     vertices[vi + 1].p - v.p;
@@ -896,6 +915,10 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
      * fr(vi)_do / pdf_dh(vi) x |do/dh| x |n.wo / n.h| */
     const Spectrum bsdf_contribution = mnee_eval_bsdf_contribution(kg, v.bsdf, wi, wo);
     *throughput *= bsdf_contribution;
+    if (r_polarization) {
+      *r_polarization = polarization_mueller_product(*r_polarization,
+          polarization_closure_mueller(sd_mnee, v.bsdf, wo, true));
+    }
   }
   if (r_light_wo != nullptr) {
     /* Direction from the finite endpoint back toward the last manifold vertex. */
@@ -928,7 +951,8 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                            ccl_private float *r_light_distance = nullptr,
                         const float wavelength_rand_override = -1.0f,
                         const bool volume_endpoint = false,
-                        ccl_private float3 *r_vertices = nullptr)
+                        ccl_private float3 *r_vertices = nullptr,
+                        ccl_private PolarizationMueller *r_polarization = nullptr)
 {
   /*
    * 1. send seed ray from shading point to light sample position (or along sampled light
@@ -1137,7 +1161,10 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                          vertex_count,
                          vertices,
                          volume_endpoint ? 1.0e-5f : MNEE_SOLVER_THRESHOLD,
-                         volume_endpoint ? 0.0f : MNEE_MIN_PROGRESS_DISTANCE))
+                         /* Millimeter-scale covers need sub-0.1 mm Newton steps too.
+                          * An absolute progress cutoff rejects valid surface paths;
+                          * the iteration and line-search limits bound stalled solves. */
+                         0.0f))
   {
     /* 3. If a solution exists, calculate contribution of the corresponding path */
     ShaderEvalResult result = mnee_path_contribution(kg,
@@ -1153,7 +1180,8 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
                                                      r_light_wo,
                                                      r_light_distance,
                                                      volume_endpoint,
-                                                     r_vertices);
+                                                     r_vertices,
+                                                     r_polarization);
 
     /* TODO: Cache misses are not handled correctly.
      * - PATH_MNEE_VALID flag is not handled properly

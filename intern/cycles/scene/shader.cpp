@@ -525,7 +525,7 @@ int ShaderManager::get_shader_id(const Shader *shader, bool smooth)
 void ShaderManager::device_update_pre(Device * /*device*/,
                                       DeviceScene *dscene,
                                       Scene *scene,
-                                      Progress & /*progress*/)
+                                      Progress &progress)
 {
   /* This optimizes the shader graphs, but does not update anything on the device yet.
    * After this we'll know the kernel features actually used, to load the kernels. */
@@ -578,6 +578,22 @@ void ShaderManager::device_update_pre(Device * /*device*/,
       shader->has_aov_output_node = false;
       shader->has_time_dependency = false;
       for (ShaderNode *node : shader->graph->nodes) {
+        if (node->type == DiffractionSmoothBsdfNode::get_node_type() &&
+            !static_cast<DiffractionSmoothBsdfNode *>(node)->prepare(scene, progress))
+          return;
+        if (node->type == GlossyBsdfNode::get_node_type() &&
+            !static_cast<GlossyBsdfNode *>(node)->prepare_diffraction_albedo(scene, progress))
+          return;
+        if (node->type == MetallicBsdfNode::get_node_type() &&
+            !static_cast<MetallicBsdfNode *>(node)->prepare_diffraction_albedo(scene, progress))
+          return;
+        if (node->type == PrincipledBsdfNode::get_node_type() &&
+            !static_cast<PrincipledBsdfNode *>(node)->prepare_diffraction_albedo(scene, progress))
+          return;
+        if (node->type == GlassBsdfNode::get_node_type() &&
+            !static_cast<GlassBsdfNode *>(node)->prepare_diffraction_two_sided_albedo(
+                scene, progress))
+          return;
         if (node->special_type == SHADER_SPECIAL_TYPE_LIGHT_PATH) {
           /* TODO: check if the light path node is linked to the volume output. */
           shader->has_light_path_node = true;
@@ -660,6 +676,14 @@ void ShaderManager::device_update_common(Device * /*device*/,
 
   for (Shader *shader : scene->shaders) {
     uint flag = 0;
+
+    /* Conservatively recognize a direct smooth diffraction closure. Textured
+     * parameters and normals do not give its discrete orders continuous support.
+     * Leave mixed and arbitrary OSL graphs unclassified. */
+    const ShaderOutput *surface = shader->graph->output()->input("Surface")->link;
+    if (surface && surface->parent->type == DiffractionSmoothBsdfNode::get_node_type()) {
+      flag |= SD_HAS_ONLY_DELTA_SURFACE;
+    }
 
     if (shader->emission_sampling == EMISSION_SAMPLING_FRONT) {
       flag |= SD_MIS_FRONT;
@@ -816,6 +840,10 @@ void ShaderManager::device_free_common(Device * /*device*/, DeviceScene *dscene,
     scene->lookup_tables->remove_table(&entry.second);
   }
   bsdf_tables.clear();
+  for (auto &table : dynamic_bsdf_tables) {
+    scene->lookup_tables->remove_table(&table.offset);
+  }
+  dynamic_bsdf_tables.clear();
   scene->lookup_tables->remove_table(&thin_film_table_offset_);
   thin_film_table_offset_ = TABLE_OFFSET_INVALID;
 
@@ -964,6 +992,11 @@ float3 ShaderManager::rec709_to_scene_linear(const float3 c)
   return to_local(c, rec709_to_r, rec709_to_g, rec709_to_b);
 }
 
+float3 ShaderManager::scene_linear_to_rec709(const float3 c)
+{
+  return to_local(c, rgb_to_rec709_r, rgb_to_rec709_g, rgb_to_rec709_b);
+}
+
 string ShaderManager::get_cryptomatte_materials(Scene *scene)
 {
   string manifest = "{";
@@ -1091,6 +1124,24 @@ void ShaderManager::init_xyz_transforms()
   white_xyz = transform_direction(&rgb_to_xyz, one_float3());
 
   compute_thin_film_table(xyz_to_rgb);
+}
+
+size_t ShaderManager::ensure_dynamic_bsdf_table(DeviceScene *dscene,
+                                               Scene *scene,
+                                               const vector<float> &data)
+{
+  const thread_scoped_lock lock(lookup_table_mutex);
+  assert(!data.empty());
+  for (const DynamicBsdfTable &table : dynamic_bsdf_tables) {
+    if (table.data == data) {
+      return table.offset;
+    }
+  }
+  DynamicBsdfTable table{data, 0};
+  table.offset = scene->lookup_tables->add_table(dscene, table.data);
+  const size_t offset = table.offset;
+  dynamic_bsdf_tables.push_back(std::move(table));
+  return offset;
 }
 
 size_t ShaderManager::ensure_bsdf_table_impl(DeviceScene *dscene,

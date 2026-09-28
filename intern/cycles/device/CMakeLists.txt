@@ -95,6 +95,13 @@ set(SRC_MULTI
 )
 
 set(SRC_METAL
+  metal/diffraction/albedo.mm
+  metal/diffraction/backend.mm
+  metal/diffraction/matrix.h
+  metal/diffraction/propagation.h
+  metal/diffraction/reference_backend.h
+  metal/diffraction/reference_pool.h
+  metal/diffraction/response.h
   metal/bvh.mm
   metal/bvh.h
   metal/device.mm
@@ -172,6 +179,21 @@ if(WITH_CYCLES_DEVICE_HIPRT)
 endif()
 
 if(WITH_CYCLES_DEVICE_METAL)
+  set(diffraction_shader_dir "${CMAKE_CURRENT_SOURCE_DIR}/metal/diffraction")
+  file(READ "${diffraction_shader_dir}/matrix_ops.metal" DIFFRACTION_MATRIX_OPS)
+  file(READ "${diffraction_shader_dir}/matrix_material.metal" DIFFRACTION_MATRIX_MATERIAL)
+  file(READ "${diffraction_shader_dir}/mps_conversion.metal" DIFFRACTION_MPS_CONVERSION)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${diffraction_shader_dir}/matrix_ops.metal"
+    "${diffraction_shader_dir}/matrix_material.metal"
+    "${diffraction_shader_dir}/mps_conversion.metal"
+  )
+  configure_file("${diffraction_shader_dir}/shader_source.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/diffraction_shader_source.h" @ONLY)
+  list(APPEND INC ${CMAKE_CURRENT_BINARY_DIR})
+  set_source_files_properties(metal/diffraction/backend.mm metal/diffraction/albedo.mm PROPERTIES
+    COMPILE_OPTIONS "-fobjc-arc")
+  list(APPEND LIB PRIVATE "-framework MetalPerformanceShaders")
   list(APPEND LIB
     PRIVATE ${METAL_LIBRARY}
   )

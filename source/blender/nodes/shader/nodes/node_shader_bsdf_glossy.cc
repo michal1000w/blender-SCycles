@@ -31,6 +31,21 @@ static void node_declare(NodeDeclarationBuilder &b)
   b.add_input<decl::Vector>("Normal"_ustr).hide_value();
   b.add_input<decl::Vector>("Tangent"_ustr).hide_value();
   b.add_input<decl::Float>("Weight"_ustr).available(is_gpu_internal);
+  b.add_input<decl::Float>("Diffraction Weight"_ustr)
+      .default_value(0.0f).min(0.0f).max(1.0f).subtype(PROP_FACTOR)
+      .description("Cycles: fraction covered by a spectral binary diffraction grating");
+  b.add_input<decl::Float>("Diffraction Pitch"_ustr)
+      .default_value(1600.0f).min(1.0f).max(1000000.0f).subtype(PROP_WAVELENGTH)
+      .description("Cycles: distance between grooves in nanometers; the tangent points across grooves");
+  b.add_input<decl::Float>("Diffraction Depth"_ustr)
+      .default_value(150.0f).min(0.0f).max(100000.0f).subtype(PROP_WAVELENGTH)
+      .description("Cycles: height difference between the two grating levels in nanometers");
+  b.add_input<decl::Float>("Diffraction Duty Cycle"_ustr)
+      .default_value(0.5f).min(0.0f).max(1.0f).subtype(PROP_FACTOR)
+      .description("Cycles: fraction of each period occupied by the raised level");
+  b.add_input<decl::Float>("Diffraction Medium IOR"_ustr)
+      .default_value(1.0f).min(0.01f).max(10.0f)
+      .description("Cycles: refractive index above the grating; use the cover index for a buried grating");
   b.add_output<decl::Shader>("BSDF"_ustr);
 }
 

@@ -169,6 +169,8 @@ class PathTraceWorkGPU : public PathTraceWork {
 
   /* Optional Metal bidirectional light-vertex cache. */
   device_only_memory<KernelBDPTVertex> bdpt_vertices_;
+  device_only_memory<CoherentPathHistory> bdpt_coherent_history_;
+  device_only_memory<KernelPolarizationState> bdpt_polarization_;
   device_only_memory<uint> bdpt_vertex_indices_;
   device_vector<uint> bdpt_vertex_count_;
 

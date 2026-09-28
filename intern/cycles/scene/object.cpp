@@ -100,6 +100,16 @@ NODE_DEFINE(Object)
   SOCKET_BOOLEAN(is_caustics_caster, "Cast Shadow Caustics", false);
   SOCKET_BOOLEAN(is_caustics_receiver, "Receive Shadow Caustics", false);
 
+  static NodeEnum coherent_interface_enum;
+  coherent_interface_enum.insert("off", COHERENT_INTERFACE_OFF);
+  coherent_interface_enum.insert("mirror", COHERENT_INTERFACE_MIRROR);
+  coherent_interface_enum.insert("glass", COHERENT_INTERFACE_GLASS);
+  coherent_interface_enum.insert("detector", COHERENT_INTERFACE_DETECTOR);
+  SOCKET_ENUM(coherent_interface,
+              "Coherent Interface",
+              coherent_interface_enum,
+              COHERENT_INTERFACE_OFF);
+
   SOCKET_BOOLEAN(is_bake_target, "Bake Target", false);
 
   SOCKET_NODE(particle_system, "Particle System", ParticleSystem::get_node_type());
@@ -764,6 +774,14 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   }
   if (ob->is_caustics_receiver) {
     flag |= SD_OBJECT_CAUSTICS_RECEIVER;
+  }
+  if (ob->coherent_interface == Object::COHERENT_INTERFACE_DETECTOR) {
+    flag |= SD_OBJECT_COHERENT_DETECTOR;
+  }
+
+  if (ob->coherent_interface == Object::COHERENT_INTERFACE_GLASS &&
+      geom->primitive_type() == PRIMITIVE_POINT) {
+    flag |= SD_OBJECT_COHERENT_GLASS_POINT;
   }
 
   /* Object flag. */

@@ -66,6 +66,12 @@ KERNEL_STRUCT_MEMBER(path, float, min_ray_pdf, KERNEL_FEATURE_PATH_TRACING)
 KERNEL_STRUCT_MEMBER(path, float, continuation_probability, KERNEL_FEATURE_PATH_TRACING)
 /* Throughput. */
 KERNEL_STRUCT_MEMBER(path, PackedSpectrum, throughput, KERNEL_FEATURE_PATH_TRACING)
+/* Camera adjoint Stokes sensitivity in the canonical basis of -ray.D.
+ * Separate channels preserve colored closure mixtures; allocated only ON. */
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, polarization_i, KERNEL_FEATURE_POLARIZATION)
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, polarization_q, KERNEL_FEATURE_POLARIZATION)
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, polarization_u, KERNEL_FEATURE_POLARIZATION)
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, polarization_v, KERNEL_FEATURE_POLARIZATION)
 /* Factor to multiple with throughput to get remove any guiding PDFS.
  * Such throughput without guiding PDFS is used for Russian roulette termination. */
 KERNEL_STRUCT_MEMBER(path, float, unguided_throughput, KERNEL_FEATURE_PATH_GUIDING)

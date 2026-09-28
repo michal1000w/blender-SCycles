@@ -515,7 +515,7 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     /* Fallback path in case residency sets aren't supported:
      * Call useResource for MetalRT resources not covered by prepare_resources(). */
     if (!metal_device_->mtlResidencySet_enabled && active_pipeline.use_metalrt &&
-        device_kernel_has_intersection(kernel))
+        metal_kernel_has_intersection(kernel, metal_device_->scene_kernel_features))
     {
       if (@available(macos 12.0, *)) {
 

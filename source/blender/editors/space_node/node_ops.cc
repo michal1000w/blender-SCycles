@@ -111,6 +111,7 @@ void node_operatortypes()
   WM_operatortype_append(NODE_OT_clipboard_paste);
 
   WM_operatortype_append(NODE_OT_shader_script_update);
+  WM_operatortype_append(NODE_OT_diffraction_table_update);
 
   WM_operatortype_append(NODE_OT_viewer_border);
   WM_operatortype_append(NODE_OT_clear_viewer_border);

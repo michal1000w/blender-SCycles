@@ -9,11 +9,23 @@ shader node_refraction_bsdf(color Color = 0.8,
                             float Roughness = 0.2,
                             float IOR = 1.45,
                             normal Normal = N,
+                            vector Tangent = vector(0.0),
+                            float DiffractionWeight = 0.0,
+                            float DiffractionPitch = 1600.0,
+                            float DiffractionDepth = 150.0,
+                            float DiffractionDutyCycle = 0.5,
                             output closure color BSDF = 0)
 {
   float f = max(IOR, 1e-5);
   float eta = backfacing() ? 1.0 / f : f;
   float roughness = Roughness * Roughness;
 
-  BSDF = Color * microfacet(distribution, Normal, roughness, eta, 1);
+  float grating=clamp(DiffractionWeight,0.0,1.0);
+  BSDF = (1.0-grating) * Color * microfacet(distribution, Normal, roughness, eta, 1);
+  if (grating>0) {
+    vector T=Tangent==vector(0.0)?dPdu:Tangent;
+    BSDF += grating * diffraction_refraction(Normal,T,max(Color,color(0.0)),
+        Roughness,IOR,DiffractionPitch,DiffractionDepth,DiffractionDutyCycle,
+        distribution=="beckmann");
+  }
 }

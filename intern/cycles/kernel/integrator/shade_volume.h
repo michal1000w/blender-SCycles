@@ -2720,7 +2720,7 @@ ccl_device_forceinline void integrate_volume_direct_light(
   PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   uint32_t shadow_flag = INTEGRATOR_STATE(state, path, flag);
   const Spectrum phase_sum = bsdf_eval_sum(&phase_eval);
-  const Spectrum throughput_phase = throughput * phase_sum;
+  const Spectrum throughput_phase = throughput * phase_sum * polarization_emission_weight(kg, state);
 #  ifdef __KERNEL_METAL__
   guiding_gpu_record_direct(shadow_state,
                             state,
@@ -3052,6 +3052,9 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
     const ccl_private ShaderVolumePhases *phases)
 {
   PROFILING_INIT(kg, PROFILING_SHADE_VOLUME_INDIRECT_LIGHT);
+  if (polarization_enabled(kg)) {
+    polarization_path_write(state, polarization_depolarized(polarization_path_read(state)));
+  }
 #  ifdef __KERNEL_METAL__
   guiding_gpu_record_importance(state, sd->P, sd->wi, 1.0f, true);
 #  endif

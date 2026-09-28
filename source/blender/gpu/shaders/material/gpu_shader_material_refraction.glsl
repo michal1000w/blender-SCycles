@@ -7,7 +7,9 @@
 
 [[node]]
 void node_bsdf_refraction(
-    float4 color, float roughness, float ior, float3 N, float weight, Closure &result)
+    float4 color, float roughness, float ior, float3 N, float weight,
+    float diffraction_weight, float diffraction_pitch, float diffraction_depth,
+    float diffraction_duty, float3 diffraction_tangent, Closure &result)
 {
   color = max(color, float4(0.0f));
   roughness = saturate(roughness);

@@ -737,7 +737,13 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
   md5.append(constant_values);
   md5.append(source[pso_type]);
   if (use_metalrt_for_current_scene()) {
-    md5.append(string_printf("metalrt_features=%llu", kernel_features & METALRT_FEATURE_MASK));
+    /* Ordinary surface shading needs custom intersections only in coherent
+     * scenes. Include the active choice even in the otherwise generic key so
+     * an older pipeline without point/curve tables cannot be reused. */
+    const uint64_t intersection_features =
+        (kernel_features & METALRT_FEATURE_MASK & ~(KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION)) |
+        (scene_kernel_features & (KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION));
+    md5.append(string_printf("metalrt_features=%llu", intersection_features));
   }
   if (pso_type != PSO_GENERIC && pso_type != PSO_SPECIALIZED_EVAL) {
     /* Include kernel_features since it's specialized but missed by the constant_values loop. */

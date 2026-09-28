@@ -223,12 +223,17 @@ class ShaderManager {
 
   float linear_rgb_to_gray(const float3 c);
   float3 rec709_to_scene_linear(const float3 c);
+  float3 scene_linear_to_rec709(const float3 c);
 
   string get_cryptomatte_materials(Scene *scene);
 
   void tag_update(Scene *scene, const uint32_t flag);
 
   bool need_update() const;
+
+  /* Thread-safe registration during shader compilation (after device_free).
+   * Tables are identified by contents and owned until device_free_common. */
+  size_t ensure_dynamic_bsdf_table(DeviceScene *dscene, Scene *scene, const vector<float> &data);
 
   void init_xyz_transforms();
 
@@ -248,6 +253,11 @@ class ShaderManager {
   static thread_mutex lookup_table_mutex;
 
   unordered_map<const float *, size_t> bsdf_tables;
+  struct DynamicBsdfTable {
+    vector<float> data;
+    size_t offset;
+  };
+  vector<DynamicBsdfTable> dynamic_bsdf_tables;
   size_t thin_film_table_offset_;
 
   thread_spin_lock attribute_lock_;

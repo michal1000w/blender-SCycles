@@ -29,6 +29,11 @@ class GraphicsInteropDevice;
 class Progress;
 class CPUKernels;
 class Scene;
+struct DiffractionGratingCacheOptions;
+struct DiffractionAlbedoRequest;
+struct DiffractionAlbedoTable;
+struct DiffractionTwoSidedAlbedoRequest;
+struct DiffractionTwoSidedAlbedoTable;
 
 struct OSLGlobals;
 struct ThreadKernelGlobalsCPU;
@@ -262,6 +267,34 @@ class Device {
 
   /* Called after kernel texture setup, and prior to integrator state setup. */
   virtual void optimize_for_scene(Scene * /*scene*/) {}
+
+  /* Configure an explicitly requested device reference solver. */
+  virtual bool configure_diffraction_reference(DiffractionGratingCacheOptions & /*options*/,
+                                               string &error)
+  {
+    error = "Diffraction cache construction is unavailable on this device";
+    return false;
+  }
+
+  /* Optional native GGX albedo construction on the selected rendering device.
+   * Callers use the CPU builder explicitly on devices without this backend. */
+  virtual bool build_diffraction_albedo(const DiffractionAlbedoRequest &,
+                                       DiffractionAlbedoTable &,
+                                       string &error,
+                                       const std::function<bool()> & = {})
+  {
+    error = "GPU diffraction albedo construction is unavailable on this device";
+    return false;
+  }
+
+  virtual bool build_diffraction_two_sided_albedo(const DiffractionTwoSidedAlbedoRequest &,
+                                                  DiffractionTwoSidedAlbedoTable &,
+                                                  string &error,
+                                                  const std::function<bool()> & = {})
+  {
+    error = "GPU two-sided diffraction albedo construction is unavailable on this device";
+    return false;
+  }
 
   /* Called after material bytecode is ready, before geometry and light shader evaluation. */
   virtual void prepare_shader_eval(Scene * /*scene*/) {}
