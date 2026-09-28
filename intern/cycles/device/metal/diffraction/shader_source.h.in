@@ -1,0 +1,9 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ * SPDX-License-Identifier: Apache-2.0 */
+#pragma once
+/* Generated from the three canonical Metal sources at configuration time. */
+inline constexpr const char diffraction_metal_shader_source[] = R"DIFFRACTION(
+@DIFFRACTION_MATRIX_OPS@
+@DIFFRACTION_MATRIX_MATERIAL@
+@DIFFRACTION_MPS_CONVERSION@
+)DIFFRACTION";

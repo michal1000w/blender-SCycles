@@ -299,6 +299,11 @@ class BlenderSync {
    * If this flag is false then the data is considered to be up-to-date and will not be
    * synchronized at all. */
   bool has_updates_ = true;
+  /* Render-level gates affect imported graphs only; authoring nodes are intact. */
+  bool use_diffraction_effects_ = true;
+  bool use_material_diffraction_ = true;
+  bool use_coherent_interference_ = true;
+  bool use_polarization_ = true;
 
   float frame_last_synced = 0;
 };

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/integrator/state.h"
+#include "kernel/integrator/polarization_state.h"
 
 #include "kernel/sample/pattern.h"
 
@@ -71,6 +72,7 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
   INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
+  if (polarization_enabled(kg)) polarization_path_write(state, polarization_unpolarized());
   INTEGRATOR_STATE_WRITE(state, path, optical_depth) = 0.0f;
 #ifdef __KERNEL_METAL__
   if (kernel_data.integrator.use_guiding) {

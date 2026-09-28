@@ -24,6 +24,9 @@
 #include "util/path.h"
 #include "util/progress.h"
 
+#include <cmath>
+#include <map>
+
 CCL_NAMESPACE_BEGIN
 
 static void shade_background_pixels(Device *device,
@@ -102,6 +105,12 @@ NODE_ABSTRACT_DEFINE(Light)
   SOCKET_BOOLEAN(use_caustics, "Shadow Caustics", false);
 
   SOCKET_INT(max_bounces, "Max Bounces", 1024);
+
+  SOCKET_INT(coherence_group, "Coherence Group", 0);
+  SOCKET_FLOAT(coherence_phase, "Coherence Phase", 0.0f);
+  SOCKET_FLOAT(coherence_wavelength, "Coherence Wavelength", 550e-9f);
+  SOCKET_FLOAT(coherence_wavelength_low, "Coherence Wavelength Residual", 0.0f);
+  SOCKET_FLOAT(coherence_length, "Coherence Length", 0.0f);
 
   SOCKET_BOOLEAN(is_enabled, "Is Enabled", true);
 
@@ -481,6 +490,11 @@ void Light::copy_to_kernel(KernelLight *klight,
   klight->max_bounces = max_bounces;
   copy_v3_v3(klight->strength, strength);
   klight->use_caustics = use_caustics;
+  klight->coherence_group = coherence_group;
+  klight->coherence_phase = coherence_phase;
+  klight->coherence_wavelength = coherence_wavelength;
+  klight->coherence_wavelength_low = coherence_wavelength_low;
+  klight->coherence_length = coherence_length;
 }
 
 /* Light Manager */
@@ -1460,12 +1474,119 @@ void LightManager::device_update_lights(DeviceScene *dscene, Scene *scene)
   dscene->lights.copy_to_device();
 }
 
+/* Fail before uploading a partial light set: the coherent direct estimator is
+ * defined only for matched, unlinked point-source groups with opaque visibility. */
+static bool validate_coherent_direct_lights(const Scene *scene, Progress &progress)
+{
+  struct Group {
+    int count = 0;
+    float wavelength = 0;
+    float wavelength_low = 0;
+    float length = 0;
+    uint visibility = 0;
+    ustring lightgroup;
+  };
+  std::map<int, Group> groups;
+
+  for (const Object *object : scene->objects) {
+    if (!object->get_geometry()->is_light()) continue;
+    const Light *light = static_cast<const Light *>(object->get_geometry());
+    const int group_id = light->get_coherence_group();
+    if (group_id == 0 || !light->get_is_enabled()) continue;
+    const float wavelength = light->get_coherence_wavelength();
+    const float wavelength_low = light->get_coherence_wavelength_low();
+    const float length = light->get_coherence_length();
+    if (group_id < 0 || !std::isfinite(light->get_coherence_phase()) ||
+        !std::isfinite(wavelength) || !std::isfinite(wavelength_low) || !std::isfinite(length) ||
+        !(double(wavelength) + double(wavelength_low) > 0.0) || length < 0)
+    {
+      progress.set_error("Coherent direct light has invalid group, phase, wavelength, or length");
+      return false;
+    }
+    if (light->get_light_type() != LIGHT_POINT ||
+        static_cast<const PointLight *>(light)->get_radius() != 0.0f ||
+        !light->get_cast_shadow() || light->get_use_caustics())
+    {
+      progress.set_error("Coherent direct light must be a zero-radius, shadow-casting, non-caustic point light");
+      return false;
+    }
+    const Shader *shader = light->get_shader() ? light->get_shader() : scene->default_light;
+    if (!shader->emission_is_constant || shader->has_surface_spatial_varying) {
+      progress.set_error("Coherent direct light requires constant emission");
+      return false;
+    }
+    Group &group = groups[group_id];
+    if (group.count == 0) {
+      group.wavelength = wavelength;
+      group.wavelength_low = wavelength_low;
+      group.length = length;
+      group.visibility = object->get_visibility();
+      group.lightgroup = object->get_lightgroup();
+    }
+    else if (group.wavelength != wavelength || group.wavelength_low != wavelength_low ||
+             group.length != length ||
+             group.visibility != object->get_visibility() ||
+             group.lightgroup != object->get_lightgroup())
+    {
+      progress.set_error("Coherent direct lights in one group must share wavelength, length, visibility, and light group");
+      return false;
+    }
+    if (++group.count > 16) {
+      progress.set_error("Coherent direct light group exceeds 16 point sources");
+      return false;
+    }
+  }
+  if (groups.empty()) return true;
+
+  if (scene->integrator->use_photon_mapping_on_device(scene->device))
+  {
+    progress.set_error("Coherent direct point sources do not support photon mapping");
+    return false;
+  }
+  for (const Object *object : scene->objects) {
+    if (object->has_light_linking() || object->has_shadow_linking()) {
+      progress.set_error("Coherent direct point sources do not support light or shadow linking");
+      return false;
+    }
+  }
+  for (const Shader *shader : scene->shaders) {
+    if (!shader->reference_count()) continue;
+    bool declared_ideal_glass = false;
+    if (scene->integrator->get_use_coherent_specular_connections()) {
+      bool used_by_other_object = false;
+      for (const Object *object : scene->objects) {
+        for (const Node *used_shader : object->get_geometry()->get_used_shaders()) {
+          if (used_shader != shader) continue;
+          if (object->get_coherent_interface() != Object::COHERENT_INTERFACE_GLASS) {
+            used_by_other_object = true;
+            break;
+          }
+          declared_ideal_glass = true;
+        }
+        if (used_by_other_object) break;
+      }
+      declared_ideal_glass &= !used_by_other_object;
+    }
+    if (shader->has_volume || shader->has_volume_connected ||
+        (shader->has_surface_transparent && shader->get_use_transparent_shadow() &&
+         !declared_ideal_glass))
+    {
+      progress.set_error("Coherent direct point sources do not support volume or transparent-shadow shaders");
+      return false;
+    }
+  }
+  return true;
+}
+
 void LightManager::device_update(Device *device,
                                  DeviceScene *dscene,
                                  Scene *scene,
                                  Progress &progress)
 {
   if (!need_update()) {
+    /* A non-emissive shader or receiver can become unsupported without
+     * changing the light distribution (for example, adding transparency). */
+    validate_coherent_direct_lights(scene, progress);
     return;
   }
 
@@ -1477,6 +1598,8 @@ void LightManager::device_update(Device *device,
 
   /* Detect which lights are enabled, also determines if we need to update the background. */
   test_enabled_lights(scene);
+
+  if (!validate_coherent_direct_lights(scene, progress)) return;
 
   device_free(device, dscene, need_update_background);
 

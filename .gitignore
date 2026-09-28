@@ -53,6 +53,10 @@ waveletNoiseTile.bin
 # testing environment
 /Testing/
 
+# Generated render scenes, images, benchmark reports and test logs.
+# Keep test scripts and authored fixtures under tests/python and tests/scenes tracked.
+/tests/output/
+
 # Translations.
 /locale/user-config.py
 

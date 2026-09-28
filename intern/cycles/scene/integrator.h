@@ -87,6 +87,10 @@ class Integrator : public Node {
   NODE_SOCKET_API(float, filter_glossy)
 
   NODE_SOCKET_API(bool, use_bidirectional_path_tracing)
+  NODE_SOCKET_API(bool, use_coherent_specular_connections)
+  NODE_SOCKET_API(int, coherent_transport_mode)
+  NODE_SOCKET_API(int, coherent_polarization_mode)
+  NODE_SOCKET_API(int, coherent_max_interface_events)
   NODE_SOCKET_API(int, bdpt_light_paths)
   NODE_SOCKET_API(int, bdpt_reference_pixels)
   NODE_SOCKET_API(int, bdpt_max_bounces)

@@ -27,6 +27,22 @@ closure color diffuse_toon(normal N, float size, float smooth) BUILTIN;
 closure color glossy_toon(normal N, float size, float smooth) BUILTIN;
 closure color ashikhmin_velvet(normal N, float sigma) BUILTIN;
 closure color ambient_occlusion() BUILTIN;
+closure color diffraction_smooth(normal N, vector T, int cache_handle,
+                                 float pitch, float upper_index, float lower_index) BUILTIN;
+closure color diffraction_fast(normal N, vector T, float pitch, float upper_index,
+                               float lower_index, float depth, float duty,
+                               float phase_contrast, float reflection_budget,
+                               float transmission_budget, float ridge_extinction,
+                               int ridge_table, int groove_table, int substrate_table) BUILTIN;
+closure color diffraction_refraction(normal N, vector T, color tint, float roughness,
+                                     float ior, float pitch, float depth, float duty,
+                                     int beckmann) BUILTIN;
+closure color diffraction_glass(normal N, vector T, color tint, float roughness,
+                                float ior, float pitch, float depth, float duty,
+                                float film_ior, float film_thickness, int beckmann) BUILTIN;
+closure color diffraction(normal N, vector T, float ax, float ay,
+                          float pitch, float depth, float duty, float medium_ior,
+                          int ashikhmin) BUILTIN;
 
 closure color microfacet_f82_tint(
     string distribution, vector N, vector T, float ax, float ay, color f0, color f82) BUILTIN;

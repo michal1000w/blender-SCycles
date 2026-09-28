@@ -44,7 +44,7 @@ struct GuidingRISSample {
 
 ccl_device_forceinline bool calculate_ris_target(
     ccl_attr_maybe_unused ccl_private GuidingRISSample *ris_sample,
-    ccl_attr_maybe_unused const ccl_private float guiding_sampling_prob)
+    ccl_attr_maybe_unused const float guiding_sampling_prob)
 {
 #if defined(__PATH_GUIDING__)
   const float pi_factor = 2.0f;

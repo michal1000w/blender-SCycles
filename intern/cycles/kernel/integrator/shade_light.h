@@ -58,7 +58,7 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
   if (eval_result == SHADER_EVAL_CACHE_MISS) {
     return SHADER_EVAL_CACHE_MISS;
   }
-  const float3 eval = shader_eval * light_eval.eval_fac;
+  const float3 eval = shader_eval * light_eval.eval_fac * polarization_emission_weight(kg, state);
   if (is_zero(eval)) {
     return SHADER_EVAL_EMPTY;
   }

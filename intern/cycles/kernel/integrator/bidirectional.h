@@ -22,6 +22,7 @@
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/state_util.h"
 #include "kernel/integrator/surface_shader.h"
+#include "kernel/light/coherent_history_kernel.h"
 #ifdef __MNEE__
 #  include "kernel/integrator/mnee.h"
 #endif
@@ -322,13 +323,15 @@ ccl_device_inline float bdpt_spot_emission_direction_pdf(
   return attenuation / (M_2PI_F * integrated_cosine);
 }
 
+/* A delta event removes its local NEE alternative (d_vcm = 0), but earlier
+ * connectible vertices can retain light-path alternatives in d_vc. Pure delta
+ * camera prefixes have both terms zero and still receive unit weight. */
 ccl_device_inline float bdpt_emission_mis_weight_infinite(IntegratorState state,
                                                           const float direct_pdf_w,
                                                           const float position_pdf,
                                                           const float selection_ratio)
 {
-  if (INTEGRATOR_STATE(state, path, bounce) == 0 ||
-      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_MIS_SKIP))
+  if (INTEGRATOR_STATE(state, path, bounce) == 0)
   {
     return 1.0f;
   }
@@ -345,8 +348,7 @@ ccl_device_inline float bdpt_emission_mis_weight_surface(KernelGlobals kg,
                                                          IntegratorState state,
                                                          const ccl_private ShaderData *sd)
 {
-  if (INTEGRATOR_STATE(state, path, bounce) == 0 ||
-      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_MIS_SKIP))
+  if (INTEGRATOR_STATE(state, path, bounce) == 0)
   {
     return 1.0f;
   }
@@ -389,8 +391,7 @@ ccl_device_inline float bdpt_emission_mis_weight_lamp(KernelGlobals kg,
                                                       const float distance,
                                                       const float nee_pdf_w)
 {
-  if (INTEGRATOR_STATE(state, path, bounce) == 0 ||
-      (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_MIS_SKIP))
+  if (INTEGRATOR_STATE(state, path, bounce) == 0)
   {
     return 1.0f;
   }
@@ -449,7 +450,10 @@ ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
     ccl_private ShaderData *sd,
     const float3 sampled_wo,
     const bool light_path = false,
-    ccl_private Spectrum *reciprocal_eval = nullptr)
+    ccl_private Spectrum *reciprocal_eval = nullptr,
+    const bool delta_event = false,
+    const ccl_private PolarizationSpectrumState *forward_input = nullptr,
+    ccl_private PolarizationSpectrumState *forward_output = nullptr)
 {
   Ray reverse_ray ccl_optional_struct_init;
   reverse_ray.D = -normalize(sampled_wo);
@@ -483,7 +487,9 @@ ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
   surface_shader_prepare_closures(kg, state, &reverse_sd, visibility);
   BsdfEval reverse_eval;
   float roughness_squared = 0.0f;
-  const float pdf = surface_shader_bsdf_eval(kg,
+  const float pdf = delta_event ?
+                       surface_shader_bsdf_eval_delta(kg, &reverse_sd, sd->wi, &reverse_eval) :
+                       surface_shader_bsdf_eval(kg,
                                              state,
                                              &reverse_sd,
                                              sd->wi,
@@ -493,6 +499,11 @@ ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
                                              !light_path);
   if (reciprocal_eval) {
     *reciprocal_eval = bsdf_eval_sum(&reverse_eval);
+  }
+  if (forward_input && forward_output) {
+    *forward_output = polarization_surface_transport(kg, &reverse_sd, sd->wi,
+        *forward_input, true, nullptr, bsdf_eval_sum(&reverse_eval), delta_event,
+        SHADER_USE_MIS, true);
   }
   return pdf;
 }
@@ -846,8 +857,10 @@ ccl_device_inline void bdpt_recursive_mis_after_scatter(IntegratorState state,
   BDPTMISWeight d_vc = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
 
   if (label & LABEL_SINGULAR) {
-    d_vcm = 0.0f;
-    d_vc *= cos_out;
+    const float2 next = BDPTMISWeight::Log::scatter_delta(
+        make_float2(d_vcm.encoded(), d_vc.encoded()), cos_out, forward_pdf, reverse_pdf);
+    d_vcm = BDPTMISWeight::from_encoded(next.x);
+    d_vc = BDPTMISWeight::from_encoded(next.y);
   }
   else {
     const float2 next = BDPTMISWeight::Log::scatter(make_float2(d_vcm.encoded(), d_vc.encoded()),
@@ -915,6 +928,8 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(KernelGlobals kg,
                                                          const uint flag,
                                                          const uint emitter_shader_flags,
                                                          const float wavelength_rand,
+                                                         const CoherentPathHistory coherent_history,
+                                                         const ccl_private PolarizationSpectrumState &polarization,
                                                          ccl_private uint *reservoir_rng,
                                                          ccl_private uint *reservoir_slot,
                                                          ccl_private uint *selection_count,
@@ -955,6 +970,14 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(KernelGlobals kg,
                            flag,
                            emitter_shader_flags,
                            wavelength_rand);
+    if (kernel_integrator_state.bdpt_coherent_history) {
+      kernel_integrator_state.bdpt_coherent_history[*reservoir_slot] = coherent_history;
+    }
+    if (kernel_integrator_state.bdpt_polarization) {
+      packed_normal incoming; incoming.value = local_vertex.incoming;
+      kernel_integrator_state.bdpt_polarization[*reservoir_slot] = polarization_pack(
+          polarization_reframe(polarization, ray->D, incoming.decode()));
+    }
     *stored_vertex = local_vertex;
   }
   else {
@@ -1415,6 +1438,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     IntegratorState state,
     const ccl_private KernelBDPTVertex *light_vertex,
     ccl_private ShaderData *light_sd,
+    const ccl_private PolarizationSpectrumState &light_polarization,
     const uint candidate_count,
     const uint iteration,
     const uint batch_samples,
@@ -1440,6 +1464,8 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   float distance = sqrtf(distance2);
   float3 direction = delta / distance;
   const bool volume_vertex = light_vertex->type == PRIMITIVE_VOLUME;
+  PolarizationMueller manifold_polarization{};
+  for (int i=0;i<4;i++) manifold_polarization.value[i][i]=1;
   Spectrum manifold_throughput = one_spectrum();
   bool manifold_connection = false;
 
@@ -1503,7 +1529,8 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
                                                                      &light_distance,
         photon_unpack_wavelength_rand(light_vertex->time_wavelength),
         volume_vertex,
-        volume_vertex ? manifold_vertices : nullptr);
+        volume_vertex ? manifold_vertices : nullptr,
+        polarization_enabled(kg) ? &manifold_polarization : nullptr);
     if (manifold_result == SHADER_EVAL_CACHE_MISS) {
       light_sd->runtime_flag |= SR_CACHE_MISS;
       return;
@@ -1776,9 +1803,17 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
                               max(light_path_count, 1.0f);
   const Spectrum spectral_weight = bdpt_light_vertex_spectral_weight(
       kg, state, light_vertex->time_wavelength, false);
-  const Spectrum contribution = Spectrum(light_vertex->throughput) * spectral_weight *
+  Spectrum contribution = Spectrum(light_vertex->throughput) * spectral_weight *
                                 manifold_throughput * sensor_eval *
                                 (mis_weight * normalization * connection_jacobian);
+  if (polarization_enabled(kg)) {
+    const auto endpoint_sensitivity = polarization_spectrum_apply(manifold_polarization,
+        polarization_unpolarized(), true);
+    const auto sensitivity = volume_vertex ? polarization_depolarized(endpoint_sensitivity) :
+        polarization_surface_transport(kg, light_sd, light_incoming,
+            endpoint_sensitivity, true, nullptr, bsdf_eval_sum(&light_eval), false);
+    contribution *= polarization_spectrum_contract(sensitivity, light_polarization);
+  }
   if (!isfinite_safe(contribution) || is_zero(contribution)) {
     return;
   }
@@ -1888,6 +1923,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
   Ray ray ccl_optional_struct_init;
   Spectrum throughput;
+  PolarizationSpectrumState light_polarization = polarization_unpolarized();
   Spectrum unguided_factor = one_spectrum();
   int emitter_object = OBJECT_NONE;
   int emitter_distribution = -1;
@@ -1924,6 +1960,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     }
     return;
   }
+  CoherentPathHistory coherent_history = coherent_history_begin();
 
 #ifdef __SPECTRAL__
   const int emitter_shader = int(emitter_shader_flags) & SHADER_MASK;
@@ -2011,6 +2048,8 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                           INTEGRATOR_STATE(state, path, flag),
                                           emitter_shader_flags,
                                           light_wavelength_rand,
+                                          coherent_history_invalidate(coherent_history),
+                                          light_polarization,
                                           &reservoir_rng,
                                           &reservoir_slot,
                                           &selection_count,
@@ -2072,6 +2111,17 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
     surface_shader_prepare_closures(kg, state, &sd, path_visibility);
 
+    /* This source prefix is already evaluated as deterministic irradiance at
+     * the detector. The eye integrator may follow any subsequent camera-side
+     * suffix through that detector, so light tracing must stop here before
+     * caching a vertex, sensor splatting, or scattering onward. */
+    if (kernel_integrator_state.bdpt_coherent_history &&
+        coherent_detector_eligible(&sd) &&
+        coherent_history_owned_candidate(kg, coherent_history, emitter_object))
+    {
+      break;
+    }
+
     const BDPTMISWeight d_vcm_before_hit = d_vcm;
     const BDPTMISWeight d_vc_before_hit = d_vc;
     const float cos_fixed = max(fabsf(dot(sd.Ng, sd.wi)), 1.0e-8f);
@@ -2103,6 +2153,10 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                         INTEGRATOR_STATE(state, path, flag),
                                         emitter_shader_flags,
                                         light_wavelength_rand,
+                                        coherent_detector_eligible(&sd) ?
+                                            coherent_history :
+                                            coherent_history_invalidate(coherent_history),
+                                        light_polarization,
                                         &reservoir_rng,
                                         &reservoir_slot,
                                         &selection_count,
@@ -2116,6 +2170,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     float3 rand_bsdf = lcg_step_float3(&rng);
     const ccl_private ShaderClosure *sc = surface_shader_bsdf_bssrdf_pick(&sd, &rand_bsdf);
     if (CLOSURE_IS_RAY_PORTAL(sc->type)) {
+      if (polarization_enabled(kg)) light_polarization = polarization_depolarized(light_polarization);
       const ccl_private RayPortalClosure *pc = (const ccl_private RayPortalClosure *)sc;
       float sum_sample_weight = 0.0f;
       for (int i = 0; i < sd.num_closure; i++) {
@@ -2213,16 +2268,59 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       break;
     }
 
+    if (kernel_integrator_state.bdpt_coherent_history) {
+      const int patch_index = coherent_patch_for_hit(kg, sd.object, sd.prim, sd.type);
+      int patch_mode = 0;
+      int incident_side = 0;
+      if (patch_index >= 0) {
+        const ccl_global KernelCoherentPatch *patch =
+            &kernel_data_fetch(coherent_patches, patch_index);
+        patch_mode = patch->mode;
+        if (patch_mode == 2) {
+          const float3 normal = patch->shape == 1 ? normalize(sd.P - patch->center) :
+              normalize(cross(float3(patch->tangent_u), float3(patch->tangent_v)));
+          incident_side = dot(ray.D, normal) < 0.0f ? 1 : -1;
+        }
+      }
+      if (kernel_data.integrator.coherent_transport_mode == 1) {
+        coherent_history = coherent_history_stream_after_scatter(
+            coherent_history, patch_index >= 0 && patch_mode == 1, label,
+            uint(kernel_data.integrator.coherent_max_interface_events));
+      }
+      else {
+        coherent_history = coherent_history_after_scatter(
+            coherent_history, patch_index, patch_mode, label, incident_side);
+      }
+    }
+
+    PolarizationSpectrumState next_polarization = light_polarization;
+    if (polarization_enabled(kg) && (label & (LABEL_SINGULAR | LABEL_TRANSPARENT))) {
+      next_polarization = polarization_surface_transport(kg, &sd, wo, light_polarization,
+          false, sc, bsdf_eval_sum(&eval), (label & LABEL_SINGULAR) != 0);
+    }
     float reverse_pdf = mis_pdf;
     Spectrum adjoint_eval = bsdf_eval_sum(&eval);
     if (!(label & LABEL_TRANSPARENT)) {
       if (label & LABEL_SINGULAR) {
+        if (surface_shader_has_physical_grating(&sd) &&
+            (sc->type == CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID || bsdf_microfacet_has_delta(sc)))
+        {
+          /* Sampling already evaluated the complete forward atomic mixture.
+           * Supported delta closures bypass continuous guiding proposals. */
+          reverse_pdf = bdpt_reverse_pdf(kg, state, &sd, wo, true, nullptr, true);
+          if (sd.runtime_flag & SR_CACHE_MISS) {
+            kernel_integrator_state.queue_counter->cache_miss = true;
+            return;
+          }
+        }
         adjoint_eval = bdpt_transpose_delta_eval(
             adjoint_eval, sc->N, sd.Ng, sd.wi, wo, eta, label & LABEL_TRANSMIT);
       }
       else {
         Spectrum reciprocal_eval;
-        reverse_pdf = bdpt_reverse_pdf(kg, state, &sd, wo, true, &reciprocal_eval);
+        reverse_pdf = bdpt_reverse_pdf(kg, state, &sd, wo, true, &reciprocal_eval, false,
+            polarization_enabled(kg) ? &light_polarization : nullptr,
+            polarization_enabled(kg) ? &next_polarization : nullptr);
         if (sd.runtime_flag & SR_CACHE_MISS) {
           kernel_integrator_state.queue_counter->cache_miss = true;
           return;
@@ -2232,6 +2330,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
         adjoint_eval = bdpt_transpose_surface_eval(reciprocal_eval, sd.Ng, sd.wi, wo);
       }
     }
+    light_polarization = next_polarization;
     throughput *= adjoint_eval / pdf;
     unguided_factor *= safe_divide(pdf, unguided_pdf);
     if (!isfinite_safe(throughput) || is_zero(throughput)) {
@@ -2262,8 +2361,10 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
     const float cos_out = max(fabsf(dot(sd.Ng, normalize(wo))), 1.0e-8f);
     if (label & LABEL_SINGULAR) {
-      d_vcm = 0.0f;
-      d_vc *= cos_out;
+      const float2 next = BDPTMISWeight::Log::scatter_delta(
+          make_float2(d_vcm.encoded(), d_vc.encoded()), cos_out, mis_pdf, reverse_pdf);
+      d_vcm = BDPTMISWeight::from_encoded(next.x);
+      d_vc = BDPTMISWeight::from_encoded(next.y);
     }
     else {
       const float selection_ratio = bounce == 0 ?
@@ -2364,6 +2465,15 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
   if (light_vertex.sensor_complete) {
     return;
   }
+  if (kernel_integrator_state.bdpt_coherent_history && light_vertex.object != OBJECT_NONE &&
+      (kernel_data_fetch(object_flag, light_vertex.object) & SD_OBJECT_COHERENT_DETECTOR) &&
+      coherent_history_owned_candidate(
+          kg, kernel_integrator_state.bdpt_coherent_history[storage_index],
+          light_vertex.emitter_object))
+  {
+    kernel_integrator_state.bdpt_vertices[storage_index].sensor_complete = 1;
+    return;
+  }
   kernel_integrator_state.bdpt_vertices[storage_index].sensor_complete = 1;
   uint rng = lcg_init(
       hash_uint3(vertex_index, iteration, uint(kernel_data.integrator.seed) ^ 0x73656e73u));
@@ -2407,6 +2517,9 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                       state,
                                       &light_vertex,
                                       &light_sd,
+                                      kernel_integrator_state.bdpt_polarization ?
+                                          polarization_unpack(kernel_integrator_state.bdpt_polarization[storage_index]) :
+                                          polarization_unpolarized(),
                                       selection_count,
                                       iteration,
                                       samples_per_cache,

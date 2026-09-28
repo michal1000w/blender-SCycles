@@ -32,6 +32,8 @@ set(SRC
   integrator_tile_test.cpp
   kernel_bidirectional_pdf_test.cpp
   kernel_camera_projection_test.cpp
+  kernel_diffraction_test.cpp
+  kernel_diffraction_bsdf_test.cpp
   kernel_guiding_distribution_test.cpp
   kernel_guiding_mixture_fit_test.cpp
   kernel_guiding_parallax_test.cpp
@@ -39,6 +41,9 @@ set(SRC
   kernel_spectral_transmission_test.cpp
   render_graph_finalize_test.cpp
   scene_displacement_image_test.cpp
+  diffraction_boundary_fixture.h
+  diffraction_reference_fixture.h
+  scene_diffraction_test.cpp
   util_aligned_malloc_test.cpp
   util_boundbox_test.cpp
   util_cache_limiter_test.cpp
@@ -80,4 +85,15 @@ endif()
 if(WITH_GTESTS)
   set(INC_SYS "")
   blender_add_test_suite_executable(cycles "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
+endif()
+
+if(WITH_CYCLES_DIFFRACTION_DEVICE_TEST)
+  add_executable(cycles_diffraction_device_test
+    ../../../tests/performance/cycles_diffraction_device_test.cpp
+  )
+  target_link_libraries(cycles_diffraction_device_test PRIVATE ${LIB})
+  add_executable(cycles_diffraction_two_sided_gpu_cache_test
+    ../../../tests/performance/cycles_diffraction_two_sided_gpu_cache_test.cpp
+  )
+  target_link_libraries(cycles_diffraction_two_sided_gpu_cache_test PRIVATE ${LIB})
 endif()

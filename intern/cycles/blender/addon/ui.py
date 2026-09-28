@@ -808,6 +808,46 @@ class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
             box.label(text="Photon Mapping is ignored while BDPT is enabled", icon='INFO')
 
 
+class CYCLES_RENDER_PT_diffraction(CyclesButtonsPanel, Panel):
+    bl_label = "Diffraction"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_diffraction_effects", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.active = context.scene.cycles.use_diffraction_effects
+        col = layout.column(align=True)
+        col.prop(context.scene.cycles, "use_material_diffraction")
+        col.prop(context.scene.cycles, "use_coherent_interference")
+        col.prop(context.scene.cycles, "use_polarization")
+        layout.label(text="Pitch, depth and tangent: material nodes")
+        layout.label(text="Coherence groups and wavelength: light data")
+
+
+class CYCLES_RENDER_PT_light_paths_coherent_specular(CyclesButtonsPanel, Panel):
+    bl_label = "Coherent Specular Connections (Experimental)"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_diffraction"
+
+    def draw_header(self, context):
+        self.layout.active = context.scene.cycles.use_diffraction_effects and context.scene.cycles.use_coherent_interference
+        self.layout.prop(context.scene.cycles, "use_coherent_specular_connections", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.label(text="Supported coherent path inventory")
+        layout.label(text="Other histories use native incoherent transport")
+        col = layout.column()
+        col.active = context.scene.cycles.use_diffraction_effects and context.scene.cycles.use_coherent_interference and context.scene.cycles.use_coherent_specular_connections
+        col.prop(context.scene.cycles, "coherent_transport_mode")
+        col.prop(context.scene.cycles, "coherent_polarization_mode")
+        col.prop(context.scene.cycles, "coherent_max_interface_events")
+
+
 class CYCLES_RENDER_PT_light_paths_fast_gi(CyclesButtonsPanel, Panel):
     bl_label = "Fast GI Approximation"
     bl_options = {'DEFAULT_CLOSED'}
@@ -1566,6 +1606,22 @@ class CYCLES_OBJECT_PT_shading_caustics(CyclesButtonsPanel, Panel):
         col.prop(cob, "is_caustics_receiver")
 
 
+class CYCLES_OBJECT_PT_coherent_interface(CyclesButtonsPanel, Panel):
+    bl_label = "Coherent Interface (Experimental)"
+    bl_parent_id = "OBJECT_PT_shading"
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context):
+        return CyclesButtonsPanel.poll(context) and context.object.type in {'MESH', 'POINTCLOUD'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(context.object.cycles, "coherent_interface")
+        layout.label(text="Requires a supported ideal or diffuse shader")
+
+
 class CYCLES_OBJECT_PT_lightgroup(CyclesButtonsPanel, Panel):
     bl_label = "Light Group"
     bl_parent_id = "OBJECT_PT_shading"
@@ -1821,6 +1877,32 @@ class CYCLES_LIGHT_PT_settings(CyclesButtonsPanel, Panel):
 
         if light.type == 'AREA':
             col.prop(clamp, "is_portal", text="Portal")
+
+
+class CYCLES_LIGHT_PT_coherent_direct(CyclesButtonsPanel, Panel):
+    bl_label = "Coherent Point Sources (Experimental)"
+    bl_context = "data"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.light and CyclesButtonsPanel.poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        settings = context.light.cycles
+        if context.scene.cycles.use_coherent_specular_connections:
+            layout.label(text="Sources for coherent specular connections")
+        else:
+            layout.label(text="Direct-source interference")
+            layout.label(text="Enable specular connections in Light Paths")
+        layout.prop(settings, "coherence_group")
+        col = layout.column()
+        col.active = settings.coherence_group > 0
+        col.prop(settings, "coherence_phase")
+        col.prop(settings, "coherence_wavelength_nm")
+        col.prop(settings, "coherence_length_m")
 
 
 class CYCLES_LIGHT_PT_nodes(CyclesButtonsPanel, Panel):
@@ -2724,6 +2806,8 @@ classes = (
     CYCLES_RENDER_PT_light_paths_clamping,
     CYCLES_RENDER_PT_light_paths_caustics,
     CYCLES_RENDER_PT_light_paths_bidirectional,
+    CYCLES_RENDER_PT_diffraction,
+    CYCLES_RENDER_PT_light_paths_coherent_specular,
     CYCLES_RENDER_PT_light_paths_photon_mapping,
     CYCLES_RENDER_PT_light_paths_fast_gi,
     CYCLES_RENDER_PT_volumes,
@@ -2768,6 +2852,7 @@ classes = (
     CYCLES_OBJECT_PT_motion_blur,
     CYCLES_OBJECT_PT_shading_gi_approximation,
     CYCLES_OBJECT_PT_shading_caustics,
+    CYCLES_OBJECT_PT_coherent_interface,
     CYCLES_OBJECT_PT_lightgroup,
     CYCLES_OBJECT_PT_visibility,
     CYCLES_OBJECT_PT_visibility_ray_visibility,
@@ -2775,6 +2860,7 @@ classes = (
     CYCLES_LIGHT_PT_preview,
     CYCLES_LIGHT_PT_light,
     CYCLES_LIGHT_PT_settings,
+    CYCLES_LIGHT_PT_coherent_direct,
     CYCLES_LIGHT_PT_nodes,
     CYCLES_LIGHT_PT_beam_shape,
     CYCLES_WORLD_PT_preview,

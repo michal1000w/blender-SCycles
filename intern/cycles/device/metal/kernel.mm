@@ -522,7 +522,11 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
 
   /* metalrt options */
   pipeline->use_metalrt = device->use_metalrt_for_current_scene();
-  pipeline->kernel_features = device->kernel_features;
+  /* Geometry features accumulate on the device, but coherent surface tracing
+   * follows the active scene. Its intersection-table choice is in the cache key. */
+  pipeline->kernel_features =
+      (device->kernel_features & ~(KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION)) |
+      (device->scene_kernel_features & (KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION));
 
   {
     thread_scoped_lock lock(cache_mutex);
@@ -621,7 +625,7 @@ bool MetalKernelPipeline::should_use_binary_archive() const
       }
     }
 
-    if (use_metalrt && device_kernel_has_intersection(device_kernel)) {
+    if (use_metalrt && metal_kernel_has_intersection(device_kernel, kernel_features)) {
       /* Binary linked functions aren't supported in binary archives. */
       return false;
     }
@@ -745,9 +749,14 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   num_threads_per_block = best_pipeline->num_threads_per_block;
   use_metalrt = best_pipeline->use_metalrt;
 
+  /* Release tables from the previous pipeline before an ON/OFF scene switch.
+   * A coherent surface pipeline has tables; an ordinary surface pipeline does not. */
+  free_intersection_function_tables();
+
   /* Create the MTLIntersectionFunctionTables if needed. */
-  if (best_pipeline->use_metalrt && device_kernel_has_intersection(best_pipeline->device_kernel)) {
-    free_intersection_function_tables();
+  if (best_pipeline->use_metalrt &&
+      metal_kernel_has_intersection(best_pipeline->device_kernel, best_pipeline->kernel_features))
+  {
 
     for (int table = 0; table < METALRT_TABLE_NUM; table++) {
       @autoreleasepool {
@@ -779,9 +788,6 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
         metal_device->metal_mem_alloc(intersection_func_table[table]);
       }
     }
-  }
-  else {
-    free_intersection_function_tables();
   }
 
   return true;
@@ -851,7 +857,7 @@ void MetalKernelPipeline::compile()
 
   NSArray *linked_functions = nil;
 
-  if (use_metalrt && device_kernel_has_intersection(device_kernel)) {
+  if (use_metalrt && metal_kernel_has_intersection(device_kernel, kernel_features)) {
 
     NSMutableSet *unique_functions = [[[NSMutableSet alloc] init] autorelease];
     bool required_intersection_function_missing = false;
@@ -981,7 +987,7 @@ void MetalKernelPipeline::compile()
     computePipelineStateDescriptor.linkedFunctions.functions = linked_functions;
   }
   computePipelineStateDescriptor.maxCallStackDepth = 1;
-  if (use_metalrt && device_kernel_has_intersection(device_kernel)) {
+  if (use_metalrt && metal_kernel_has_intersection(device_kernel, kernel_features)) {
     computePipelineStateDescriptor.maxCallStackDepth = 2;
   }
 

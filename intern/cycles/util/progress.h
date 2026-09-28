@@ -83,6 +83,14 @@ class Progress {
     return cancel;
   }
 
+  /* Worker-side query: do not invoke the application's cancellation callback
+   * from parallel material validation tasks. */
+  bool get_cancel_requested() const
+  {
+    const thread_scoped_lock lock(progress_mutex);
+    return cancel;
+  }
+
   string get_cancel_message() const
   {
     const thread_scoped_lock lock(progress_mutex);

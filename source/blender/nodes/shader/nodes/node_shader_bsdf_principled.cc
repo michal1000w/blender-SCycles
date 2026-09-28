@@ -341,6 +341,16 @@ static void node_declare(NodeDeclarationBuilder &b)
       .max(1000.0f)
       .description("Index of refraction (IOR) of the thin film");
 #define SOCK_THIN_FILM_IOR_ID 33
+  PanelDeclarationBuilder &grating=b.add_panel("Diffraction"_ustr).default_closed(true);
+  grating.add_input<decl::Float>("Diffraction Weight"_ustr)
+      .default_value(0.0f).min(0.0f).max(1.0f).subtype(PROP_FACTOR)
+      .description("Cycles: Fast spectral grating coverage for GGX reflection and transmission; transmitting Thin Wall is unsupported");
+  grating.add_input<decl::Float>("Diffraction Pitch"_ustr)
+      .default_value(1600.0f).min(1.0f).max(1000000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Depth"_ustr)
+      .default_value(150.0f).min(0.0f).max(100000.0f).subtype(PROP_WAVELENGTH);
+  grating.add_input<decl::Float>("Diffraction Duty Cycle"_ustr)
+      .default_value(0.5f).min(0.0f).max(1.0f).subtype(PROP_FACTOR);
 }
 
 static void node_shader_init_principled(bNodeTree * /*ntree*/, bNode *node)

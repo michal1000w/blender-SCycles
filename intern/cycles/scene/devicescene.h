@@ -67,6 +67,9 @@ class DeviceScene {
   /* lights */
   device_vector<KernelLightDistribution> light_distribution;
   device_vector<KernelLight> lights;
+  device_vector<KernelCoherentPatch> coherent_patches;
+  device_vector<int> coherent_patch_primitives;
+  device_vector<KernelCoherentCandidate> coherent_candidates;
   device_vector<float2> light_background_marginal_cdf;
   device_vector<float2> light_background_conditional_cdf;
 
@@ -83,6 +86,25 @@ class DeviceScene {
   /* shaders */
   device_vector<int> svm_nodes;
   device_vector<KernelShader> shaders;
+
+  /* Diffraction cache storage. */
+  device_vector<int4> diffraction_nodes;
+  device_vector<int4> diffraction_layout;
+  device_vector<float4> diffraction_bounds;
+  device_vector<int2> diffraction_ports;
+  device_vector<int> diffraction_active;
+  device_vector<float2> diffraction_matrices;
+  device_vector<int4> diffraction_descriptors;
+  device_vector<float4> diffraction_domains;
+  device_vector<float> diffraction_albedo_values;
+  device_vector<float> diffraction_albedo_averages;
+  device_vector<int4> diffraction_albedo_descriptors;
+  device_vector<float4> diffraction_albedo_domains;
+  device_vector<float> diffraction_two_sided_values;
+  device_vector<float> diffraction_two_sided_integrals;
+  device_vector<float> diffraction_two_sided_cross;
+  device_vector<int4> diffraction_two_sided_descriptors;
+  device_vector<float4> diffraction_two_sided_domains;
 
   /* lookup tables */
   device_vector<float> lookup_table;
