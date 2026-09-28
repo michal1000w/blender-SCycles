@@ -16,6 +16,11 @@ shader node_metallic_bsdf(color BaseColor = color(0.617, 0.577, 0.540),
                           float Rotation = 0.0,
                           float ThinFilmThickness = 0.0,
                           float ThinFilmIOR = 1.33,
+                          float DiffractionWeight = 0.0,
+                          float DiffractionPitch = 1600.0,
+                          float DiffractionDepth = 150.0,
+                          float DiffractionDutyCycle = 0.5,
+                          int diffraction_albedo_handle_plus_one = 0,
                           normal Normal = N,
                           normal Tangent = 0.0,
                           output closure color BSDF = 0)
@@ -26,7 +31,7 @@ shader node_metallic_bsdf(color BaseColor = color(0.617, 0.577, 0.540),
 
   /* Handle anisotropy. */
   vector T = Tangent;
-  if (Anisotropy > 0.0) {
+  if (Anisotropy > 0.0 || DiffractionWeight > 0.0) {
     float aspect = sqrt(1.0 - clamp(Anisotropy, 0.0, 1.0) * 0.9);
     alpha_x /= aspect;
     alpha_y *= aspect;
@@ -47,7 +52,12 @@ shader node_metallic_bsdf(color BaseColor = color(0.617, 0.577, 0.540),
                                "thinfilm_thickness",
                                ThinFilmThickness,
                                "thinfilm_ior",
-                               ThinFilmIOR);
+                               ThinFilmIOR,
+                               "diffraction_weight", DiffractionWeight,
+                               "diffraction_pitch", DiffractionPitch,
+                               "diffraction_depth", DiffractionDepth,
+                               "diffraction_duty", DiffractionDutyCycle,
+                               "diffraction_albedo_handle_plus_one", diffraction_albedo_handle_plus_one);
   }
   else {
     BSDF = conductor_bsdf(Normal,
@@ -60,6 +70,11 @@ shader node_metallic_bsdf(color BaseColor = color(0.617, 0.577, 0.540),
                           "thinfilm_thickness",
                           ThinFilmThickness,
                           "thinfilm_ior",
-                          ThinFilmIOR);
+                          ThinFilmIOR,
+                          "diffraction_weight", DiffractionWeight,
+                          "diffraction_pitch", DiffractionPitch,
+                          "diffraction_depth", DiffractionDepth,
+                          "diffraction_duty", DiffractionDutyCycle,
+                          "diffraction_albedo_handle_plus_one", diffraction_albedo_handle_plus_one);
   }
 }

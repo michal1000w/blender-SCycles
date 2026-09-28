@@ -9,6 +9,7 @@
 #include "kernel/film/light_passes.h"
 
 #include "kernel/integrator/guiding.h"
+#include "kernel/integrator/polarization_state.h"
 #include "kernel/integrator/intersect_closest.h"
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/surface_shader.h"
@@ -174,6 +175,7 @@ ccl_device_inline ShaderEvalResult integrate_background(
       mis_weight = 0.0f;
     }
 #endif
+    L *= polarization_emission_weight(kg, state);
     guiding_record_background(kg, state, L, mis_weight);
     L *= mis_weight;
   }
@@ -251,7 +253,7 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
       return SHADER_EVAL_CACHE_MISS;
     }
 
-    const float3 eval = shader_eval * light_eval.eval_fac;
+    float3 eval = shader_eval * light_eval.eval_fac;
     if (is_zero(eval)) {
       continue;
     }
@@ -283,6 +285,7 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
     }
 #endif
     /* Write to render buffer. */
+    eval *= polarization_emission_weight(kg, state);
     guiding_record_background(kg, state, eval, mis_weight);
     film_write_surface_emission(
         kg, state, eval, mis_weight, render_buffer, object_lightgroup(kg, klight->object_id));

@@ -1001,6 +1001,8 @@ enum ShaderRuntimeFlag {
 
 /* Shader flags that are set after compiling the shaders. */
 enum ShaderDataFlag {
+  /* Surface is proven to contain only delta scattering, with no continuous evaluation. */
+  SD_HAS_ONLY_DELTA_SURFACE = (1 << 0),
   /* If the shader is wavelength-dependent. */
   SD_REQUIRES_WAVELENGTH = (1 << 12),
   /* If Light Path Node is present in the shader graph. */
@@ -1072,6 +1074,8 @@ enum ShaderDataObjectFlag : uint {
   SD_OBJECT_HAS_VOLUME_MOTION = (1u << 11),
   /* Geometry has per-corner normals instead of per-vertex. */
   SD_OBJECT_HAS_CORNER_NORMALS = (1u << 12),
+  SD_OBJECT_COHERENT_DETECTOR = (1u << 13),
+  SD_OBJECT_COHERENT_GLASS_POINT = (1u << 14),
 
   /* object is using caustics */
   SD_OBJECT_CAUSTICS = (SD_OBJECT_CAUSTICS_CASTER | SD_OBJECT_CAUSTICS_RECEIVER),
@@ -1080,7 +1084,8 @@ enum ShaderDataObjectFlag : uint {
                      SD_OBJECT_NEGATIVE_SCALE | SD_OBJECT_HAS_VOLUME |
                      SD_OBJECT_INTERSECTS_VOLUME | SD_OBJECT_SHADOW_CATCHER |
                      SD_OBJECT_HAS_VOLUME_ATTRIBUTES | SD_OBJECT_CAUSTICS |
-                     SD_OBJECT_HAS_VOLUME_MOTION | SD_OBJECT_HAS_CORNER_NORMALS)
+                     SD_OBJECT_HAS_VOLUME_MOTION | SD_OBJECT_HAS_CORNER_NORMALS |
+                     SD_OBJECT_COHERENT_DETECTOR | SD_OBJECT_COHERENT_GLASS_POINT)
 };
 
 struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
@@ -1431,7 +1436,10 @@ struct KernelTables {
   int ggx_gen_schlick_ior_s;
   int ggx_gen_schlick_s;
   int thin_film_table;
-  int pad2;
+  int num_diffraction_caches;
+  int num_diffraction_albedo_caches;
+  int num_diffraction_two_sided_caches;
+  int pad_diffraction_albedo[2];
 };
 static_assert_align(KernelTables, 16);
 
@@ -1628,14 +1636,56 @@ struct KernelLight {
   float max_bounces;
   float strength[3];
   int use_caustics;
-  int pad;
+  float coherence_wavelength_low;
   union {
     KernelSpotLight spot;
     KernelAreaLight area;
     KernelSunLight sun;
   };
+  /* One aligned block for experimental direct point-source coherence. */
+  int coherence_group;
+  float coherence_phase;
+  float coherence_wavelength;
+  float coherence_length;
 };
 static_assert_align(KernelLight, 16);
+
+/* Explicit static optical interface and one bounded ordered source path. */
+struct ccl_align(16) KernelCoherentPatch {
+  packed_float3 center;
+  float half_u;
+  packed_float3 tangent_u;
+  float half_v;
+  packed_float3 tangent_v;
+  float outside_ior;
+  float inside_ior;
+  int object;
+  int mode;
+  /* Sorted global primitive IDs, qualified by object and primitive_type. */
+  int primitive_offset;
+  int primitive_count;
+  /* 0: planar triangle union, 1: native analytic point sphere. */
+  int shape;
+  float radius;
+  int primitive_type;
+  int pad;
+  packed_float3 polarizer_axis;
+  int polarizer;
+};
+static_assert_align(KernelCoherentPatch, 16);
+
+struct ccl_align(16) KernelCoherentCandidate {
+  int light;
+  int count;
+  int patch[4];
+  int event[4];
+  int expected_incident_side[4];
+  float ior_before[4];
+  float ior_after[4];
+  float ior_opposite[4];
+  int sphere_branch; /* Isolated TT root in signed angular-momentum order. */
+};
+static_assert_align(KernelCoherentCandidate, 16);
 
 struct KernelLightDistribution {
   float totarea;
@@ -1672,6 +1722,11 @@ static_assert(sizeof(KernelPhoton) == 48, "KernelPhoton must remain a compact 48
  * ray is represented by the hit position and a packed propagation direction; together with the
  * intersection coordinates this is sufficient to reconstruct ShaderData for arbitrary Cycles
  * surface shaders when a camera vertex samples a connection. */
+/* Optional BDPT light-side Stokes sidecar, in canonical ray propagation basis. */
+struct KernelPolarizationState {
+  PackedSpectrum i, q, u, v;
+};
+
 struct ccl_align(16) KernelBDPTVertex {
   packed_float3 P;
   PackedSpectrum throughput;

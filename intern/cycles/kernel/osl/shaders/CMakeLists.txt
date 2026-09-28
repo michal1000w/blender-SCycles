@@ -38,6 +38,7 @@ set(SRC_OSL
   node_geometry.osl
   node_get_vector_component.osl
   node_glass_bsdf.osl
+  node_diffraction_smooth_bsdf.osl
   node_glossy_bsdf.osl
   node_gradient_texture.osl
   node_hair_info.osl

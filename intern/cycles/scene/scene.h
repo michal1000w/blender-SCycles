@@ -37,6 +37,7 @@ class BackgroundLight;
 class Light;
 class LightManager;
 class LookupTables;
+class DiffractionManager;
 class Geometry;
 class GeometryManager;
 class Object;
@@ -141,6 +142,7 @@ class Scene : public NodeOwner {
   /* data */
   unique_ptr<BVH> bvh;
   unique_ptr<LookupTables> lookup_tables;
+  unique_ptr<DiffractionManager> diffraction_manager;
 
   Camera *camera;
   Camera *dicing_camera;

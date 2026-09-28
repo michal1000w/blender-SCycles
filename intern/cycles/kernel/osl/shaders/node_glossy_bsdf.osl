@@ -13,6 +13,12 @@ shader node_glossy_bsdf(color Color = 0.8,
                         float Rotation = 0.0,
                         normal Normal = N,
                         normal Tangent = 0.0,
+                        float DiffractionWeight = 0.0,
+                        float DiffractionPitch = 1600.0,
+                        float DiffractionDepth = 150.0,
+                        float DiffractionDutyCycle = 0.5,
+                        float DiffractionMediumIOR = 1.0,
+                        int diffraction_albedo_handle = -1,
                         output closure color BSDF = 0)
 {
   /* compute roughness */
@@ -42,10 +48,22 @@ shader node_glossy_bsdf(color Color = 0.8,
     }
   }
 
-  if (distribution == "Multiscatter GGX") {
-    BSDF = base_color * microfacet_multi_ggx_aniso(Normal, T, alpha_x, alpha_y, base_color);
-  }
-  else {
-    BSDF = base_color * microfacet(distribution, Normal, T, alpha_x, alpha_y, 0.0, 0);
+  if (distribution == "multi_ggx")
+    BSDF = base_color *
+           microfacet_multi_ggx_aniso(Normal, T, roughness_u, roughness_v, base_color);
+  else
+    BSDF = base_color * microfacet(distribution, Normal, T, roughness_u, roughness_v, 0.0, 0);
+
+  float grating = clamp(DiffractionWeight, 0.0, 1.0);
+  if (grating > 0.0) {
+    vector grating_T = T;
+    if (abs(aniso) <= 1e-4 && Rotation != 0.0)
+      grating_T = rotate(grating_T, Rotation * M_2PI, point(0.0), Normal);
+    BSDF = (1.0 - grating) * BSDF + grating * base_color *
+           diffraction(Normal, grating_T, roughness_u, roughness_v,
+                       DiffractionPitch, DiffractionDepth, DiffractionDutyCycle, DiffractionMediumIOR,
+                       distribution == "ashikhmin_shirley", "beckmann", distribution == "beckmann",
+                       "albedo_handle_plus_one", diffraction_albedo_handle + 1,
+                       "multiscatter_absorption", color(1.0) - clamp(base_color, 0.0, 1.0));
   }
 }

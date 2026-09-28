@@ -1,0 +1,18 @@
+# Planar face clusters: future connector extension
+
+**Unimplemented planning note.** The tested connector currently treats each marked ideal optical object as one oriented plane. This note describes a bounded extension to multiple planar face clusters in one static faceted mesh; it does not establish support for curved surfaces, nested media, diffraction interfaces, or arbitrary BSDF phase.
+
+The existing sequence solver and completed-path Jones transport already accept different plane normals. The change belongs primarily to patch extraction, finite membership, visibility, and estimator ownership.
+
+- In `intern/cycles/scene/scene.cpp`, replace the one-plane-per-object extraction with coplanar, consistently oriented triangle clusters. Preserve the existing static mesh, geometric flat normal, single validated ideal material and transform requirements. Each cluster receives an enclosing rectangle for conservative geometry and side pruning. Its actual finite shape is the union of its triangles, including holes and concave boundaries.
+- Add explicit triangle-to-patch membership to the device scene. Identify a hit by object and global triangle primitive, using the mesh primitive offset; primitive alone is insufficient for instances with distinct object transforms. Bound storage and patch IDs explicitly. Rebuild membership with geometry offsets, object changes, and coherent scene preparation; free it when the feature is disabled.
+- In `intern/cycles/kernel/light/coherent_specular.h`, replace the unconditional rejection of a hit on the previous object with verification of the declared next patch. Require actual triangle membership at every interface endpoint. Keep primitive self exclusion, outgoing visibility-ray offset, first-blocker testing and target-distance checks. Do not skip an entire object or accept an arbitrary same-object triangle. The visibility offset must continue to leave stationary points and optical lengths unchanged.
+- In `intern/cycles/kernel/light/coherent_history_kernel.h` and the BDPT history append in `intern/cycles/kernel/integrator/bidirectional.h`, map the actual hit primitive to its patch. The current object-to-first-patch lookup would misclassify native paths and remove the wrong estimator class after clustering.
+
+A rectangle is only an enclosing bound. The BVH membership test is required to reject a stationary point in a gap, on an unrelated coplanar face, or on another cluster of the same object. Cluster-edge tests must distinguish legitimate neighboring triangles from different faces. Grouping policy must avoid duplicate ownership of one physical triangle/path.
+
+Glass faces also require declared medium connectivity. Consistent outward orientation can describe a simple closed uniform glass volume, but grouping planes alone does not prove a closed manifold or resolve overlapping/nested volumes. Existing air/interior-IOR transitions must remain tied to physical interface sides; equal numerical IORs are not a complete volume identity model.
+
+The existing four-event, 64-candidate, 256-search-state and six-bit patch limits remain real limits. A six-face glass mesh can exceed the candidate budget even at a modest depth. Do not truncate its path inventory silently or claim arbitrary polyhedra without a separately validated pruning/enumeration change.
+
+First bounded regression fixtures should be a two-face folded ideal mirror and the existing parallel slab faces joined into one object. Compare their independent references against the equivalent separate-object fixtures; include same-object transitions, face edges, a gap/hole rejection, and native BDPT ownership equivalence. A convex prism is a later fixture only if its complete declared inventory fits the existing limits.

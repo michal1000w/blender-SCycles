@@ -71,6 +71,22 @@ void BlenderSync::sync_light(BObjectInfo &b_ob_info, Light *light)
 
   light->set_max_bounces(get_int(clight, "max_bounces"));
 
+  /* Blender exposes physical units; Cycles transports distances in scene units.
+   * A zero unit scale is Blender's unitless default (one scene unit = one meter). */
+  const float unit_scale = b_scene->unit.scale_length > 0.0f ?
+                               b_scene->unit.scale_length : 1.0f;
+  light->set_coherence_group(use_diffraction_effects_ && use_coherent_interference_ ? get_int(clight, "coherence_group") : 0);
+  light->set_coherence_phase(get_float(clight, "coherence_phase"));
+  /* Preserve the conversion residual for long optical path differences.
+   * The RNA value itself is a float; do not round its nm-to-scene conversion
+   * a second time before splitting the device wavelength. */
+  const double wavelength_scene = double(get_float(clight, "coherence_wavelength_nm")) *
+                                  1e-9 / double(unit_scale);
+  const float wavelength_high = float(wavelength_scene);
+  light->set_coherence_wavelength(wavelength_high);
+  light->set_coherence_wavelength_low(float(wavelength_scene - double(wavelength_high)));
+  light->set_coherence_length(get_float(clight, "coherence_length_m") / unit_scale);
+
   if (AreaLight *area_light = dynamic_cast<AreaLight *>(light)) {
     area_light->set_is_portal(get_boolean(clight, "is_portal"));
   }

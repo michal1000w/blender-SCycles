@@ -10,6 +10,7 @@
 #include "kernel/geom/gsplat.h"
 #include "kernel/geom/motion_point.h"
 #include "kernel/geom/object.h"
+#include "kernel/geom/point_intersect_policy.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -23,7 +24,8 @@ ccl_device_forceinline bool point_intersect_test(const float4 point,
                                                  const float3 ray_D,
                                                  const float ray_tmin,
                                                  const float ray_tmax,
-                                                 ccl_private float *t)
+                                                 ccl_private float *t,
+                                                 const bool two_sided = false)
 {
   const float3 center = make_float3(point);
   const float radius = point.w;
@@ -43,25 +45,18 @@ ccl_device_forceinline bool point_intersect_test(const float4 point,
   const float t_front = projC0 - td;
   const bool valid_front = (ray_tmin <= t_front) & (t_front <= ray_tmax);
 
-  if constexpr (use_backface_culling == false) {
-    const float t_back = projC0 + td;
-    const bool valid_back = (ray_tmin <= t_back) & (t_back <= ray_tmax);
-
-    /* check if there is a first hit */
-    const bool valid_first = valid_front | valid_back;
-    if (!valid_first) {
-      return false;
-    }
-
-    *t = (valid_front) ? t_front : t_back;
+  if (valid_front) {
+    *t = t_front;
     return true;
   }
-
-  if (!valid_front) {
-    return false;
+  if (two_sided) {
+    const float t_back = projC0 + td;
+    if ((ray_tmin <= t_back) && (t_back <= ray_tmax)) {
+      *t = t_back;
+      return true;
+    }
   }
-  *t = t_front;
-  return true;
+  return false;
 }
 
 ccl_device_forceinline bool point_intersect(KernelGlobals kg,
@@ -80,7 +75,10 @@ ccl_device_forceinline bool point_intersect(KernelGlobals kg,
                            motion_point(kg, object, prim, time) :
                            kernel_data_fetch(points, position_offset + prim);
 
-  if (!point_intersect_test(point, ray_P, ray_D, ray_tmin, ray_tmax, &isect->t)) {
+  const bool two_sided = kernel_data.integrator.coherent_specular_enabled &&
+                         point_coherent_glass_two_sided(
+                             true, kernel_data_fetch(object_flag, object), type);
+  if (!point_intersect_test(point, ray_P, ray_D, ray_tmin, ray_tmax, &isect->t, two_sided)) {
     return false;
   }
 

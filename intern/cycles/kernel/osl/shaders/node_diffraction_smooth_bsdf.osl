@@ -1,0 +1,28 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ * SPDX-License-Identifier: Apache-2.0 */
+#include "stdcycles.h"
+shader node_diffraction_smooth_bsdf(color Color = 1,
+                                   normal Normal = N,
+                                   vector Tangent = dPdu,
+                                   int cache_handle = -1,
+                                   float pitch = 200,
+                                   float upper_index = 1,
+                                   float lower_index = 1.5,
+                                   float depth = 0, float duty = 0.5,
+                                   float phase_contrast = 0,
+                                   float reflection_budget = 0,
+                                   float transmission_budget = 0,
+                                   float ridge_extinction = 0,
+                                   int ridge_table = -1,
+                                   int groove_table = -1,
+                                   int substrate_table = -1,
+                                   output closure color BSDF = 0)
+{
+  if (cache_handle == -2)
+    BSDF = max(Color, color(0)) * diffraction_fast(Normal, Tangent, pitch, upper_index,
+        lower_index, depth, duty, phase_contrast, reflection_budget,
+        transmission_budget, ridge_extinction, ridge_table, groove_table, substrate_table);
+  else
+    BSDF = max(Color, color(0)) * diffraction_smooth(
+        Normal, Tangent, cache_handle, pitch, upper_index, lower_index);
+}

@@ -11,6 +11,8 @@ set(INC_SYS
 )
 
 set(SRC_KERNEL_DEVICE_METAL
+  diffraction_albedo.metal
+  diffraction_thin_sheet_albedo.metal
   kernel.metal
 )
 

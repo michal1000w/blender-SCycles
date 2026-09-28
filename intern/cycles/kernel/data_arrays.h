@@ -64,6 +64,9 @@ KERNEL_DATA_ARRAY(PackedSphericalHarmonicsRest, attributes_spherical_harmonics_r
 /* lights */
 KERNEL_DATA_ARRAY(KernelLightDistribution, light_distribution)
 KERNEL_DATA_ARRAY(KernelLight, lights)
+KERNEL_DATA_ARRAY(KernelCoherentPatch, coherent_patches)
+KERNEL_DATA_ARRAY(int, coherent_patch_primitives)
+KERNEL_DATA_ARRAY(KernelCoherentCandidate, coherent_candidates)
 KERNEL_DATA_ARRAY(float2, light_background_marginal_cdf)
 KERNEL_DATA_ARRAY(float2, light_background_conditional_cdf)
 
@@ -82,6 +85,24 @@ KERNEL_DATA_ARRAY(uint, svm_nodes)
 KERNEL_DATA_ARRAY(KernelShader, shaders)
 
 /* lookup tables */
+KERNEL_DATA_ARRAY(int4, diffraction_nodes)
+KERNEL_DATA_ARRAY(int4, diffraction_layout)
+KERNEL_DATA_ARRAY(float4, diffraction_bounds)
+KERNEL_DATA_ARRAY(int2, diffraction_ports)
+KERNEL_DATA_ARRAY(int, diffraction_active)
+KERNEL_DATA_ARRAY(float2, diffraction_matrices)
+KERNEL_DATA_ARRAY(int4, diffraction_descriptors)
+KERNEL_DATA_ARRAY(float4, diffraction_domains)
+KERNEL_DATA_ARRAY(float, diffraction_albedo_values)
+KERNEL_DATA_ARRAY(float, diffraction_albedo_averages)
+KERNEL_DATA_ARRAY(int4, diffraction_albedo_descriptors)
+KERNEL_DATA_ARRAY(float4, diffraction_albedo_domains)
+KERNEL_DATA_ARRAY(float, diffraction_two_sided_values)
+KERNEL_DATA_ARRAY(float, diffraction_two_sided_integrals)
+KERNEL_DATA_ARRAY(float, diffraction_two_sided_cross)
+KERNEL_DATA_ARRAY(int4, diffraction_two_sided_descriptors)
+KERNEL_DATA_ARRAY(float4, diffraction_two_sided_domains)
+
 KERNEL_DATA_ARRAY(float, lookup_table)
 
 /* tabulated Sobol sample pattern */

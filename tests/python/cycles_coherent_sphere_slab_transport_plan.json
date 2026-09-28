@@ -1,0 +1,9 @@
+{
+  "scope": "Four fresh v36 phase-0 physical comparisons; same editable fixtures and independent arrays, PT and PT with guiding; no production changes",
+  "jobs": [
+    {"label": "sphere_pt", "fixtures": "build/tests/python/cycles_coherent_sphere_acceptance_v33_v2", "case": "phase_0", "folder": "sphere_pt", "scene_budgets": true, "transport": "pt"},
+    {"label": "sphere_pt_guiding", "fixtures": "build/tests/python/cycles_coherent_sphere_acceptance_v33_v2", "case": "phase_0", "folder": "sphere_pt_guiding", "scene_budgets": true, "transport": "pt-guiding"},
+    {"label": "slab_joined_pt", "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v4/slab_joined", "case": "phase_0", "folder": "slab_joined_pt", "scene_budgets": true, "transport": "pt"},
+    {"label": "slab_joined_pt_guiding", "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v4/slab_joined", "case": "phase_0", "folder": "slab_joined_pt_guiding", "scene_budgets": true, "transport": "pt-guiding"}
+  ]
+}

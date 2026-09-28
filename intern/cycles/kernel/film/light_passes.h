@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/film/write.h"
+#include "kernel/light/coherent_passes.h"
 
 #include "kernel/integrator/shadow_catcher.h"
 #ifdef __KERNEL_METAL__
@@ -344,6 +345,43 @@ ccl_device_forceinline void film_write_shadow_catcher_bounce_data(
  */
 
 /* Write combined pass. */
+ccl_device_inline void film_write_coherent_surface_light_passes(
+    KernelGlobals kg,
+    ConstIntegratorState state,
+    const Spectrum contribution,
+    const Spectrum primary_direct,
+    ccl_global float *ccl_restrict buffer)
+{
+#ifdef __PASSES__
+  if (!(kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES) ||
+      !(kernel_data.film.light_pass_flag & PASS_ANY))
+  {
+    return;
+  }
+  const int bounce = INTEGRATOR_STATE(state, path, bounce);
+  const Spectrum diffuse_weight = bounce > 0 ?
+      Spectrum(INTEGRATOR_STATE(state, path, pass_diffuse_weight)) : zero_spectrum();
+  const Spectrum glossy_weight = bounce > 0 ?
+      Spectrum(INTEGRATOR_STATE(state, path, pass_glossy_weight)) : zero_spectrum();
+  const CoherentSurfaceLightPasses passes = coherent_pass_surface_split(
+      contribution, primary_direct, bounce, diffuse_weight, glossy_weight);
+  /* These are signed radiance allocations. Do not clamp individual passes or
+   * train guiding with them. Combined is written independently by the caller. */
+  if (kernel_data.film.pass_diffuse_direct != PASS_UNUSED)
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_diffuse_direct, passes.diffuse_direct);
+  if (kernel_data.film.pass_diffuse_indirect != PASS_UNUSED)
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_diffuse_indirect, passes.diffuse_indirect);
+  if (kernel_data.film.pass_glossy_direct != PASS_UNUSED)
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_glossy_direct, passes.glossy_direct);
+  if (kernel_data.film.pass_glossy_indirect != PASS_UNUSED)
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_glossy_indirect, passes.glossy_indirect);
+  if (kernel_data.film.pass_transmission_direct != PASS_UNUSED)
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_transmission_direct, passes.transmission_direct);
+  if (kernel_data.film.pass_transmission_indirect != PASS_UNUSED)
+    film_write_pass_spectrum(buffer + kernel_data.film.pass_transmission_indirect, passes.transmission_indirect);
+#endif
+}
+
 ccl_device_inline void film_write_combined_pass(KernelGlobals kg,
                                                 const PathRayVisibility path_visibility,
                                                 const uint32_t path_flag,
@@ -676,6 +714,9 @@ ccl_device_inline void film_write_volume_emission(KernelGlobals kg,
                                                   const int lightgroup = LIGHTGROUP_NONE)
 {
   Spectrum contribution = L;
+  if (kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) {
+    contribution *= Spectrum(INTEGRATOR_STATE(state, path, polarization_i));
+  }
 #ifdef __KERNEL_METAL__
   guiding_gpu_record_radiance(state, contribution);
 #endif

@@ -396,7 +396,7 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
 
 #ifdef __MNEE__
   /* Path culling logic for MNEE (removes fireflies at the cost of bias) */
-  if (kernel_data.integrator.use_caustics) {
+  if (kernel_data.integrator.use_caustics && !(path_flag & PATH_RAY_TRANSPARENT)) {
     /* The following firefly removal mechanism works by culling light connections when
      * a ray comes from a caustic caster directly after bouncing off a different caustic
      * receiver */
@@ -411,11 +411,24 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
     const bool has_receiver_ancestor = INTEGRATOR_STATE(state, path, mnee) &
                                        PATH_MNEE_RECEIVER_ANCESTOR;
     INTEGRATOR_STATE_WRITE(state, path, mnee) &= ~PATH_MNEE_CULL_LIGHT_CONNECTION;
-    if (from_caustic_caster && has_receiver_ancestor) {
+    const bool caster_transmission = from_caustic_caster &&
+                                     (path_visibility & PATH_RAY_VISIBILITY_TRANSMIT);
+    if (caster_transmission && has_receiver_ancestor) {
       INTEGRATOR_STATE_WRITE(state, path, mnee) |= PATH_MNEE_CULL_LIGHT_CONNECTION;
     }
-    if (from_caustic_receiver) {
+    /* The manifold replacement only contains a reflective receiver followed by
+     * refractions through casters. A reflection (including internal reflection
+     * inside a cover) or scattering from another object ends that chain. */
+    /* A singular receiver (including discrete diffraction orders) has no
+     * continuous BSDF evaluation for the manifold light-connection strategy.
+     * Keep its sampled paths: there is no MNEE contribution to replace them. */
+    if (from_caustic_receiver && (path_flag & PATH_RAY_REFLECT) &&
+        !(path_flag & PATH_RAY_SINGULAR))
+    {
       INTEGRATOR_STATE_WRITE(state, path, mnee) |= PATH_MNEE_RECEIVER_ANCESTOR;
+    }
+    else if (!caster_transmission) {
+      INTEGRATOR_STATE_WRITE(state, path, mnee) &= ~PATH_MNEE_RECEIVER_ANCESTOR;
     }
   }
 #endif /* __MNEE__ */

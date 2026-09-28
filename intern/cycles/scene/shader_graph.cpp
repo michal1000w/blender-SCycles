@@ -1201,6 +1201,7 @@ int ShaderGraph::get_num_closures()
   int num_volume_closures = 0;
   for (ShaderNode *node : nodes) {
     const ClosureType closure_type = node->get_closure_type();
+    num_closures += node->get_extra_closure_count();
     if (closure_type == CLOSURE_NONE_ID) {
       continue;
     }

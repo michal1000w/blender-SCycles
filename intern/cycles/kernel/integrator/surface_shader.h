@@ -13,6 +13,7 @@
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/state_util.h"
+#include "kernel/light/coherent_detector.h"
 #include "kernel/sample/guiding_resampling.h"
 
 #ifdef __SVM__
@@ -123,7 +124,8 @@ ccl_device_inline void surface_shader_prepare_guiding(KernelGlobals kg,
         bssrdf_sampling_fraction += sweight;
       }
 
-      if (CLOSURE_IS_BSDF_TRANSPARENT(sc->type) || CLOSURE_IS_BSDF_TRANSMISSION(sc->type)) {
+      if (CLOSURE_IS_BSDF_TRANSPARENT(sc->type) || CLOSURE_IS_BSDF_TRANSMISSION(sc->type) ||
+          bsdf_diffraction_dielectric_has_transmission(sc)) {
         fully_opaque = false;
       }
     }
@@ -181,6 +183,10 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
                                                        ccl_private ShaderData *sd,
                                                        const PathRayVisibility path_visibility)
 {
+  if (kernel_data.integrator.coherent_specular_enabled) {
+    coherent_detector_prepare(sd);
+  }
+
   /* Filter out closures. */
   if (kernel_data.integrator.filter_closures) {
     const int filter_closures = kernel_data.integrator.filter_closures;
@@ -200,6 +206,13 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
         const bool filter_glossy = (filter_closures & FILTER_CLOSURE_GLOSSY);
         const bool filter_transmission = (filter_closures & FILTER_CLOSURE_TRANSMISSION);
         const bool filter_glass = filter_glossy && filter_transmission;
+        if (sc->type==CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID ||
+            sc->type==CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID ||
+            sc->type==CLOSURE_BSDF_DIFFRACTION_STRAIGHT_ID ||
+            sc->type==CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID) {
+          has_bsdf_closure |= bsdf_diffraction_dielectric_filter(sc,filter_glossy,filter_transmission);
+          continue;
+        }
         if ((CLOSURE_IS_BSDF_DIFFUSE(sc->type) && filter_diffuse) ||
             (CLOSURE_IS_BSDF_GLOSSY(sc->type) && filter_glossy) ||
             (CLOSURE_IS_BSDF_TRANSMISSION(sc->type) && filter_transmission) ||
@@ -252,7 +265,21 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
    *
    * Blurring of bsdf after bounces, for rays that have a small likelihood
    * of following this particular path (diffuse, rough glossy) */
-  if (kernel_data.integrator.filter_glossy != FLT_MAX
+  bool coherent_ideal_patch = false;
+  if (kernel_data.integrator.coherent_specular_enabled) {
+    for (int patch_index = 0; patch_index < kernel_data.integrator.coherent_patch_count;
+         patch_index++)
+    {
+      if (kernel_data_fetch(coherent_patches, patch_index).object == sd->object) {
+        coherent_ideal_patch = true;
+        break;
+      }
+    }
+  }
+  /* Declared coherent interfaces are ideal delta events. Blurring them after
+   * a diffuse camera bounce would create an ordinary NEE path that the
+   * deterministic source-to-detector partition does not own. */
+  if (!coherent_ideal_patch && kernel_data.integrator.filter_glossy != FLT_MAX
 #ifdef __MNEE__
       && !(INTEGRATOR_STATE(state, path, mnee) & PATH_MNEE_VALID)
 #endif
@@ -334,6 +361,43 @@ ccl_device_forceinline bool _surface_shader_exclude(ClosureType type,
   return false;
 }
 
+ccl_device_inline bool surface_shader_has_physical_grating(const ccl_private ShaderData *sd)
+{
+  for (int i = 0; i < sd->num_closure; i++) {
+    if (bsdf_is_diffraction_conductor(sd->closure[i].type) ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_STRAIGHT_ID ||
+        sd->closure[i].type == CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID) return true;
+  }
+  return false;
+}
+
+/* Discrete mixture probability for an already sampled atom. Continuous
+ * closures enter the selection denominator but have zero mass at this atom. */
+ccl_device_inline float surface_shader_bsdf_eval_delta(KernelGlobals kg,
+                                                       ccl_private ShaderData *sd,
+                                                       const float3 wo,
+                                                       ccl_private BsdfEval *result_eval)
+{
+  bsdf_eval_init(result_eval, zero_spectrum());
+  float weight = 0.0f, mass = 0.0f;
+  for (int i = 0; i < sd->num_closure; i++) {
+    ccl_private const ShaderClosure *sc = &sd->closure[i];
+    if (!CLOSURE_IS_BSDF_OR_BSSRDF(sc->type)) continue;
+    weight += sc->sample_weight;
+    if (!CLOSURE_IS_BSDF(sc->type)) continue;
+    float pdf;
+    const Spectrum eval = bsdf_eval_delta(kg, sd, sc, wo, &pdf);
+    mass += sc->sample_weight * pdf;
+    if (pdf > 0.0f) bsdf_eval_accum(result_eval, sc, wo, eval * sc->weight);
+  }
+  return weight > 0.0f ? mass / weight : 0.0f;
+}
+
 ccl_device_inline float _surface_shader_bsdf_eval_mis(KernelGlobals kg,
                                                       ccl_private ShaderData *sd,
                                                       const float3 wo,
@@ -347,6 +411,13 @@ ccl_device_inline float _surface_shader_bsdf_eval_mis(KernelGlobals kg,
 {
   /* This is the veach one-sample model with balance heuristic,
    * some PDF factors drop out when using balance heuristic weighting. */
+  const bool sampled_grating_atom = skip_sc &&
+      (skip_sc->type == CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID ||
+       (bsdf_microfacet_has_delta(skip_sc) && surface_shader_has_physical_grating(sd)) ||
+       ((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) &&
+        (bsdf_microfacet_has_delta(skip_sc) ||
+         bsdf_microfacet_is_matched_transmission_atom(skip_sc,wo) ||
+         skip_sc->type == CLOSURE_BSDF_TRANSPARENT_ID)));
   for (int i = 0; i < sd->num_closure; i++) {
     const ccl_private ShaderClosure *sc = &sd->closure[i];
 
@@ -357,7 +428,9 @@ ccl_device_inline float _surface_shader_bsdf_eval_mis(KernelGlobals kg,
     if (CLOSURE_IS_BSDF_OR_BSSRDF(sc->type)) {
       if (CLOSURE_IS_BSDF(sc->type)) {
         float bsdf_pdf = 0.0f;
-        const Spectrum eval = bsdf_eval(kg, sd, sc, wo, &bsdf_pdf);
+        const Spectrum eval = sampled_grating_atom ?
+                                  bsdf_eval_delta(kg, sd, sc, wo, &bsdf_pdf) :
+                                  bsdf_eval(kg, sd, sc, wo, &bsdf_pdf);
 
         if (bsdf_pdf != 0.0f) {
           if (!_surface_shader_exclude(sc->type, light_shader_flags)) {
@@ -457,6 +530,15 @@ ccl_device_inline bool surface_shader_gpu_guiding_continuous(const ccl_private S
   }
   if (CLOSURE_IS_BSDF_MICROFACET(sc->type)) {
     return bsdf_microfacet_eval_flag((const ccl_private MicrofacetBsdf *)sc) != 0;
+  }
+  if ((sc->type == CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID || sc->type == CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID)) return !bsdf_microfacet_has_delta(sc);
+  if (bsdf_is_diffraction_conductor(sc->type)) return !bsdf_microfacet_has_delta(sc);
+  if (sc->type == CLOSURE_BSDF_DIFFRACTION_ID) {
+    return (bsdf_diffraction_label((const ccl_private DiffractionBsdf *)sc) & LABEL_SINGULAR) == 0;
+  }
+  if (sc->type == CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID ||
+      sc->type == CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID) {
+    return !bsdf_microfacet_has_delta(sc);
   }
   return true;
 }
@@ -1870,3 +1952,5 @@ ccl_device void surface_shader_eval(KernelGlobals kg,
 }
 
 CCL_NAMESPACE_END
+
+#include "kernel/integrator/polarization_surface.h"

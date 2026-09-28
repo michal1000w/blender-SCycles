@@ -38,6 +38,9 @@ class Object : public Node {
  public:
   NODE_DECLARE
 
+  enum CoherentInterface { COHERENT_INTERFACE_OFF = 0, COHERENT_INTERFACE_MIRROR = 1,
+                           COHERENT_INTERFACE_GLASS = 2, COHERENT_INTERFACE_DETECTOR = 3 };
+
   NODE_SOCKET_API(Geometry *, geometry)
   /* Use base API because we need custom setter for tfm. */
   NODE_SOCKET_API_BASE(Transform, tfm, "tfm")
@@ -58,6 +61,7 @@ class Object : public Node {
 
   NODE_SOCKET_API(bool, is_caustics_caster)
   NODE_SOCKET_API(bool, is_caustics_receiver)
+  NODE_SOCKET_API(CoherentInterface, coherent_interface)
 
   NODE_SOCKET_API(bool, is_bake_target)
 

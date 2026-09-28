@@ -113,8 +113,8 @@ ccl_device_inline void triangle_vertices(KernelGlobals kg,
 
 ccl_device_inline void triangle_vertices_and_normals(KernelGlobals kg,
                                                      ccl_private const ShaderData *sd,
-                                                     float3 P[3],
-                                                     float3 N[3])
+                                                     ccl_private float3 P[3],
+                                                     ccl_private float3 N[3])
 {
   const int position_offset = kernel_data_fetch(objects, sd->object).position_offset;
   const uint3 tri_vindex = kernel_data_fetch(tri_vindex, sd->prim);

@@ -86,6 +86,11 @@ CCL_NAMESPACE_BEGIN
 #define KERNEL_FEATURE_BDPT (1ULL << 32ULL)
 #define KERNEL_FEATURE_PHOTON_MAPPING (1ULL << 33ULL)
 
+/* Joint direct-source field evaluation; absent for ordinary radiometric scenes. */
+#define KERNEL_FEATURE_COHERENT_DIRECT (1ULL << 34ULL)
+#define KERNEL_FEATURE_COHERENT_SPECULAR (1ULL << 35ULL)
+#define KERNEL_FEATURE_POLARIZATION (1ULL << 36ULL)
+
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
 #define KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT \

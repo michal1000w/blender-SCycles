@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Positive-relief material bypass, conductor fallback and direct-light resync CPU checks."""
+import bpy,sys,json
+from pathlib import Path
+import numpy as np
+from mathutils import Vector
+
+def main():
+ a=sys.argv[sys.argv.index('--')+1:];bpy.ops.wm.open_mainfile(filepath=str(Path(a[0]).resolve()));out=Path(a[1]).resolve();out.mkdir(parents=True,exist_ok=False);s=bpy.context.scene;s.cycles.device='CPU';s.cycles.samples=16;s.cycles.seed=19;s.cycles.use_bidirectional_path_tracing=False;s.cycles.use_guiding=False;s.cycles.use_adaptive_sampling=False;s.cycles.use_denoising=False;s.render.resolution_x=s.render.resolution_y=8;s.render.image_settings.file_format='OPEN_EXR';s.render.image_settings.color_depth='32';checks=[]
+ def render(name):
+  s.render.filepath=str(out/(name+'.exr'));bpy.ops.render.render(write_still=True);im=bpy.data.images.load(s.render.filepath,check_existing=False);data=np.array(im.pixels[:]).reshape(-1,4)[:,:3].copy();bpy.data.images.remove(im);assert np.isfinite(data).all();return data
+ def record(entry):checks.append(entry);(out/'report.json').write_text(json.dumps({'complete':False,'checks':checks},indent=2))
+ glass=next(n for m in bpy.data.materials if m.use_nodes for n in m.node_tree.nodes if n.bl_idname=='ShaderNodeBsdfGlass' and n.inputs['Polarizer'].default_value);tree=glass.id_data;output=next(n for n in tree.nodes if n.bl_idname=='ShaderNodeOutputMaterial');value=tree.nodes.new('ShaderNodeValue');value.outputs[0].default_value=.73;link=tree.links.new(value.outputs[0],glass.inputs['Diffraction Weight']);glass.inputs['Diffraction Depth'].default_value=150;glass.inputs['IOR'].default_value=1.5;s.cycles.use_material_diffraction=False
+ disabled=render('positive_linked_glass_material_off');assert glass.inputs['Diffraction Weight'].is_linked and glass.inputs['Diffraction Depth'].default_value==150;tree.links.remove(link);glass.inputs['Diffraction Weight'].default_value=0;s.cycles.use_material_diffraction=True;zero=render('glass_manual_zero_weight');err=float(np.max(np.abs(disabled-zero)));assert err<1e-6;record({'case':'positive_depth_linked_Glass_material_off_vs_manual_zero','maximum_difference':err,'passed':True})
+ s.cycles.use_diffraction_effects=False;diff=tree.nodes.new('ShaderNodeBsdfDiffraction');diff.quality='REALISTIC';diff.depth=1.2e-7;diff.substrate_extinction=3.;diff.substrate_ior=1.5;diff.inputs['Color'].default_value=(1,1,1,1);tree.links.new(diff.outputs[0],output.inputs['Surface']);disabled=render('dedicated_absorbing_diffraction_off');metal=tree.nodes.new('ShaderNodeBsdfMetallic');metal.fresnel_type='PHYSICAL_CONDUCTOR';metal.inputs['IOR'].default_value=(1.5,)*3;metal.inputs['Extinction'].default_value=(3.,)*3;metal.inputs['Roughness'].default_value=0;tree.links.new(metal.outputs[0],output.inputs['Surface']);native=render('ordinary_physical_metallic');err=float(np.max(np.abs(disabled-native)));assert err<1e-6 and disabled.mean()>0;record({'case':'dedicated_absorbing_master_off_vs_native_metallic','maximum_difference':err,'mean':float(disabled.mean()),'passed':True})
+ for o in list(bpy.data.objects):bpy.data.objects.remove(o,do_unlink=True)
+ s.world.use_nodes=True;s.world.node_tree.nodes['Background'].inputs['Strength'].default_value=0;mat=bpy.data.materials.new('White direct receiver');mat.use_nodes=True;mat.node_tree.nodes.clear();node=mat.node_tree.nodes.new('ShaderNodeBsdfDiffuse');node.inputs['Color'].default_value=(1,1,1,1);output=mat.node_tree.nodes.new('ShaderNodeOutputMaterial');mat.node_tree.links.new(node.outputs[0],output.inputs['Surface']);bpy.ops.mesh.primitive_plane_add(size=2);bpy.context.object.data.materials.append(mat)
+ lamps=[]
+ for i in range(2):
+  bpy.ops.object.light_add(type='POINT',location=(0,0,1));l=bpy.context.object;l.data.energy=.001;l.data.shadow_soft_size=0;l.data.cycles.coherence_group=1;l.data.cycles.coherence_phase=0;l.data.cycles.coherence_wavelength_nm=550;l.data.cycles.coherence_length_m=1;lamps.append(l)
+ bpy.ops.object.camera_add(location=(0,0,1));camera=bpy.context.object;camera.rotation_euler=Vector((0,0,-1)).to_track_quat('-Z','Y').to_euler();camera.data.type='ORTHO';camera.data.ortho_scale=.01;s.camera=camera;s.cycles.use_coherent_specular_connections=False;s.cycles.use_diffraction_effects=True;s.cycles.use_coherent_interference=True;on=render('direct_coherence_on');s.cycles.use_coherent_interference=False;off=render('direct_coherence_off');s.cycles.use_coherent_interference=True;restored=render('direct_coherence_restored');ratio=float(on.mean()/off.mean());err=float(np.max(np.abs(restored-on)));assert abs(ratio-2)<1e-5 and err<1e-8 and all(l.data.cycles.coherence_group==1 for l in lamps),(ratio,err);record({'case':'direct_group_upload_ON_OFF_ON','on_off_mean_ratio':ratio,'restore_max_difference':err,'authored_groups_preserved':True,'passed':True})
+ (out/'report.json').write_text(json.dumps({'passed':True,'complete':True,'backend':'CPU SVM','scope':'Bounded integration checks, no benchmark or full coherent-specular CPU claim','checks':checks},indent=2)+'\n')
+
+if __name__=='__main__':main()

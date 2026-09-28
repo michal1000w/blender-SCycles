@@ -288,8 +288,11 @@ template<int Exponent> static void check_geometric_mis_partition(const bool with
         // incident-direction-conditioned sampling weights in each direction.
         const float light_mix = trial % 3 ? .5f * uniform(rng) : 1.0f;
         const float camera_mix = trial % 3 ? .5f * uniform(rng) : 1.0f;
-        light_pdf[i] = delta[i] ? 1.0f : (light_mix * next[i] + (1 - light_mix) * .5f) * M_1_PI_F;
-        camera_pdf[i] = delta[i] ? 1.0f :
+        // Retain deterministic unit-mass events and exercise asymmetric
+        // discrete branches, such as absorption-conditioned grating orders.
+        light_pdf[i] = delta[i] ? (trial % 8 ? uniform(rng) : 1.0f) :
+                                (light_mix * next[i] + (1 - light_mix) * .5f) * M_1_PI_F;
+        camera_pdf[i] = delta[i] ? (trial % 8 ? uniform(rng) : 1.0f) :
                                    (camera_mix * prev[i] + (1 - camera_mix) * .5f) * M_1_PI_F;
       }
       if (with_media) {
@@ -364,8 +367,10 @@ template<int Exponent> static void check_geometric_mis_partition(const bool with
         light_cm[i] = W::from_encoded(cm.encoded());
         light_vc[i] = W::from_encoded(vc.encoded());
         if (delta[i]) {
-          cm = W();
-          vc *= next[i];
+          const float2 scattered = W::Log::scatter_delta(
+              make_float2(cm.encoded(), vc.encoded()), next[i], light_pdf[i], camera_pdf[i]);
+          cm = W::from_encoded(scattered.x);
+          vc = W::from_encoded(scattered.y);
           continue;
         }
         const float2 scattered = W::Log::scatter(make_float2(cm.encoded(), vc.encoded()),
@@ -384,8 +389,10 @@ template<int Exponent> static void check_geometric_mis_partition(const bool with
         camera_cm[i] = W::from_encoded(cm.encoded());
         camera_vc[i] = W::from_encoded(vc.encoded());
         if (i && delta[i]) {
-          cm = W();
-          vc *= prev[i];
+          const float2 scattered = W::Log::scatter_delta(
+              make_float2(cm.encoded(), vc.encoded()), prev[i], camera_pdf[i], light_pdf[i]);
+          cm = W::from_encoded(scattered.x);
+          vc = W::from_encoded(scattered.y);
         }
         else if (i) {
           const float2 scattered = W::Log::scatter(

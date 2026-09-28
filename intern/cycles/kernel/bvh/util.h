@@ -7,6 +7,7 @@
 #include "kernel/globals.h"
 #include "kernel/integrator/state.h"
 #include "kernel/types.h"
+#include "kernel/geom/point_intersect_policy.h"
 #include "util/types_rgbe.h"
 
 CCL_NAMESPACE_BEGIN
@@ -254,6 +255,23 @@ ccl_device_inline bool intersection_skip_self_shadow(const ccl_ray_data RaySelfP
 {
   return ((self.prim == prim) && (self.object == object)) ||
          ((self.light_prim == prim) && (self.light_object == object));
+}
+
+ccl_device_inline bool intersection_skip_self_shadow_coherent_point(
+    KernelGlobals kg,
+    const ccl_ray_data RaySelfPrimitives &self,
+    const int object,
+    const int prim,
+    const int type)
+{
+  if (!kernel_data.integrator.coherent_specular_enabled || type != PRIMITIVE_POINT) {
+    return intersection_skip_self_shadow(self, object, prim);
+  }
+  const bool two_sided = point_coherent_glass_two_sided(
+      true, kernel_data_fetch(object_flag, object), type);
+  return point_coherent_skip_self(two_sided,
+                                 self.prim == prim && self.object == object,
+                                 self.light_prim == prim && self.light_object == object);
 }
 
 ccl_device_inline bool intersection_skip_self_local(const ccl_ray_data RaySelfPrimitives &self,

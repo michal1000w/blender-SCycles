@@ -83,6 +83,10 @@ trap on_error ERR
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    -j[0-9]*)
+      JOBS="${1#-j}"
+      shift
+      ;;
     -j|--jobs)
       [ "$#" -ge 2 ] || die "$1 requires a value"
       JOBS="$2"
@@ -364,8 +368,21 @@ verify_installed_cycles_sources() {
     kernel/integrator/state.h
     kernel/integrator/subsurface.h
     kernel/integrator/surface_shader.h
+    kernel/svm/closure.h
+    kernel/svm/node_types.h
+    kernel/closure/bsdf_microfacet.h
     kernel/types.h
   )
+
+  # Metal compiles these installed headers at runtime; a current executable
+  # paired with old transport headers is not a complete installation.
+  for source_file in "${ROOT_DIR}"/intern/cycles/kernel/light/coherent*.h \
+                     "${ROOT_DIR}"/intern/cycles/kernel/light/polarization*.h \
+                     "${ROOT_DIR}"/intern/cycles/kernel/integrator/polarization*.h \
+                     "${ROOT_DIR}"/intern/cycles/kernel/closure/*diffraction*.h; do
+    [ -f "$source_file" ] || continue
+    runtime_sources+=("${source_file#"${ROOT_DIR}/intern/cycles/"}")
+  done
 
   for relative_path in "${runtime_sources[@]}"; do
     source_file="${ROOT_DIR}/intern/cycles/${relative_path}"
@@ -387,6 +404,13 @@ verify_installed_cycles_sources() {
     cmp -s "$source_file" "$installed_file" || die \
       "Installed Cycles add-on file is stale: ${relative_path}"
   done
+
+  source_file="${BUILD_DIR}/intern/cycles/kernel/osl/shaders/node_glass_bsdf.oso"
+  if [ -f "$source_file" ]; then
+    installed_file="${installed_addon}/shader/node_glass_bsdf.oso"
+    cmp -s "$source_file" "$installed_file" || die \
+      "Installed Glass OSL shader is missing or stale."
+  fi
 }
 
 launch_fresh_app() {

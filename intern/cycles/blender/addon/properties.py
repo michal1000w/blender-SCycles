@@ -707,6 +707,59 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
+    use_diffraction_effects: BoolProperty(
+        name="Enable Diffraction Effects",
+        description="Enable material diffraction, light coherence and Glass polarization. Disable to compile native shaders and ordinary lighting while retaining all node and light settings",
+        default=True,
+    )
+    use_coherent_interference: BoolProperty(
+        name="Coherent Interference",
+        description="Enable authored light coherence groups and coherent connections. Disable for ordinary incoherent lighting without changing saved source or transport settings",
+        default=True,
+    )
+    use_material_diffraction: BoolProperty(
+        name="Material Diffraction",
+        description="Enable material Diffraction Weight inputs. Disable to use each material's native carrier without changing saved node sockets or links",
+        default=True,
+    )
+    use_polarization: BoolProperty(
+        name="Glass Polarization",
+        description="Enable Glass Polarizer inputs. Disable to restore the native Glass substrate while retaining filter settings",
+        default=True,
+    )
+
+    use_coherent_specular_connections: BoolProperty(
+        name="Coherent Specular Connections",
+        description="Bounded coherent inventory: planar ideal interfaces, or one sphere reflection or entry/exit with up to two internal reflections, surrounded by planar mirrors. Other histories use native incoherent transport; disabled by default",
+        default=False,
+    )
+
+    coherent_transport_mode: EnumProperty(
+        name="Transport Model",
+        description="Bounded paths or streamed one/two reflections over flat mirror triangles",
+        items=(
+            ('BOUNDED', "Bounded Interfaces", "Existing planar and sphere path inventory", 0),
+            ('FACET_SINGLE_REFLECTION', "Streamed Mirror Facets", "Direct plus up to two reflections over all declared flat mirror triangles; two reflections cost O(triangles squared). Gaussian coherence sampled per group; no smooth curvature or refraction", 1),
+        ),
+        default='BOUNDED',
+    )
+
+    coherent_polarization_mode: EnumProperty(
+        name="Polarization Model",
+        description="Explicit source-field model for coherent connections",
+        items=(
+            ('SCALAR', "Scalar Mirror", "Unit scalar mirror field; supports ideal mirrors only", 0),
+            ('VECTOR', "Vector Dipole Ensemble", "Three independent world-axis dipoles with Jones reflection and transmission", 1),
+        ),
+        default='SCALAR',
+    )
+
+    coherent_max_interface_events: IntProperty(
+        name="Max Interface Events",
+        description="Maximum ordered reflection or refraction events in the bounded coherent inventory; sphere entry/exit consumes two events",
+        min=1, max=4, default=1,
+    )
+
     bdpt_light_paths: IntProperty(
         name="Light Paths",
         description="Number of light subpaths generated for each bidirectional update; more paths reduce caustic noise at the cost of time and memory",
@@ -1465,6 +1518,26 @@ class CyclesLightSettings(bpy.types.PropertyGroup):
         min=0, max=1024,
         default=1024,
     )
+    coherence_group: IntProperty(
+        name="Group",
+        description="Point lights with the same positive group interfere in the direct-source model or enabled coherent specular connections; zero disables coherence",
+        min=0, default=0,
+    )
+    coherence_phase: FloatProperty(
+        name="Phase",
+        description="Relative source phase for direct point-source interference",
+        subtype='ANGLE', default=0.0,
+    )
+    coherence_wavelength_nm: FloatProperty(
+        name="Wavelength (nm)",
+        description="Interference phase wavelength in physical nanometers; does not change the light color or emission spectrum",
+        min=1.0, default=550.0, precision=2,
+    )
+    coherence_length_m: FloatProperty(
+        name="Coherence Length (m)",
+        description="Gaussian coherence length in physical meters; zero gives exact incoherent transport",
+        min=0.0, default=0.0, precision=6,
+    )
     use_multiple_importance_sampling: BoolProperty(
         name="Multiple Importance Sample",
         description="Use multiple importance sampling for the light, "
@@ -1646,6 +1719,16 @@ class CyclesMeshSettings(bpy.types.PropertyGroup):
 
 class CyclesObjectSettings(bpy.types.PropertyGroup):
     __slots__ = ()
+
+    coherent_interface: EnumProperty(
+        name="Coherent Interface",
+        description="Declare an ideal interface or diffuse receiver; native point spheres support exterior mirror reflection",
+        items=(('OFF', "Off", "Ordinary object", 0),
+               ('MIRROR', "Ideal Mirror", "Unit scalar mirror with zero added phase", 1),
+               ('GLASS', "Ideal Glass", "Lossless dielectric with constant IOR", 2),
+               ('DETECTOR', "Lambertian Detector", "Passive diffuse receiver for coherent connections", 3)),
+        default='OFF',
+    )
 
     use_motion_blur: BoolProperty(
         name="Use Motion Blur",

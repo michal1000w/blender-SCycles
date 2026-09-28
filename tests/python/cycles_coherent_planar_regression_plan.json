@@ -1,0 +1,47 @@
+{
+  "scope": "Six unchanged planar regressions, single persistent Blender process; no new gates or reference arrays",
+  "jobs": [
+    {
+      "label": "folded_phase0",
+      "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v5/folded",
+      "case": "phase_0",
+      "folder": "folded",
+      "scene_budgets": true
+    },
+    {
+      "label": "folded_phasepi",
+      "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v5/folded",
+      "case": "phase_pi",
+      "folder": "folded",
+      "scene_budgets": true
+    },
+    {
+      "label": "gap_phase0",
+      "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v5/gap",
+      "case": "phase_0",
+      "folder": "gap",
+      "scene_budgets": true
+    },
+    {
+      "label": "wrong_face_phase0",
+      "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v5/wrong_face",
+      "case": "phase_0",
+      "folder": "wrong_face",
+      "scene_budgets": true
+    },
+    {
+      "label": "joined_slab_phase0",
+      "fixtures": "build/tests/python/cycles_coherent_face_cluster_acceptance_v31_v4/slab_joined",
+      "case": "phase_0",
+      "folder": "slab_joined",
+      "scene_budgets": true
+    },
+    {
+      "label": "diffuse_checker_phase0",
+      "fixtures": "build/tests/python/cycles_coherent_detector_color_acceptance_v30_enabled/diffuse_black_checker",
+      "case": "phase_0",
+      "folder": "diffuse_checker",
+      "scene_budgets": false
+    }
+  ]
+}

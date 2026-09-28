@@ -7,6 +7,7 @@
 #ifdef WITH_METAL
 
 #  include "device/kernel.h"
+#  include "kernel/features.h"
 
 #  include <Metal/Metal.h>
 #  include <memory>
@@ -14,6 +15,17 @@
 CCL_NAMESPACE_BEGIN
 
 class MetalDevice;
+
+/* Coherent connections trace visibility rays inside ordinary surface shading.
+ * Native point and curve primitives require their MetalRT intersection tables
+ * there as well. Leave pipelines without coherent connections unchanged. */
+static inline bool metal_kernel_has_intersection(const DeviceKernel kernel,
+                                                 const uint64_t kernel_features)
+{
+  return device_kernel_has_intersection(kernel) ||
+         (kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE &&
+          (kernel_features & KERNEL_FEATURE_COHERENT_SPECULAR));
+}
 
 enum {
   METALRT_TABLE_DEFAULT,
@@ -58,10 +70,11 @@ enum MetalPipelineType {
 };
 
 #  define METALRT_FEATURE_MASK \
-    (KERNEL_FEATURE_HAIR | KERNEL_FEATURE_HAIR_THICK | KERNEL_FEATURE_POINTCLOUD)
+    (KERNEL_FEATURE_HAIR | KERNEL_FEATURE_HAIR_THICK | KERNEL_FEATURE_POINTCLOUD | \
+     KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION)
 
 #  define METAL_TRANSPORT_FEATURE_MASK \
-    (KERNEL_FEATURE_BDPT | KERNEL_FEATURE_PHOTON_MAPPING | KERNEL_FEATURE_PATH_GUIDING)
+    (KERNEL_FEATURE_BDPT | KERNEL_FEATURE_PHOTON_MAPPING | KERNEL_FEATURE_PATH_GUIDING | KERNEL_FEATURE_POLARIZATION)
 
 const char *kernel_type_as_string(MetalPipelineType pso_type);
 
