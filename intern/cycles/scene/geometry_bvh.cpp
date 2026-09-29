@@ -55,6 +55,9 @@ void Geometry::compute_bvh(Device *device,
     object.set_visibility(PATH_RAY_VISIBILITY_ALL);
 
     object.set_geometry(this);
+    if (coherent_glass_points) {
+      object.set_coherent_interface(Object::COHERENT_INTERFACE_GLASS);
+    }
 
     vector<Geometry *> geometry;
     geometry.push_back(this);

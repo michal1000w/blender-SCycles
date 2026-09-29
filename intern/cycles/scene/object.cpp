@@ -256,7 +256,8 @@ void Object::tag_update(Scene *scene)
       }
     }
 
-    if (visibility_is_modified()) {
+    if (visibility_is_modified() || coherent_interface_is_modified()) {
+      /* A coherent Glass declaration changes CPU point-sphere intersection. */
       flag |= ObjectManager::VISIBILITY_MODIFIED;
     }
 

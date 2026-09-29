@@ -53,31 +53,44 @@ using numhit_t = uint32_t;
                       RTC_FEATURE_FLAG_FILTER_FUNCTION_IN_ARGUMENTS | RTC_FEATURE_FLAG_POINT | \
                       RTC_FEATURE_FLAG_MOTION_BLUR | RTC_FEATURE_FLAG_ROUND_CATMULL_ROM_CURVE | \
                       RTC_FEATURE_FLAG_FLAT_CATMULL_ROM_CURVE | \
-                      RTC_FEATURE_FLAG_ROUND_LINEAR_CURVE)
+                      RTC_FEATURE_FLAG_ROUND_LINEAR_CURVE | \
+                      RTC_FEATURE_FLAG_USER_GEOMETRY_CALLBACK_IN_ARGUMENTS)
 #endif
 
 #define EMBREE_IS_HAIR(x) (x & 1)
 
 /* Intersection context. */
 
-struct CCLFirstHitContext : public RTCRayQueryContext {
+#ifdef __KERNEL_ONEAPI__
+using CCLKernelContext = RTCRayQueryContext;
+#else
+/* Common prefix of every CPU query context. User geometry callbacks receive
+ * only the base context and read the kernel globals through it. */
+struct CCLKernelContext : public RTCRayQueryContext {
   KernelGlobals kg;
+};
+#endif
+
+struct CCLFirstHitContext : public CCLKernelContext {
+#ifdef __KERNEL_ONEAPI__
+  KernelGlobals kg;
+#endif
   /* For avoiding self intersections */
   const Ray *ray;
 };
 
-struct CCLShadowContext : public RTCRayQueryContext {
+struct CCLShadowContext : public CCLKernelContext {
 #if defined(__KERNEL_ONEAPI__)
   ONEAPIKernelContext *oneapi_kernel_context;
-#else
-  KernelGlobals kg;
 #endif
 
   BVHShadowAllPayload *payload;
 };
 
-struct CCLLocalContext : public RTCRayQueryContext {
+struct CCLLocalContext : public CCLKernelContext {
+#ifdef __KERNEL_ONEAPI__
   KernelGlobals kg;
+#endif
   const Ray *ray;
   numhit_t max_hits;
   int local_object_id;
@@ -86,8 +99,10 @@ struct CCLLocalContext : public RTCRayQueryContext {
   bool is_sss;
 };
 
-struct CCLVolumeContext : public RTCRayQueryContext {
+struct CCLVolumeContext : public CCLKernelContext {
+#ifdef __KERNEL_ONEAPI__
   KernelGlobals kg;
+#endif
   const Ray *ray;
 #ifdef __VOLUME_RECORD_ALL__
   numhit_t max_hits;
@@ -449,6 +464,165 @@ kernel_embree_filter_occluded_volume_all_func_static(const RTCFilterFunctionNArg
     kernel_embree_filter_occluded_volume_all_func_impl
 #endif
 
+#ifndef __KERNEL_ONEAPI__
+/* Declared static coherent Glass point spheres are Embree user geometry (see
+ * BVHEmbree::add_points). Hits use Cycles' own analytic sphere test, which adds
+ * the exit root only when the coherent connector is enabled, matching the GPU
+ * point intersector. Every candidate root goes through the same query filter
+ * as a native hit, nearest first, so self and shadow rules are unchanged. */
+ccl_device_inline bool kernel_embree_coherent_point_root(const RTCRay &ray,
+                                                         const KernelGlobals kg,
+                                                         const unsigned int inst_id,
+                                                         const unsigned int geom_id,
+                                                         const unsigned int prim_id,
+                                                         const int root,
+                                                         ccl_private float *t,
+                                                         ccl_private float3 *Ng)
+{
+  const int object = int((inst_id != RTC_INVALID_GEOMETRY_ID ? inst_id : geom_id) / 2);
+  const int prim = int(prim_id) + kernel_data_fetch(object_prim_offset, object);
+  const int type = kernel_data_fetch(objects, object).primitive_type;
+  const float4 point = kernel_data_fetch(points,
+                                         kernel_data_fetch(objects, object).position_offset +
+                                             prim);
+  const float3 P = make_float3(ray.org_x, ray.org_y, ray.org_z);
+  const float3 D = make_float3(ray.dir_x, ray.dir_y, ray.dir_z);
+  const bool two_sided = kernel_data.integrator.coherent_specular_enabled &&
+                         point_coherent_glass_two_sided(
+                             true, kernel_data_fetch(object_flag, object), type);
+  /* Root 0 is the front hit, root 1 the exit hit of a two-sided sphere.
+   * The arithmetic is that of point_intersect_test(). */
+  if (root == 1 && !two_sided) {
+    return false;
+  }
+  const float3 center = make_float3(point);
+  const float rd2 = 1.0f / dot(D, D);
+  const float3 c0 = center - P;
+  const float projC0 = dot(c0, D) * rd2;
+  const float3 perp = c0 - projC0 * D;
+  const float l2 = dot(perp, perp);
+  const float r2 = point.w * point.w;
+  if (!(l2 <= r2)) {
+    return false;
+  }
+  const float td = sqrtf((r2 - l2) * rd2);
+  *t = root == 0 ? projC0 - td : projC0 + td;
+  if (!(ray.tnear <= *t && *t <= ray.tfar)) {
+    return false;
+  }
+  *Ng = (P + *t * D) - center;
+  return true;
+}
+
+ccl_device_inline void kernel_embree_coherent_point_hit(RTCHit &hit,
+                                                        const float3 Ng,
+                                                        const unsigned int inst_id,
+                                                        const unsigned int geom_id,
+                                                        const unsigned int prim_id)
+{
+  hit.Ng_x = Ng.x;
+  hit.Ng_y = Ng.y;
+  hit.Ng_z = Ng.z;
+  hit.u = 0.0f;
+  hit.v = 0.0f;
+  hit.primID = prim_id;
+  hit.geomID = geom_id;
+  hit.instID[0] = inst_id;
+#  if RTC_MAX_INSTANCE_LEVEL_COUNT > 1
+  for (int level = 1; level < RTC_MAX_INSTANCE_LEVEL_COUNT; level++) {
+    hit.instID[level] = RTC_INVALID_GEOMETRY_ID;
+  }
+#  endif
+}
+
+ccl_device void kernel_embree_coherent_point_intersect_func(
+    const RTCIntersectFunctionNArguments *args)
+{
+  assert(args->N == 1);
+  if (!args->valid[0]) {
+    return;
+  }
+  const CCLKernelContext *ctx = static_cast<const CCLKernelContext *>(args->context);
+  RTCRayHit *rayhit = reinterpret_cast<RTCRayHit *>(args->rayhit);
+  const unsigned int inst_id = args->context->instID[0];
+  for (int root = 0; root < 2; root++) {
+    float t;
+    float3 Ng;
+    if (!kernel_embree_coherent_point_root(
+            rayhit->ray, ctx->kg, inst_id, args->geomID, args->primID, root, &t, &Ng))
+    {
+      continue;
+    }
+    RTCHit hit;
+    kernel_embree_coherent_point_hit(hit, Ng, inst_id, args->geomID, args->primID);
+    const float previous_tfar = rayhit->ray.tfar;
+    rayhit->ray.tfar = t;
+    int valid = -1;
+    RTCFilterFunctionNArguments filter_args;
+    filter_args.valid = &valid;
+    filter_args.geometryUserPtr = args->geometryUserPtr;
+    filter_args.context = args->context;
+    filter_args.ray = reinterpret_cast<RTCRayN *>(&rayhit->ray);
+    filter_args.hit = reinterpret_cast<RTCHitN *>(&hit);
+    filter_args.N = 1;
+    rtcInvokeIntersectFilterFromGeometry(args, &filter_args);
+    if (valid != 0) {
+      rayhit->hit = hit;
+      return;
+    }
+    rayhit->ray.tfar = previous_tfar;
+  }
+}
+
+ccl_device void kernel_embree_coherent_point_occluded_func(
+    const RTCOccludedFunctionNArguments *args)
+{
+  assert(args->N == 1);
+  if (!args->valid[0]) {
+    return;
+  }
+  const CCLKernelContext *ctx = static_cast<const CCLKernelContext *>(args->context);
+  RTCRay *ray = reinterpret_cast<RTCRay *>(args->ray);
+  const unsigned int inst_id = args->context->instID[0];
+  for (int root = 0; root < 2; root++) {
+    float t;
+    float3 Ng;
+    if (!kernel_embree_coherent_point_root(
+            *ray, ctx->kg, inst_id, args->geomID, args->primID, root, &t, &Ng))
+    {
+      continue;
+    }
+    RTCHit hit;
+    kernel_embree_coherent_point_hit(hit, Ng, inst_id, args->geomID, args->primID);
+    const float previous_tfar = ray->tfar;
+    ray->tfar = t;
+    int valid = -1;
+    RTCFilterFunctionNArguments filter_args;
+    filter_args.valid = &valid;
+    filter_args.geometryUserPtr = args->geometryUserPtr;
+    filter_args.context = args->context;
+    filter_args.ray = reinterpret_cast<RTCRayN *>(ray);
+    filter_args.hit = reinterpret_cast<RTCHitN *>(&hit);
+    filter_args.N = 1;
+    rtcInvokeOccludedFilterFromGeometry(args, &filter_args);
+    if (valid != 0) {
+      /* Embree convention for an occluded ray. */
+      ray->tfar = -FLT_MAX;
+      return;
+    }
+    ray->tfar = previous_tfar;
+  }
+}
+
+#  define KERNEL_EMBREE_SET_USER_INTERSECT(args) \
+    (args).intersect = kernel_embree_coherent_point_intersect_func
+#  define KERNEL_EMBREE_SET_USER_OCCLUDED(args) \
+    (args).occluded = kernel_embree_coherent_point_occluded_func
+#else
+#  define KERNEL_EMBREE_SET_USER_INTERSECT(args)
+#  define KERNEL_EMBREE_SET_USER_OCCLUDED(args)
+#endif
+
 /* Scene intersection. */
 
 ccl_device_intersect bool kernel_embree_intersect(KernelGlobals kg,
@@ -478,6 +652,7 @@ ccl_device_intersect bool kernel_embree_intersect(KernelGlobals kg,
   args.filter = reinterpret_cast<RTCFilterFunctionN>(kernel_embree_filter_intersection_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
+  KERNEL_EMBREE_SET_USER_INTERSECT(args);
   rtcTraversableIntersect1(kernel_data.device_bvh, &ray_hit, &args);
   if (ray_hit.hit.geomID == RTC_INVALID_GEOMETRY_ID ||
       ray_hit.hit.primID == RTC_INVALID_GEOMETRY_ID)
@@ -524,6 +699,7 @@ ccl_device_intersect bool kernel_embree_intersect_local(KernelGlobals kg,
 
   RTCOccludedArguments args;
   rtcInitOccludedArguments(&args);
+  KERNEL_EMBREE_SET_USER_OCCLUDED(args);
   args.filter = reinterpret_cast<RTCFilterFunctionN>(kernel_embree_filter_occluded_local_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
@@ -582,6 +758,7 @@ ccl_device_intersect void kernel_embree_intersect_shadow_all(KernelGlobals kg,
 
   RTCOccludedArguments args;
   rtcInitOccludedArguments(&args);
+  KERNEL_EMBREE_SET_USER_OCCLUDED(args);
   args.filter = reinterpret_cast<RTCFilterFunctionN>(
       kernel_embree_filter_occluded_shadow_all_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
@@ -621,6 +798,7 @@ ccl_device_intersect uint kernel_embree_intersect_volume(KernelGlobals kg,
   kernel_embree_setup_ray(*ray, rtc_ray, visibility);
   RTCOccludedArguments args;
   rtcInitOccludedArguments(&args);
+  KERNEL_EMBREE_SET_USER_OCCLUDED(args);
   args.filter = reinterpret_cast<RTCFilterFunctionN>(
       kernel_embree_filter_occluded_volume_all_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;

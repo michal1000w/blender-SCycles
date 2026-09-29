@@ -88,6 +88,119 @@ ccl_device_inline bool coherent_facet_pair_connect(const float3 source,
          coherent_facet_contains(path->point[1],second,second_indices);
 }
 
+/* Closed convex Glass facets use the outward winding (the caller reverses two
+ * vertices for negatively scaled objects). A facet takes one of three roles:
+ * exterior Fresnel reflection in air, entry transmission air->glass, or exit
+ * transmission glass->air. Internal reflections are outside this inventory. */
+enum CoherentFacetRole {
+  COHERENT_FACET_MIRROR = 0,
+  COHERENT_FACET_GLASS_EXTERIOR_REFLECT = 1,
+  COHERENT_FACET_GLASS_ENTER = 2,
+  COHERENT_FACET_GLASS_EXIT = 3,
+};
+
+ccl_device_inline void coherent_facet_set_role(ccl_private CoherentGeometryInterface *patch,
+                                               const int role,
+                                               const float glass_ior)
+{
+  switch (role) {
+    case COHERENT_FACET_GLASS_EXTERIOR_REFLECT:
+      patch->ior_before = patch->ior_after = 1.0f;
+      patch->ior_opposite = glass_ior;
+      patch->event = COHERENT_GEOMETRY_REFLECT;
+      patch->expected_incident_side = 1;
+      break;
+    case COHERENT_FACET_GLASS_ENTER:
+      patch->ior_before = 1.0f;
+      patch->ior_after = patch->ior_opposite = glass_ior;
+      patch->event = COHERENT_GEOMETRY_TRANSMIT;
+      patch->expected_incident_side = 1;
+      break;
+    case COHERENT_FACET_GLASS_EXIT:
+      patch->ior_before = glass_ior;
+      patch->ior_after = patch->ior_opposite = 1.0f;
+      patch->event = COHERENT_GEOMETRY_TRANSMIT;
+      patch->expected_incident_side = -1;
+      break;
+    default:
+      break; /* Ideal mirror: frame defaults, two-sided. */
+  }
+}
+
+/* Signed distance of a point from a facet plane along its outward normal. */
+ccl_device_inline float coherent_facet_plane_distance(const float3 point,
+    const ccl_private CoherentGeometryInterface *plane)
+{
+  return dot(point - plane->center, normalize(cross(plane->tangent_u, plane->tangent_v)));
+}
+
+/* One reflection on a mirror facet or the exterior side of a Glass facet. */
+ccl_device_inline bool coherent_facet_connect_role(const float3 source,
+                                                   const float3 receiver,
+                                                   const float3 receiver_normal,
+                                                   const ccl_private float3 vertices[3],
+                                                   const uint3 indices,
+                                                   const int role,
+                                                   const float glass_ior,
+                                                   ccl_private CoherentGeometryInterface *patch,
+                                                   ccl_private CoherentGeometryPath *path)
+{
+  if (!coherent_facet_frame(vertices, patch)) return false;
+  coherent_facet_set_role(patch, role, glass_ior);
+  path->count = 1;
+  return coherent_geometry_connect_reflections(source, receiver, receiver_normal, patch, 1, path) &&
+         coherent_facet_contains(path->point[0], vertices, indices);
+}
+
+/* Two ordered reflections, each on a mirror or on an exterior Glass side. */
+ccl_device_inline bool coherent_facet_pair_connect_roles(const float3 source,
+    const float3 receiver, const float3 receiver_normal,
+    const ccl_private float3 first[3], const uint3 first_indices, const int first_role,
+    const float first_ior,
+    const ccl_private float3 second[3], const uint3 second_indices, const int second_role,
+    const float second_ior,
+    ccl_private CoherentGeometryInterface patches[2],
+    ccl_private CoherentGeometryPath *path)
+{
+  if (!coherent_facet_frame(first,&patches[0]) ||
+      !coherent_facet_frame(second,&patches[1]) ||
+      !coherent_facet_same_side_possible(source,&patches[0],second) ||
+      !coherent_facet_same_side_possible(receiver,&patches[1],first)) return false;
+  coherent_facet_set_role(&patches[0], first_role, first_ior);
+  coherent_facet_set_role(&patches[1], second_role, second_ior);
+  /* An exterior Glass reflection needs its incident endpoint outside. */
+  if (first_role == COHERENT_FACET_GLASS_EXTERIOR_REFLECT &&
+      !(coherent_facet_plane_distance(source, &patches[0]) > 0.0f)) return false;
+  path->count=2;
+  return coherent_geometry_connect_reflections(source,receiver,receiver_normal,patches,2,path) &&
+         coherent_facet_contains(path->point[0],first,first_indices) &&
+         coherent_facet_contains(path->point[1],second,second_indices);
+}
+
+/* Entry and exit transmission through two distinct facets of one closed
+ * convex Glass volume with exterior air on both sides. The refracted chord is
+ * the unique Fermat stationary path between the two facet planes (optical
+ * length is convex in the plane coordinates); finite triangle membership and
+ * the caller's BVH legs decide whether it is physical. */
+ccl_device_inline bool coherent_facet_transmit_connect(const float3 source,
+    const float3 receiver, const float3 receiver_normal, const float ior,
+    const ccl_private float3 first[3], const uint3 first_indices,
+    const ccl_private float3 second[3], const uint3 second_indices,
+    ccl_private CoherentGeometryInterface patches[2], ccl_private CoherentGeometryPath *path)
+{
+  if (!(ior >= 1.0f) || !coherent_facet_frame(first,&patches[0]) ||
+      !coherent_facet_frame(second,&patches[1])) return false;
+  coherent_facet_set_role(&patches[0], COHERENT_FACET_GLASS_ENTER, ior);
+  coherent_facet_set_role(&patches[1], COHERENT_FACET_GLASS_EXIT, ior);
+  /* Exterior endpoints must face the entry and exit sides respectively. */
+  if (!(coherent_facet_plane_distance(source, &patches[0]) > 0.0f) ||
+      !(coherent_facet_plane_distance(receiver, &patches[1]) > 0.0f)) return false;
+  path->count = 2;
+  return coherent_geometry_connect(source,receiver,receiver_normal,patches,2,path) &&
+         coherent_facet_contains(path->point[0],first,first_indices) &&
+         coherent_facet_contains(path->point[1],second,second_indices);
+}
+
 struct CoherentStreamComplex {
   float2 real;
   float2 imag;

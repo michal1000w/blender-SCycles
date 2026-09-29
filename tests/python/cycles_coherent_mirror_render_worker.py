@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--require-specular", action="store_true")
     parser.add_argument("--scene-budgets", action="store_true")
     parser.add_argument("--minimum-glossy-bounces", type=int)
+    parser.add_argument("--cpu", action="store_true",
+                        help="Render on the CPU device instead of Metal (BDPT is Metal-only)")
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
     result = {
         "case": args.case,
@@ -34,7 +36,7 @@ def main():
         "blend": str(args.blend.resolve()),
         "render_path": str(args.render.resolve()),
         "samples": 128,
-        "device": "METAL",
+        "device": "METAL",  # Replaced below for --cpu.
         "pixel_filter": "BOX",
         "adaptive_sampling": False,
         "denoising": False,
@@ -49,7 +51,9 @@ def main():
         scene.render.engine = "CYCLES"
         scene.cycles.samples = 128
         scene.cycles.seed = 19
-        scene.cycles.device = "GPU"
+        scene.cycles.device = "CPU" if args.cpu else "GPU"
+        if args.cpu and not (args.pt_guiding or args.pt):
+            raise RuntimeError("BDPT is a Metal feature; CPU cases must request --pt or --pt-guiding")
         scene.cycles.use_adaptive_sampling = False
         scene.cycles.use_denoising = False
         scene.cycles.use_bidirectional_path_tracing = not (args.pt_guiding or args.pt)
@@ -80,15 +84,18 @@ def main():
         scene.render.image_settings.file_format = "OPEN_EXR"
         scene.render.image_settings.color_depth = "32"
 
-        preferences = bpy.context.preferences.addons["cycles"].preferences
-        preferences.compute_device_type = "METAL"
-        preferences.get_devices()
-        metal_devices = [device for device in preferences.devices if device.type == "METAL"]
-        for device in preferences.devices:
-            device.use = device.type == "METAL"
-        if not metal_devices:
-            raise RuntimeError("No Metal device is available; render was not attempted")
-        result["metal_devices"] = [device.name for device in metal_devices]
+        if args.cpu:
+            result["device"] = "CPU"
+        else:
+            preferences = bpy.context.preferences.addons["cycles"].preferences
+            preferences.compute_device_type = "METAL"
+            preferences.get_devices()
+            metal_devices = [device for device in preferences.devices if device.type == "METAL"]
+            for device in preferences.devices:
+                device.use = device.type == "METAL"
+            if not metal_devices:
+                raise RuntimeError("No Metal device is available; render was not attempted")
+            result["metal_devices"] = [device.name for device in metal_devices]
         args.render.parent.mkdir(parents=True, exist_ok=True)
         scene.render.filepath = str(args.render.resolve())
         render_start = time.perf_counter()

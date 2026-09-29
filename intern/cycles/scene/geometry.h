@@ -132,6 +132,11 @@ class Geometry : public Node {
   bool need_update_rebuild;
   bool need_update_bvh_for_offset;
 
+  /* A static point cloud used by an object declared as coherent Glass. Its
+   * geometry-level BVH then uses two-sided analytic sphere intersection on
+   * CPU, matching the GPU kernels. Derived during BVH update. */
+  bool coherent_glass_points = false;
+
   /* Index into scene->geometry (only valid during update) */
   size_t index;
 

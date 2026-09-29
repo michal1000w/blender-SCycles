@@ -810,7 +810,7 @@ bool PathTraceWorkGPU::update_queue_counter_and_cache()
    * while continuing to work on the majority of states? */
   IntegratorQueueCounter *queue_counter = integrator_queue_counter_.data();
   if (queue_counter->coherent_error) {
-    device_->set_error("Coherent sphere transmission encountered an unresolved caustic, axial ring, grazing path or invalid geometry; render rejected rather than dropping paths");
+    device_->set_error(COHERENT_SPECULAR_ERROR_MESSAGE);
     return false;
   }
   if (queue_counter->bdpt_error) {

@@ -697,10 +697,10 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     coherent_transport_mode: EnumProperty(
         name="Transport Model",
-        description="Bounded paths or streamed one/two reflections over flat mirror triangles",
+        description="Bounded paths, or streamed one/two interface events over flat mirror triangles and closed convex Glass meshes",
         items=(
             ('BOUNDED', "Bounded Interfaces", "Existing planar and sphere path inventory", 0),
-            ('FACET_SINGLE_REFLECTION', "Streamed Mirror Facets", "Direct plus up to two reflections over all declared flat mirror triangles; two reflections cost O(triangles squared). Gaussian coherence sampled per group; no smooth curvature or refraction", 1),
+            ('FACET_SINGLE_REFLECTION', "Streamed Facets", "Direct plus up to two events over all declared flat triangles: mirror and exterior Glass Fresnel reflections, and refraction through a closed convex Glass mesh (entry and exit). Two events cost O(triangles squared). Gaussian coherence sampled per group; no smooth curvature or internal Glass reflections", 1),
         ),
         default='BOUNDED',
     )
@@ -1686,7 +1686,7 @@ class CyclesObjectSettings(bpy.types.PropertyGroup):
         description="Declare an ideal interface or diffuse receiver; native point spheres support exterior mirror reflection",
         items=(('OFF', "Off", "Ordinary object", 0),
                ('MIRROR', "Ideal Mirror", "Unit scalar mirror with zero added phase", 1),
-               ('GLASS', "Ideal Glass", "Lossless dielectric with constant IOR", 2),
+               ('GLASS', "Ideal Glass", "Lossless dielectric with constant IOR; streamed facets require a closed convex mesh with outward normals", 2),
                ('DETECTOR', "Lambertian Detector", "Passive diffuse receiver for coherent connections", 3)),
         default='OFF',
     )
