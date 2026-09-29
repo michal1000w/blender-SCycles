@@ -17,8 +17,12 @@ ccl_device_inline bool coherent_history_owned_candidate(KernelGlobals kg,
     return false;
   }
   const bool stream_facets = kernel_data.integrator.coherent_transport_mode == 1;
-  if (stream_facets && coherent_history_count(history) >
-      uint(kernel_data.integrator.coherent_max_interface_events)) return false;
+  /* A streamed prefix inside a Glass volume is incomplete; it cannot end at
+   * the exterior detector and is never owned. */
+  if (stream_facets && ((history.metadata & COHERENT_HISTORY_STREAM_INSIDE) ||
+                        coherent_history_count(history) >
+                            uint(kernel_data.integrator.coherent_max_interface_events)))
+    return false;
   for (int index = 0; index < kernel_data.integrator.coherent_candidate_count; index++) {
     const ccl_global KernelCoherentCandidate *candidate =
         &kernel_data_fetch(coherent_candidates, index);

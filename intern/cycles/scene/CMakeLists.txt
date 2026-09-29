@@ -70,6 +70,7 @@ set(SRC_HEADERS
   background.h
   camera.h
   constant_fold.h
+  coherent_convex_mesh.h
   coherent_planar_cluster.h
   coherent_sphere_host.h
   devicescene.h

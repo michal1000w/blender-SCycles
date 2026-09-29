@@ -1199,6 +1199,24 @@ void GeometryManager::device_update(Device *device,
 
     size_t i = 0;
     size_t num_bvh = 0;
+    /* Declared coherent Glass point spheres need exit hits on CPU. The
+     * intersection kind is part of the geometry BVH, so rebuild when it changes. */
+    for (Geometry *geom : scene->geometry) {
+      if (geom->is_pointcloud()) {
+        bool coherent_glass_points = false;
+        for (const Object *object : scene->objects) {
+          coherent_glass_points |= object->get_geometry() == geom &&
+                                   object->get_coherent_interface() ==
+                                       Object::COHERENT_INTERFACE_GLASS;
+        }
+        if (coherent_glass_points != geom->coherent_glass_points) {
+          geom->coherent_glass_points = coherent_glass_points;
+          geom->need_update_rebuild = true;
+          geom->need_update_bvh_for_offset = true;
+        }
+      }
+    }
+
     for (Geometry *geom : scene->geometry) {
       if (geom->is_modified() || geom->need_update_bvh_for_offset) {
         need_update_scene_bvh = true;
