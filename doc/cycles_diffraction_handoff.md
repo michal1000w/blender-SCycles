@@ -1,5 +1,7 @@
 # Cycles diffraction and polarization handoff
 
+> **Update (v46, 2026-09-29):** see [v46 CPU and streamed Glass](cycles_coherent_streamed_glass_v46.md). Coherent specular connections now run on CPU and Metal; the streamed facet mode supports closed convex Glass (exterior R, mixed RR, entry/exit TT); the pending closed-slab fixture passes; a v40 regression of the v39 mirror+sphere TT fixture and missing CPU sphere exits were fixed. Statements below that coherent connectors require Metal or that streamed mode rejects Glass are superseded.
+
 This report preserves the context needed to resume the work without losing validated behavior or repeating earlier mistakes. The original objective combines spectral diffraction gratings in appropriate Cycles shaders, Apple Metal/PT/BDPT/guiding integration, optional coherent interference through reflection and transmission across separate physical objects, and independent numerical, visual and fixed-sample performance validation. **That full objective is not complete.** The delivered v45 increment validates finite ideal-mirror facets through two reflections, a separate bounded planar/sphere solver, and native photographic polarizers. General refractive mesh transport remains unfinished. Do not describe this as arbitrary-object coherent path tracing.
 
 ## Validated delivery and restoration status

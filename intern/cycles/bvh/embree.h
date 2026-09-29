@@ -12,6 +12,8 @@
 #  include "bvh/bvh.h"
 #  include "bvh/params.h"
 
+#  include "util/types.h"
+#  include "util/unique_ptr.h"
 #  include "util/vector.h"
 
 CCL_NAMESPACE_BEGIN
@@ -55,6 +57,11 @@ class BVHEmbree : public BVH {
   void set_point_vertex_buffer(RTCGeometry geom_id,
                                const PointCloud *pointcloud,
                                const bool update);
+  void set_coherent_point_data(vector<float4> &data, const PointCloud *pointcloud);
+
+  /* Host copies of static coherent Glass sphere centers and radii, used by the
+   * Embree bounds callback of their user geometries. Keyed by geometry ID. */
+  vector<std::pair<unsigned int, unique_ptr<vector<float4>>>> coherent_point_data;
 
   RTCDevice rtc_device;
   bool rtc_device_is_sycl;

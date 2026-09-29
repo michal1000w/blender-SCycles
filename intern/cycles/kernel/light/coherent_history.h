@@ -101,6 +101,69 @@ ccl_device_inline CoherentPathHistory coherent_history_stream_after_scatter(
   return coherent_history_after_scatter(history, eligible_mirror ? 0 : -1, 1, label, 0);
 }
 
+/* Streamed facets with closed convex Glass. An owned prefix is a sequence of
+ * at most max_interfaces events from exterior air: mirror reflections,
+ * exterior Glass reflections, and one complete entry/exit transmission pair
+ * through a single Glass object. While inside that object the prefix is
+ * incomplete and never owned; any internal reflection, rough or unmarked
+ * event, or an exit through another object leaves the class permanently.
+ * incident_side is +1 for a hit from the outward side, -1 from inside. */
+#define COHERENT_HISTORY_STREAM_INSIDE (1u << 24u)
+
+ccl_device_inline CoherentPathHistory coherent_history_stream_after_interface(
+    const CoherentPathHistory history,
+    const int patch_mode,
+    const int object,
+    const int label,
+    const int incident_side,
+    const uint max_interfaces)
+{
+  if (!coherent_history_valid(history) || max_interfaces < 1u || max_interfaces > 2u ||
+      !(label & LABEL_SINGULAR))
+  {
+    return coherent_history_invalidate(history);
+  }
+  const bool reflect = (label & LABEL_REFLECT) != 0;
+  const bool transmit = (label & LABEL_TRANSMIT) != 0;
+  if (reflect == transmit) {
+    return coherent_history_invalidate(history);
+  }
+  const uint count = coherent_history_count(history);
+  if (history.metadata & COHERENT_HISTORY_STREAM_INSIDE) {
+    if (patch_mode != 2 || !transmit || incident_side != -1 || object < 0 ||
+        history.patches != uint(object))
+    {
+      return coherent_history_invalidate(history);
+    }
+    CoherentPathHistory result = coherent_history_append(history, 0u, 1u, 0);
+    result.metadata &= ~COHERENT_HISTORY_STREAM_INSIDE;
+    return result;
+  }
+  if (patch_mode == 1) {
+    if (!reflect || count >= max_interfaces) {
+      return coherent_history_invalidate(history);
+    }
+    return coherent_history_append(history, 0u, 0u, 0);
+  }
+  if (patch_mode == 2 && incident_side == 1 && object >= 0) {
+    if (reflect) {
+      if (count >= max_interfaces) {
+        return coherent_history_invalidate(history);
+      }
+      return coherent_history_append(history, 0u, 0u, 0);
+    }
+    /* Entry: the exit completes the pair, so both must fit in the budget. */
+    if (count + 2u > max_interfaces) {
+      return coherent_history_invalidate(history);
+    }
+    CoherentPathHistory result = coherent_history_append(history, 0u, 1u, 0);
+    result.patches = uint(object);
+    result.metadata |= COHERENT_HISTORY_STREAM_INSIDE;
+    return result;
+  }
+  return coherent_history_invalidate(history);
+}
+
 ccl_device_inline bool coherent_history_matches(
     const CoherentPathHistory history,
     const ccl_global KernelCoherentCandidate *candidate)
@@ -167,7 +230,8 @@ ccl_device_inline bool coherent_history_candidate_within_budget(
     const bool bdpt_enabled,
     const int bdpt_max_bounces,
     const float source_max_bounces,
-    const int interfaces_override = -1)
+    const int interfaces_override = -1,
+    const int transmissions_override = 0)
 {
   if (candidate->count < 0 || candidate->count > int(COHERENT_HISTORY_MAX_EVENTS) ||
       camera_bounce < 0 || camera_glossy_bounce < 0 || camera_transmission_bounce < 0)
@@ -189,9 +253,13 @@ ccl_device_inline bool coherent_history_candidate_within_budget(
   }
   const int interfaces = interfaces_override >= 0 ? interfaces_override : candidate->count;
   if (interfaces_override >= 0) {
-    if (interfaces_override > 2) return false;
-    reflections = interfaces_override;
-    transmissions = 0;
+    /* Streamed routes: the given number of events, of which the stated
+     * number are transmissions and the remainder reflections. */
+    if (interfaces_override > 2 || transmissions_override < 0 ||
+        transmissions_override > interfaces_override)
+      return false;
+    reflections = interfaces_override - transmissions_override;
+    transmissions = transmissions_override;
   }
   if (camera_bounce + interfaces > source_max_bounces ||
       (bdpt_enabled && interfaces >= bdpt_max_bounces))

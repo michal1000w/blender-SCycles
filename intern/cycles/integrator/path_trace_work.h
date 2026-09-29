@@ -11,6 +11,13 @@
 #include "session/buffers.h"
 #include "util/unique_ptr.h"
 
+/* Shared by CPU and GPU work: the coherent connector rejects a render rather
+ * than silently dropping a supported deterministic route. */
+#define COHERENT_SPECULAR_ERROR_MESSAGE \
+  "Coherent specular connections encountered an unresolved caustic, axial ring, grazing " \
+  "path, invalid geometry or more than 64 connected routes at one detector point; render " \
+  "rejected rather than dropping paths"
+
 CCL_NAMESPACE_BEGIN
 
 class BufferParams;

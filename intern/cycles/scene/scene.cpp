@@ -14,6 +14,7 @@
 #include "scene/camera.h"
 #include "scene/curves.h"
 #include "scene/devicescene.h"
+#include "scene/coherent_convex_mesh.h"
 #include "scene/coherent_planar_cluster.h"
 #include "scene/coherent_sphere_host.h"
 #include "scene/diffraction_manager.h"
@@ -234,6 +235,26 @@ static bool coherent_specular_pass_supported(const PassType type)
   }
 }
 
+/* The deterministic detector estimator is shared kernel code. CPU renders it
+ * with path tracing (BDPT and GPU guiding are Metal features and fall back to
+ * PT elsewhere); Metal additionally runs the BDPT prefix ownership. Other GPU
+ * backends are not validated for this transport. */
+static bool coherent_specular_device_supported(const DeviceInfo &info)
+{
+  if (info.type == DEVICE_CPU || info.type == DEVICE_METAL) {
+    return true;
+  }
+  if (info.type == DEVICE_MULTI && !info.multi_devices.empty()) {
+    for (const DeviceInfo &subdevice : info.multi_devices) {
+      if (!coherent_specular_device_supported(subdevice)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, Progress &progress)
 {
   KernelIntegrator &ki = dscene->data.integrator;
@@ -250,15 +271,15 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
   const bool stream_facets = scene->integrator->get_coherent_transport_mode() == 1;
   const int max_events = scene->integrator->get_coherent_max_interface_events();
   if (stream_facets && (max_events < 1 || max_events > 2)) {
-    progress.set_error("Streamed Mirror Facets requires Max Interface Events 1 or 2; two reflections cost O(triangles squared)");
+    progress.set_error("Streamed Facets requires Max Interface Events 1 or 2; two events cost O(triangles squared)");
     return false;
   }
   if (max_events < 1 || max_events > 4) {
     progress.set_error("Coherent specular connections require 1 to 4 interface events");
     return false;
   }
-  if (scene->device->info.type != DEVICE_METAL) {
-    progress.set_error("Coherent specular connections currently require Metal");
+  if (!coherent_specular_device_supported(scene->device->info)) {
+    progress.set_error("Coherent specular connections require CPU or Metal devices");
     return false;
   }
   if (scene->integrator->get_max_bounce() < max_events + 1 ||
@@ -286,6 +307,30 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
   std::vector<KernelCoherentPatch> patches;
   std::vector<int> patch_primitives;
   int detector_count = 0;
+  /* Streamed Glass: validated convex hulls, and world bounds of every declared
+   * streamed object, for the exterior-endpoint and non-nesting requirements. */
+  struct StreamedBounds {
+    const Object *object;
+    bool glass;
+    std::array<double, 3> lower, upper;
+  };
+  std::vector<std::pair<int, CoherentConvexHull>> glass_hulls;
+  std::vector<StreamedBounds> streamed_bounds;
+  auto mesh_world_bounds = [](const Object *object, const Mesh *mesh, StreamedBounds &bounds) {
+    const packed_float3 *positions = mesh->get_position();
+    const Transform tfm = object->get_tfm();
+    bounds.lower = {DBL_MAX, DBL_MAX, DBL_MAX};
+    bounds.upper = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+    for (size_t i = 0; i < mesh->num_verts(); i++) {
+      float3 point = positions[i];
+      if (!mesh->transform_applied) point = transform_point(&tfm, point);
+      const double p[3] = {double(point.x), double(point.y), double(point.z)};
+      for (int axis = 0; axis < 3; axis++) {
+        bounds.lower[axis] = std::min(bounds.lower[axis], p[axis]);
+        bounds.upper[axis] = std::max(bounds.upper[axis], p[axis]);
+      }
+    }
+  };
   for (const Object *object : scene->objects) {
     if (progress.get_cancel()) return false;
     if (object->has_light_linking()) {
@@ -337,8 +382,10 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       return false;
     }
     if (stream_facets && mode != Object::COHERENT_INTERFACE_DETECTOR &&
-        (mode != Object::COHERENT_INTERFACE_MIRROR || !geometry->is_mesh())) {
-      progress.set_error("Streamed Mirror Facets supports flat triangle Mirror objects and Lambertian detectors only");
+        ((mode != Object::COHERENT_INTERFACE_MIRROR && mode != Object::COHERENT_INTERFACE_GLASS) ||
+         !geometry->is_mesh()))
+    {
+      progress.set_error("Streamed Facets supports flat triangle Mirror objects, closed convex Glass meshes and Lambertian detectors only");
       return false;
     }
     if (geometry->is_pointcloud()) {
@@ -503,6 +550,11 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     }
     if (mode == Object::COHERENT_INTERFACE_DETECTOR) {
       ++detector_count;
+      if (stream_facets) {
+        StreamedBounds bounds{object, false, {}, {}};
+        mesh_world_bounds(object, mesh, bounds);
+        streamed_bounds.push_back(bounds);
+      }
       continue;
     }
     if (mode == Object::COHERENT_INTERFACE_GLASS) {
@@ -549,7 +601,27 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       }
       triangles.push_back(triangle);
     }
+    if (stream_facets && mode == Object::COHERENT_INTERFACE_GLASS) {
+      /* Native Cycles orients Ng by the object-space winding: world-space
+       * cross products flip under a negative-determinant object transform. */
+      if (transform_negative_scale(tfm)) {
+        for (CoherentPlanarTriangle &triangle : triangles) {
+          std::swap(triangle.point[1], triangle.point[2]);
+          std::swap(triangle.vertex[1], triangle.vertex[2]);
+        }
+      }
+      CoherentConvexHull hull;
+      std::string hull_error;
+      if (!coherent_convex_mesh_validate(triangles, hull, hull_error)) {
+        progress.set_error(hull_error + " (object " + object->name.c_str() + ")");
+        return false;
+      }
+      glass_hulls.emplace_back(object->index, std::move(hull));
+    }
     if (stream_facets) {
+      StreamedBounds bounds{object, mode == Object::COHERENT_INTERFACE_GLASS, {}, {}};
+      mesh_world_bounds(object, mesh, bounds);
+      streamed_bounds.push_back(bounds);
       if (patches.size() >= size_t(INT_MAX)) {
         progress.set_error("Streamed mirror object count exceeds integer range");
         return false;
@@ -557,6 +629,12 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       KernelCoherentPatch patch{};
       patch.object = object->index;
       patch.mode = int(mode);
+      patch.outside_ior = 1.0f;
+      patch.inside_ior = mode == Object::COHERENT_INTERFACE_GLASS ? inside_ior : 1.0f;
+      if (!coherent_patch_polarizer(material, object, patch)) {
+        progress.set_error("Coherent polarizers require a finite constant angle and unlinked checkbox");
+        return false;
+      }
       patch.shape = 2; /* One mesh range, not a planar patch. */
       patch.primitive_type = PRIMITIVE_TRIANGLE;
       patch.primitive_offset = int(mesh->prim_offset);
@@ -619,6 +697,24 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
         "ideal interface");
     return false;
   }
+  /* Streamed Glass supports exterior-air endpoints and non-nested volumes:
+   * no declared object may share bounds with a Glass volume. */
+  for (const StreamedBounds &glass : streamed_bounds) {
+    if (!glass.glass) continue;
+    for (const StreamedBounds &other : streamed_bounds) {
+      if (other.object == glass.object) continue;
+      bool overlap = true;
+      for (int axis = 0; axis < 3; axis++) {
+        overlap &= glass.lower[axis] <= other.upper[axis] && other.lower[axis] <= glass.upper[axis];
+      }
+      if (overlap) {
+        progress.set_error(string("Streamed Glass object ") + glass.object->name.c_str() +
+                           " bounds overlap declared object " + other.object->name.c_str() +
+                           "; nested or touching coherent volumes are unsupported");
+        return false;
+      }
+    }
+  }
   bool has_mirror = false, has_glass = false;
   for (const KernelCoherentPatch &patch : patches) {
     has_mirror |= patch.mode == Object::COHERENT_INTERFACE_MIRROR;
@@ -637,7 +733,11 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     return false;
   }
 
-  constexpr size_t candidate_limit = 64;
+  /* The kernel stores completed fields only for routes that connect at the
+   * shaded detector point (at most COHERENT_SPECULAR_MAX_PATHS). Conservative
+   * root-branch reservations may exceed that; overflow at a pixel is reported
+   * as a render error by the kernel, never silently dropped. */
+  constexpr size_t candidate_limit = 256;
   constexpr size_t search_limit = 256;
   std::vector<KernelCoherentCandidate> candidates;
   size_t searched_states = 0;
@@ -649,6 +749,14 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     if (stream_facets && light.coherence_length < 32.0f*FLT_MIN) {
       progress.set_error("Streamed Gaussian coherence length is below normal float arithmetic range");
       return false;
+    }
+    for (const auto &hull : glass_hulls) {
+      if (!coherent_convex_hull_strictly_outside(
+              hull.second, {double(light.co.x), double(light.co.y), double(light.co.z)}))
+      {
+        progress.set_error("Streamed Glass sources must lie strictly outside every declared Glass volume");
+        return false;
+      }
     }
     for (const KernelCoherentPatch &patch : patches) {
       if (patch.shape == 1 &&
@@ -667,7 +775,7 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       return false;
     }
     if (!stream_facets && candidates.size() >= candidate_limit) {
-      progress.set_error("Coherent specular connection candidate count exceeds 64");
+      progress.set_error("Coherent specular connection candidate count exceeds 256");
       return false;
     }
     KernelCoherentCandidate direct{};
@@ -782,7 +890,7 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
                  * over its winding; reserve the proved 3*p bound, not a seed. */
                 const int branches = sphere_transmission ? 3*(sphere_events-1) : 1;
                 if (candidates.size() + branches > candidate_limit) {
-                  progress.set_error("Coherent specular connection candidate count exceeds 64");
+                  progress.set_error("Coherent specular connection candidate count exceeds 256");
                   return false;
                 }
                 for (int branch = 0; branch < branches; branch++) {
@@ -804,7 +912,7 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
         };
     if (!enumerate(direct, 0, 1.0f, 0, 0)) {
       if (!progress.get_cancel() && !progress.get_error()) {
-        progress.set_error("Coherent specular connection candidate count exceeds 64");
+        progress.set_error("Coherent specular connection candidate count exceeds 256");
       }
       return false;
     }

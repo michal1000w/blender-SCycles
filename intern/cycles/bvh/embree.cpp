@@ -122,6 +122,8 @@ void BVHEmbree::build(Progress &progress,
     rtcReleaseScene(scene);
     scene = nullptr;
   }
+  /* Only bounds callbacks read these copies, and only while committing. */
+  coherent_point_data.clear();
 
   const bool dynamic = params.bvh_type == BVH_TYPE_DYNAMIC;
   const bool compact = params.use_compact_structure;
@@ -613,6 +615,32 @@ void BVHEmbree::set_point_vertex_buffer(RTCGeometry geom_id,
   }
 }
 
+void BVHEmbree::set_coherent_point_data(vector<float4> &data, const PointCloud *pointcloud)
+{
+  const packed_float3 *points = pointcloud->get_position();
+  const float *radius = pointcloud->get_radius();
+  data.resize(pointcloud->num_points());
+  for (size_t j = 0; j < data.size(); ++j) {
+    data[j] = make_float4(float3(points[j]), radius[j]);
+  }
+}
+
+static void rtc_coherent_point_bounds_func(const RTCBoundsFunctionArguments *args)
+{
+  const vector<float4> &data = *static_cast<const vector<float4> *>(args->geometryUserPtr);
+  const float4 point = data[args->primID];
+  /* Conservative by a few ulps; the kernel callback performs the exact test. */
+  const float r = fabsf(point.w) * (1.0f + 4.0f * FLT_EPSILON) + FLT_MIN;
+  const float3 center = make_float3(point.x, point.y, point.z);
+  const float3 pad = make_float3(r, r, r) + fabs(center) * (4.0f * FLT_EPSILON);
+  args->bounds_o->lower_x = center.x - pad.x;
+  args->bounds_o->lower_y = center.y - pad.y;
+  args->bounds_o->lower_z = center.z - pad.z;
+  args->bounds_o->upper_x = center.x + pad.x;
+  args->bounds_o->upper_y = center.y + pad.y;
+  args->bounds_o->upper_z = center.z + pad.z;
+}
+
 void BVHEmbree::add_points(const Object *ob, const PointCloud *pointcloud, const int i)
 {
   assert(pointcloud->primitive_type() & PRIMITIVE_POINT);
@@ -623,6 +651,31 @@ void BVHEmbree::add_points(const Object *ob, const PointCloud *pointcloud, const
     if (attr_P->has_motion()) {
       num_motion_steps = pointcloud->get_motion_steps();
     }
+  }
+
+  /* Embree's native sphere points never report the exit of a ray that starts
+   * inside the sphere. Declared static coherent Glass spheres need that exit,
+   * as on the GPU, so they use Cycles' own analytic test in a user geometry.
+   * The kernel callback keeps front-only hits whenever coherent connections
+   * are disabled, so ordinary rendering is unchanged. */
+  if (ob->get_coherent_interface() == Object::COHERENT_INTERFACE_GLASS &&
+      num_motion_steps == 1 && !rtc_device_is_sycl)
+  {
+    unique_ptr<vector<float4>> data = make_unique<vector<float4>>();
+    set_coherent_point_data(*data, pointcloud);
+
+    RTCGeometry geom_id = rtcNewGeometry(rtc_device, RTC_GEOMETRY_TYPE_USER);
+    rtcSetGeometryBuildQuality(geom_id, build_quality);
+    rtcSetGeometryUserPrimitiveCount(geom_id, unsigned(data->size()));
+    rtcSetGeometryUserData(geom_id, data.get());
+    rtcSetGeometryBoundsFunction(geom_id, rtc_coherent_point_bounds_func, nullptr);
+    rtcSetGeometryMask(geom_id, ob->visibility_for_tracing());
+    rtcSetGeometryEnableFilterFunctionFromArguments(geom_id, true);
+    rtcCommitGeometry(geom_id);
+    rtcAttachGeometryByID(scene, geom_id, i * 2);
+    rtcReleaseGeometry(geom_id);
+    coherent_point_data.emplace_back(unsigned(i * 2), std::move(data));
+    return;
   }
 
   const enum RTCGeometryType type = RTC_GEOMETRY_TYPE_SPHERE_POINT;
@@ -802,14 +855,16 @@ void BVHEmbree::refit(Progress &progress)
         const PointCloud *pointcloud = static_cast<const PointCloud *>(geom);
         if (pointcloud->num_points() > 0) {
           RTCGeometry geom = rtcGetGeometry(scene, geom_id);
-          if (pointcloud->primitive_type() & PRIMITIVE_POINT) {
-            set_point_vertex_buffer(geom, pointcloud, true);
+          bool user_geometry = false;
+          for (auto &entry : coherent_point_data) {
+            if (entry.first == geom_id) {
+              /* Bounds are recomputed from the updated copy on commit. */
+              set_coherent_point_data(*entry.second, pointcloud);
+              user_geometry = true;
+            }
           }
-          else {
-            assert(pointcloud->primitive_type() & PRIMITIVE_GSPLAT);
-            rtcSetGeometryUserData(geom, const_cast<PointCloud *>(pointcloud));
-            rtcSetGeometryUserPrimitiveCount(geom, pointcloud->num_points());
-            rtcSetGeometryBoundsFunction(geom, gsplat_bounds_func, nullptr);
+          if (!user_geometry) {
+            set_point_vertex_buffer(geom, pointcloud, true);
           }
           rtcCommitGeometry(geom);
         }

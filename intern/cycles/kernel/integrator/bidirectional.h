@@ -2283,8 +2283,11 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
         }
       }
       if (kernel_data.integrator.coherent_transport_mode == 1) {
-        coherent_history = coherent_history_stream_after_scatter(
-            coherent_history, patch_index >= 0 && patch_mode == 1, label,
+        /* Native Ng is outward for validated Glass; shading setup flips it
+         * toward the incoming ray and marks the hit backfacing from inside. */
+        coherent_history = coherent_history_stream_after_interface(
+            coherent_history, patch_index >= 0 ? patch_mode : 0, sd.object, label,
+            (sd.runtime_flag & SR_BACKFACING) ? -1 : 1,
             uint(kernel_data.integrator.coherent_max_interface_events));
       }
       else {

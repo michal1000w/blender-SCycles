@@ -24,6 +24,22 @@ CCL_NAMESPACE_BEGIN
  * the ideal-mirror approximation; explicit vector mode uses transported
  * Jones fields for planar mirror and dielectric reflection/transmission. */
 #define COHERENT_SPECULAR_MAX_PATHS 64
+/* Host inventory limit. Only connected routes at one detector point are stored. */
+#define COHERENT_SPECULAR_MAX_CANDIDATES 256
+
+/* Reject the render instead of silently dropping a supported coherent route.
+ * Metal reports through the queue counter; CPU through its thread globals. */
+ccl_device_inline void coherent_specular_report_error(KernelGlobals kg)
+{
+#ifdef __KERNEL_METAL__
+  (void)kg;
+  atomic_fetch_and_or_uint32(&kernel_integrator_state.queue_counter->coherent_error, 1u);
+#elif !defined(__KERNEL_GPU__)
+  kg->coherent_error = 1u;
+#else
+  (void)kg;
+#endif
+}
 ccl_device_inline bool coherent_specular_shared_triangle_edge(KernelGlobals kg,
                                                                const int first_prim,
                                                                const int second_prim)
@@ -171,9 +187,7 @@ ccl_device_inline bool coherent_specular_connect(
             sphere_first, transmit, candidate->sphere_branch, sphere->center,
             sphere->radius, sphere->inside_ior, path, geometric_phase_cycles);
     if (status != COHERENT_SPHERE_TT_OK && status != COHERENT_SPHERE_TT_EMPTY) {
-#ifdef __KERNEL_METAL__
-      atomic_fetch_and_or_uint32(&kernel_integrator_state.queue_counter->coherent_error, 1u);
-#endif
+      coherent_specular_report_error(kg);
     }
     return status == COHERENT_SPHERE_TT_OK;
   }
@@ -195,7 +209,7 @@ Spectrum coherent_specular_vector_intensity(KernelGlobals kg,
                                             ccl_private Spectrum *primary_direct)
 {
   const int candidate_count = kernel_data.integrator.coherent_candidate_count;
-  if (candidate_count < 1 || candidate_count > COHERENT_SPECULAR_MAX_PATHS) {
+  if (candidate_count < 1 || candidate_count > COHERENT_SPECULAR_MAX_CANDIDATES) {
     return zero_spectrum();
   }
   float3 detector_u, detector_v;
@@ -294,6 +308,10 @@ Spectrum coherent_specular_vector_intensity(KernelGlobals kg,
     {
       continue;
     }
+    if (paths == COHERENT_SPECULAR_MAX_PATHS) {
+      coherent_specular_report_error(kg);
+      return zero_spectrum();
+    }
     fields[paths] = field;
     group[paths] = light->coherence_group;
     wavelength[paths] = light->coherence_wavelength;
@@ -357,7 +375,7 @@ Spectrum coherent_specular_complete_intensity(KernelGlobals kg,
     return coherent_specular_vector_intensity(kg, state, sd, primary_direct);
   }
   const int candidate_count = kernel_data.integrator.coherent_candidate_count;
-  if (candidate_count < 1 || candidate_count > COHERENT_SPECULAR_MAX_PATHS) {
+  if (candidate_count < 1 || candidate_count > COHERENT_SPECULAR_MAX_CANDIDATES) {
     return zero_spectrum();
   }
   Spectrum base_power[COHERENT_SPECULAR_MAX_PATHS];
@@ -441,6 +459,10 @@ Spectrum coherent_specular_complete_intensity(KernelGlobals kg,
                            (light->spot.eval_fac * path.spreading * M_1_PI_F);
     if (!isfinite_safe(power) || is_zero(power)) {
       continue;
+    }
+    if (paths == COHERENT_SPECULAR_MAX_PATHS) {
+      coherent_specular_report_error(kg);
+      return zero_spectrum();
     }
     base_power[paths] = max(power, zero_spectrum());
     optical_path[paths] = path.optical_length_split;
