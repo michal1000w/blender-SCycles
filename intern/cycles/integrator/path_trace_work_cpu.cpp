@@ -114,6 +114,15 @@ void PathTraceWorkCPU::render_samples(RenderStatistics &statistics,
     }
   }
 
+  bool coherent_error = false;
+  for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
+    coherent_error |= kernel_globals.coherent_error != 0;
+    kernel_globals.coherent_error = 0;
+  }
+  if (coherent_error) {
+    device_->set_error(COHERENT_SPECULAR_ERROR_MESSAGE);
+  }
+
   statistics.occupancy = 1.0f;
 }
 

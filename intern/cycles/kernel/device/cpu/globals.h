@@ -82,6 +82,11 @@ struct ThreadKernelGlobalsCPU : public KernelGlobalsCPU {
   OSLThreadData osl;
 #endif
 
+  /* Set by the coherent connector when it must reject a render rather than
+   * silently drop a supported path (unresolved caustic, stored-path overflow).
+   * Per thread, so no atomics are needed; read after each sample batch. */
+  mutable uint coherent_error = 0;
+
 #if defined(__PATH_GUIDING__)
   /* Pointers to shared global data structures. */
   openpgl::cpp::SampleStorage *opgl_sample_data_storage = nullptr;

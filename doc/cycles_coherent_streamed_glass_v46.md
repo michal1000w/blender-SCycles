@@ -1,0 +1,57 @@
+# v46: CPU coherent transport, streamed closed-convex Glass, and regressions fixed
+
+This increment continues [the handoff](cycles_diffraction_handoff.md). It adds CPU support for coherent specular connections, implements the pending "real closed-Glass refraction" dependency for the streamed facet mode, and fixes three pre-existing defects found while validating on CPU. All CPU and Metal acceptance sets pass (see "Evidence").
+
+## What is new
+
+**CPU backend.** Coherent specular connections (bounded and streamed modes) now run on CPU and on Metal; the host rejects other GPU backends (`scene.cpp: coherent_specular_device_supported`). CPU renders PT and CPU path guiding; BDPT and GPU guiding stay Metal features (the integrator falls back to PT on CPU, as before). CPU OSL shading also passes.
+
+**Streamed closed-convex Glass** (`coherent_transport_mode = FACET_SINGLE_REFLECTION`, UI name now "Streamed Facets"). Objects declared *Ideal Glass* may be flat-shaded triangle meshes forming one closed, edge-manifold, outward-oriented, convex volume. With *Max Interface Events* 1 the inventory adds exterior Fresnel reflection on every Glass facet; with 2 it adds every ordered pair of reflections on mirrors and exterior Glass sides, and entry/exit refraction (TT) through every ordered pair of distinct facets of one Glass object. Sources and detector are in exterior air. The Glass polarizer (transmission analyzer) is honoured on TT.
+
+* TT uses the existing Fermat/Newton planar solver (`coherent_geometry_connect`); for two planes the optical length is convex, so the stationary chord is unique. Flux-normalized Fresnel s/p Jones factors, implicit-differentiation spreading and compensated OPL are the same components as bounded planar Glass.
+* Facet orientation follows native Cycles: outward = object-space winding, reversed under negative object scale (`SD_OBJECT_NEGATIVE_SCALE`), exactly like `triangle_normal()`.
+* BDPT ownership: `coherent_history_stream_after_interface` owns mirror R, exterior Glass R and one complete entry/exit pair through one object. A prefix inside Glass is never owned; internal reflection, rough/unmarked events or exits through another object return the path to native transport.
+* Host validation (`scene/coherent_convex_mesh.h`): at least four faces, every edge shared by exactly two oppositely oriented faces, one connected component, positive (outward) volume, convexity against the float-representation bound. Sources must be strictly outside every Glass hull. Glass bounds may not overlap any other declared Mirror/Glass/Detector object (no nesting). Vector polarization mode is required. Cost: O(F) for one event, O(F²) for two (TT pairs run a small Newton solve).
+
+## Defects fixed
+
+1. **CPU could not see exits from declared Glass point spheres.** Embree 4.4.1 `RTC_GEOMETRY_TYPE_SPHERE_POINT` never reports the exit root of a ray that starts inside the sphere (probe: inside-origin rays return no hit). The GPU intersector was already two-sided for declared coherent Glass points. Static coherent Glass point clouds are now Embree user geometry whose kernel callbacks use Cycles' own analytic test (front root, and the exit root only when coherent connections are enabled) and invoke the normal query filters (`kernel/device/cpu/bvh.h`, `bvh/embree.cpp`). The BVH is rebuilt when the declaration changes. Without this, CPU TT/TRT/TRRT sphere routes were silently missing (error = the omitted-internal-path control, 1.52e-3).
+2. **v39 mixed mirror + sphere TT fixture had been broken since v40** (Metal too, confirmed with the immutable v40 and v45 packages): v40's reservation of three root branches per sphere TT raised the candidate count to 90 > 64. The host limit is now 256 candidates; the kernel still stores at most 64 *connected* routes per detector point and rejects the render with an explicit error instead of dropping routes if exceeded.
+3. **CPU silently dropped coherent solver failures** (unresolved sphere caustic etc.). CPU now reports them as a render error through a per-thread flag, like Metal (`COHERENT_SPECULAR_ERROR_MESSAGE`).
+
+## Evidence
+
+All renders: 128 samples, seed 19, BOX filter, adaptive and denoising off, fixed declared 1 mW sources, independent references and gates declared before rendering. Result folders are under `build/tests/performance/{cpu,metal}_coherent_v46/`.
+
+| Set | Reference / gates | CPU (PT + guiding) | Metal (PT, BDPT, guiding) |
+| --- | --- | --- | --- |
+| v46 closed slab (pending since v45) | radial oracle, 1e-5 / 2e-5 | 6/6, mean error 8.6e-10 | 9/9 |
+| New streamed Glass: prism TT (phase 0/π, distinct, partial coherence, negative scale, linked instance), rotated cube + mirror (exterior R, mirror R, mirror→Glass RR) | new independent oracle, corrected references | 18/18 | 27/27 |
+| v45 two reflections | unchanged v45 | 6/6, bit-identical to pre-Glass build | 9/9 |
+| v44 one reflection | unchanged v44 | 18/18, bit-identical | 27/27 |
+| v42 coherent polarizer | unchanged v42 | 32/32 | (v43 Metal evidence retained) |
+| v39 R/TT + v40 TRT/TRRT spheres | v39 corrected-Jones / v40 | 24/24 | 36/36 (`metal_coherent_v46/bounded`) |
+| Host guards (open, inward, concave, disconnected, source inside, overlap, scalar mode, smooth shading; valid variants render) | expected messages | 11/11 | n/a (host) |
+| Standalone: convex validator + streamed history + budget split | — | 41/41 strict and fast-math | — |
+| Existing standalone coherent unit tests | — | all pass | path-field Metal compile pass |
+| CPU OSL spot checks (prism, cube, v45 corner) | same gates | 5/5 | — |
+
+**Independent Glass oracle** (`tests/python/cycles_coherent_streamed_glass_reference.py`): 3D complex E-vectors, Householder mirrors, Born–Wolf Fresnel with flux normalization, SciPy Fermat minimization for TT, finite-difference spreading, brute-force double visibility. It agrees with the separately derived v46 slab radial oracle to 5e-11. Gates (`cycles_coherent_streamed_glass_plan.py`) come from a 128-spp Monte Carlo noise model (including the stochastic Gaussian-coherence variance for the partial-coherence variant) plus 4×4-vs-2×2 quadrature error; every omission control (drop TT, drop exterior Glass R, drop two-event reflections, IOR→1) exceeds the gates by 10–600×.
+
+**Oracle correction (preserved).** The first declared references (`build/tests/performance/coherent_streamed_glass_v46`) contained oracle defects, noticed because the negative-scale reference differed from phase 0 although the geometry is identical: the spreading stencil dropped paths within ~1e-7 m of internal triangle edges (13 pixels in two variants), warm starts were shared across sources, and exact shared-edge hits were double counted. The corrections were verified only against geometry identities and the slab oracle, never against render values; gate formulas are unchanged. Originals, CPU results against them (18/18 pass) and `coherent_streamed_glass_v46_oracle_fix/reference_correction_provenance.json` are kept.
+
+## Remaining scope (honest)
+
+Supported now: native polarizer; bounded planar/sphere histories; streamed mirror facets through two events; streamed closed convex Glass with exterior R, mixed RR and one entry/exit pair. Still unsupported: internal reflections inside streamed Glass (TRT, needs ≥3 events), nested/overlapping or concave dielectrics, general smooth/rough curved surfaces, longer chains, volumes, motion, photon mapping, edge diffraction, and full broadband spectral coherence. These histories keep native incoherent transport.
+
+## Reproduction
+
+```sh
+./compile.sh -j4 --no-fetch-libraries
+python3 tests/performance/run_cycles_coherent_streamed_glass_host_test.py
+install/Blender.app/Contents/MacOS/Blender --background --factory-startup --python tests/python/cycles_coherent_streamed_glass_scene.py -- OUT
+python3 tests/python/cycles_coherent_streamed_glass_plan.py OUT PLAN_DIR
+python3 tests/python/cycles_coherent_cpu_plan.py [--metal] --plan PLAN_DIR/plan.json --output-dir RUN --out-plan RUN/plan.json
+install/Blender.app/Contents/MacOS/Blender --background --factory-startup --python-exit-code 73 --python tests/python/cycles_coherent_mirror_batch_worker.py -- RUN/plan.json
+python3 tests/python/cycles_coherent_polarizer_check.py --plan RUN/plan.json --report RUN/gates.json
+```
