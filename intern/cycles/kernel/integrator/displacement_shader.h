@@ -44,7 +44,7 @@ ccl_device void displacement_shader_eval(KernelGlobals kg,
 
 #ifdef __KERNEL_METAL_VISIBLE_SHADING__
 /* Run the displacement interpreter loop in the calling function; only its shared nodes are
- * separate calls. The pixel displacement function uses this to bound the Metal call depth. */
+ * separate calls. The pixel displacement evaluator uses this to bound the Metal call depth. */
 template<typename ConstIntegratorGenericState>
 ccl_device void displacement_shader_eval_direct(KernelGlobals kg,
                                                 ConstIntegratorGenericState state,

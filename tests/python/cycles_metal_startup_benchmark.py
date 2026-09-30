@@ -216,6 +216,31 @@ def edit_displacement(scene):
         nodes["Displacement Noise"].inputs["Scale"].default_value = 6.0
 
 
+def edit_add_displacement(scene):
+    """Add a displacement shader to the floor, or reconnect the existing one."""
+    floor_material = bpy.data.materials["Floor"]
+    nodes = floor_material.node_tree.nodes
+    links = floor_material.node_tree.links
+    if "Displacement" not in nodes:
+        noise = nodes.new("ShaderNodeTexNoise")
+        noise.name = "Displacement Noise"
+        noise.inputs["Scale"].default_value = 4.0
+        displacement = nodes.new("ShaderNodeDisplacement")
+        displacement.name = "Displacement"
+        displacement.inputs["Scale"].default_value = 0.2
+        links.new(noise.outputs["Fac"], displacement.inputs["Height"])
+    links.new(nodes["Displacement"].outputs[0], nodes["Material Output"].inputs["Displacement"])
+    floor_material.displacement_method = "DISPLACEMENT"
+
+
+def edit_remove_displacement(scene):
+    """Disconnect the floor displacement, which disables pixel level displacement."""
+    floor_material = bpy.data.materials["Floor"]
+    output = floor_material.node_tree.nodes["Material Output"]
+    for link in list(output.inputs["Displacement"].links):
+        floor_material.node_tree.links.remove(link)
+
+
 def edit_resolution(scene):
     scene.render.resolution_x = scene.render.resolution_x + 32
 
@@ -250,6 +275,8 @@ EDITS = {
     "new_node": edit_new_node,
     "resolution": edit_resolution,
     "displacement": edit_displacement,
+    "add_displacement": edit_add_displacement,
+    "remove_displacement": edit_remove_displacement,
     "enable_bdpt": edit_enable_bdpt,
     "enable_photons": edit_enable_photons,
     "enable_guiding": edit_enable_guiding,
@@ -277,7 +304,8 @@ def main():
         time.sleep(args.pause)
 
     if args.edits == "all":
-        edits = [name for name in EDITS if not name.startswith(("enable_", "disable_"))]
+        edits = [name for name in EDITS
+                 if not name.startswith(("enable_", "disable_", "add_", "remove_"))]
     elif args.edits == "transport":
         edits = ["enable_bdpt", "enable_photons", "enable_guiding", "disable_all"]
     elif args.edits == "none":

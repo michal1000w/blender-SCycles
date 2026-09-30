@@ -30,6 +30,13 @@ ccl_device_inline bool pixel_displacement_active(KernelGlobals kg, const int pri
   return (kernel_data_fetch(shaders, shader_index).flags & SD_HAS_DISPLACEMENT) != 0;
 }
 
+/* Only the rays of the intersection kernels intersect the displaced surface. Rays traced while
+ * shading (ambient occlusion, bevel, light transport connections) use the base triangles. */
+ccl_device_inline bool pixel_displacement_intersects(KernelGlobals kg, const int prim)
+{
+  return pixel_displacement_rays && pixel_displacement_active(kg, prim);
+}
+
 ccl_device_inline float3 pixel_displacement_base_position(ccl_private const float3 verts[3],
                                                           const float u,
                                                           const float v)
@@ -61,7 +68,7 @@ ccl_device_inline bool pixel_displacement_shared_edge_shadow_hit(
     return false;
   }
 
-  if (!pixel_displacement_active(kg, self.prim) || !pixel_displacement_active(kg, prim)) {
+  if (!pixel_displacement_intersects(kg, self.prim) || !pixel_displacement_active(kg, prim)) {
     return false;
   }
 
@@ -239,6 +246,11 @@ ccl_device_inline bool pixel_displacement_intersect_surface(
 #else
 
 ccl_device_inline bool pixel_displacement_active(KernelGlobals /*kg*/, const int /*prim*/)
+{
+  return false;
+}
+
+ccl_device_inline bool pixel_displacement_intersects(KernelGlobals /*kg*/, const int /*prim*/)
 {
   return false;
 }

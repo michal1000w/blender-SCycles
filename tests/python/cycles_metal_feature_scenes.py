@@ -31,6 +31,8 @@ def parse_args():
                         "Realistic grating cache takes very long to build")
     parser.add_argument("--resolution", type=int, default=96)
     parser.add_argument("--samples", type=int, default=16)
+    parser.add_argument("--metalrt", default="", choices=("", "OFF", "ON", "AUTO"),
+                        help="Override the MetalRT preference, OFF selects the software BVH")
     parser.add_argument("--timing", action="store_true",
                         help="Render every scene twice and report the second render time")
     return parser.parse_args(argv)
@@ -269,6 +271,92 @@ def scene_displacement(args):
     plane.data.materials.append(mat)
 
 
+def displaced_plane(material_name, height_socket_fn, scale=0.4, subdivision=5):
+    """Plane with true displacement from the node returned by `height_socket_fn`."""
+    bpy.ops.mesh.primitive_plane_add(size=4.0)
+    plane = bpy.context.object
+    bpy.ops.object.modifier_add(type="SUBSURF")
+    plane.modifiers[0].levels = subdivision
+    plane.modifiers[0].render_levels = subdivision
+    plane.modifiers[0].subdivision_type = "SIMPLE"
+    mat, bsdf = principled(material_name, (0.7, 0.7, 0.75, 1))
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    displacement = nodes.new("ShaderNodeDisplacement")
+    displacement.inputs["Scale"].default_value = scale
+    links.new(height_socket_fn(nodes), displacement.inputs["Height"])
+    links.new(displacement.outputs[0], nodes["Material Output"].inputs["Displacement"])
+    mat.displacement_method = "DISPLACEMENT"
+    plane.data.materials.append(mat)
+    return plane, mat, bsdf
+
+
+def noise_height(nodes):
+    noise = nodes.new("ShaderNodeTexNoise")
+    noise.inputs["Scale"].default_value = 3.0
+    return noise.outputs["Fac"]
+
+
+def scene_displacement_metalrt(args):
+    """Clamped displacement resolution uses the cached micromesh, which MetalRT intersects."""
+    scene = new_scene(args)
+    scene.cycles.use_pixel_displacement_resolution_clamp = True
+    scene.cycles.pixel_displacement_resolution = 256
+    displaced_plane("Displaced cached", noise_height)
+
+
+def scene_displacement_image(args):
+    """Image texture height, which uses the image evaluator of pixel displacement."""
+    new_scene(args)
+    image = bpy.data.images.new("Height", 128, 128, float_buffer=True)
+    image.generated_type = "COLOR_GRID"
+
+    def image_height(nodes):
+        tex = nodes.new("ShaderNodeTexImage")
+        tex.image = image
+        return tex.outputs["Color"]
+
+    displaced_plane("Displaced image", image_height, scale=0.2)
+
+
+def scene_displacement_subsurface(args):
+    new_scene(args)
+    _, _, bsdf = displaced_plane("Displaced skin", noise_height)
+    bsdf.inputs["Base Color"].default_value = (0.8, 0.4, 0.3, 1)
+    bsdf.inputs["Subsurface Weight"].default_value = 1.0
+    bsdf.inputs["Subsurface Scale"].default_value = 0.2
+
+
+def scene_displacement_ao(args):
+    """Ambient occlusion node on a displaced surface: local hits evaluate displaced normals."""
+    new_scene(args)
+    _, mat, bsdf = displaced_plane("Displaced AO", noise_height)
+    ao = mat.node_tree.nodes.new("ShaderNodeAmbientOcclusion")
+    ao.inputs["Distance"].default_value = 0.5
+    mat.node_tree.links.new(ao.outputs["Color"], bsdf.inputs["Base Color"])
+
+
+def scene_displacement_ao_metalrt(args):
+    """Ambient occlusion on a cached displaced surface, intersected by MetalRT."""
+    scene = new_scene(args)
+    scene.cycles.use_pixel_displacement_resolution_clamp = True
+    scene.cycles.pixel_displacement_resolution = 256
+    _, mat, bsdf = displaced_plane("Displaced AO cached", noise_height)
+    ao = mat.node_tree.nodes.new("ShaderNodeAmbientOcclusion")
+    ao.inputs["Distance"].default_value = 0.5
+    mat.node_tree.links.new(ao.outputs["Color"], bsdf.inputs["Base Color"])
+
+
+def scene_displacement_motion(args):
+    """Moving displaced object with motion blur, which uses the software BVH."""
+    scene = new_scene(args)
+    scene.render.use_motion_blur = True
+    plane, _, _ = displaced_plane("Displaced moving", noise_height)
+    plane.keyframe_insert("location", frame=1)
+    plane.location.x += 0.3
+    plane.keyframe_insert("location", frame=2)
+    scene.frame_set(1)
+
+
 def scene_world_sky(args):
     scene = new_scene(args)
     nodes = scene.world.node_tree.nodes
@@ -418,6 +506,12 @@ SCENES = {
     "guiding": scene_guiding,
     "diffraction": scene_diffraction,
     "polarizer": scene_polarizer,
+    "displacement_metalrt": scene_displacement_metalrt,
+    "displacement_image": scene_displacement_image,
+    "displacement_subsurface": scene_displacement_subsurface,
+    "displacement_ao": scene_displacement_ao,
+    "displacement_ao_metalrt": scene_displacement_ao_metalrt,
+    "displacement_motion": scene_displacement_motion,
 }
 
 
@@ -426,6 +520,8 @@ def enable_device(args):
         return
     prefs = bpy.context.preferences.addons["cycles"].preferences
     prefs.compute_device_type = "METAL"
+    if args.metalrt:
+        prefs.metalrt = args.metalrt
     prefs.get_devices()
     for device in prefs.devices:
         device.use = device.type == "METAL"

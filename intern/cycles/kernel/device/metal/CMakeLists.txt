@@ -78,6 +78,9 @@ if(WITH_CYCLES_DEVICE_METAL)
       -D__KERNEL_METAL_TARGET_CPU_ARM64__
       -D__KERNEL_METAL_MACOS__=${CYCLES_METAL_MACOS_MAJOR}
       -D__KERNEL_METAL_VISIBLE_SHADING__
+      # Pixel displacement is inactive at runtime unless the scene enables it.
+      -D__KERNEL_METAL_PIXEL_DISPLACEMENT__
+      -D__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__
     )
     if(CYCLES_METAL_MACOS_MAJOR GREATER_EQUAL 14)
       list(APPEND cycles_metal_common_flags -D__METAL_GLOBAL_BUILTINS__)

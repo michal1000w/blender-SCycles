@@ -15,6 +15,13 @@ class MetalKernelContext {
     constant KernelParamsMetal &launch_params_metal;
     constant MetalAncillaries *metal_ancillaries;
 
+    /* Rays intersect pixel displaced surfaces, see pixel_displacement_intersects(). */
+#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+    bool pixel_displacement_rays = kernel_pixel_displacement_rays;
+#else
+    bool pixel_displacement_rays = false;
+#endif
+
     MetalKernelContext(constant KernelParamsMetal &_launch_params_metal, constant MetalAncillaries * _metal_ancillaries)
     : launch_params_metal(_launch_params_metal), metal_ancillaries(_metal_ancillaries)
     {}
