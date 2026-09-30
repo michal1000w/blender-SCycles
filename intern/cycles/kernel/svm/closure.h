@@ -979,8 +979,7 @@ ccl_device
         }
         if (polarizer) {
           const float angle = stack_load(stack, bsdf_data.polarizer_angle);
-          float3 axis = make_float3(cosf(angle), sinf(angle), 0);
-          object_dir_transform(kg, sd, &axis);
+          const float3 axis = object_polarizer_axis(kg, sd, angle);
           const bool attached = bsdf_diffraction_glass_set_polarizer(
               sd, polarizer_first, safe_normalize(axis));
           if (!attached) {
@@ -1055,8 +1054,7 @@ ccl_device
         bsdf_microfacet_setup_fresnel_generalized_schlick(kg, bsdf, sd->wi, fresnel, is_multiggx);
         if (polarizer) {
           const float angle = stack_load(stack, bsdf_data.polarizer_angle);
-          float3 axis = make_float3(cosf(angle), sinf(angle), 0);
-          object_dir_transform(kg, sd, &axis);
+          const float3 axis = object_polarizer_axis(kg, sd, angle);
           bsdf_microfacet_set_polarizer(bsdf, safe_normalize(axis));
         }
       }
