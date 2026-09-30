@@ -39,7 +39,9 @@ TABLE_FUNCTIONS = {
     "vft_polarization": r"cycles_metal_polarization_surface_transport",
     "vft_diffraction": r"cycles_metal_diffraction_power_column",
     "vft_mnee": r"cycles_metal_mnee_sample",
-    "vft_pixel_displacement": r"cycles_metal_pixel_displacement_shader_setup",
+    "vft_pixel_displacement_eval": r"cycles_metal_pixel_displacement_eval",
+    "vft_pixel_displacement_intersect": r"cycles_metal_pixel_displacement_intersect",
+    "vft_scene_intersect": r"cycles_metal_scene_intersect",
 }
 
 
@@ -56,11 +58,11 @@ def host_function_body(name):
     return body[:body.index("\n}")]
 
 
-def host_shading_kernels(displacement):
+def host_shading_kernels(software_bvh):
     """Evaluate metal_kernel_uses_shading_functions() from device/metal/kernel.h."""
     body = host_function_body("metal_kernel_uses_shading_functions")
-    if not displacement:
-        body = re.sub(r"\(pixel_displacement && [^)]*\)", "", body, flags=re.S)
+    if not software_bvh:
+        body = re.sub(r"\(software_bvh && [^)]*\)", "", body, flags=re.S)
     order = device_kernel_order()
     index = {name: i for i, name in enumerate(order)}
     kernels = set()
@@ -71,14 +73,18 @@ def host_shading_kernels(displacement):
     return {name[len("DEVICE_KERNEL_"):].lower() for name in kernels}
 
 
-def host_call_depths(displacement):
-    """Evaluate metal_kernel_shading_call_depth() from device/metal/kernel.h."""
+def host_call_depths(software_bvh):
+    """Evaluate metal_kernel_shading_call_depth() from device/metal/kernel.h.
+
+    Returns a function mapping a lowercase kernel name to its declared depth."""
     body = host_function_body("metal_kernel_shading_call_depth")
-    deep, default = re.search(r"\?\s*(\d+)\s*:\s*(\d+)\)", body).groups()
-    extra = int(re.search(r"pixel_displacement \? (\d+) : 0", body).group(1)) if displacement else 0
-    kernels = {name[len("DEVICE_KERNEL_"):].lower()
-               for name in re.findall(r"kernel == (DEVICE_KERNEL_\w+)", body)}
-    return kernels, int(deep) + extra, int(default) + extra
+    default = int(re.search(r"int depth = (\d+);", body).group(1))
+    extra = int(re.search(r"software_bvh \? (\d+) : 0", body).group(1)) if software_bvh else 0
+    tiers = {}
+    for condition, depth in re.findall(r"if \((.*?)\)\s*\{\s*depth = (\d+);", body, re.S):
+        for name in re.findall(r"kernel == DEVICE_KERNEL_(\w+)", condition):
+            tiers.setdefault(name.lower(), int(depth))
+    return lambda kernel: tiers.get(kernel, default) + extra
 
 
 def ancillary_tables():
@@ -86,10 +92,10 @@ def ancillary_tables():
     text = (CYCLES / "kernel" / "device" / "metal" / "compat.h").read_text()
     struct = text[text.index("struct MetalAncillaries {"):]
     struct = struct[:struct.index("};")]
-    return re.findall(r"visible_function_table<\w+> (vft_\w+);", struct)
+    return re.findall(r"visible_function_table<\w+>\s+(vft_\w+);", struct)
 
 
-def compile_ir(metalrt, displacement, output, motion=False):
+def compile_ir(metalrt, output, motion=False):
     defines = [
         "-D__KERNEL_METAL_VISIBLE_SHADING__", "-D__KERNEL_LOCAL_ATOMIC_SORT__",
         "-D__KERNEL_METAL_APPLE__", "-D__METAL_FUNCTION_CONSTANTS_64BIT__",
@@ -100,9 +106,9 @@ def compile_ir(metalrt, displacement, output, motion=False):
         defines.append("-D__KERNEL_METALRT__")
     if motion:
         defines.append("-D__METALRT_MOTION__")
-    if displacement:
-        defines += ["-D__KERNEL_METAL_PIXEL_DISPLACEMENT__",
-                    "-D__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__"]
+    # The complete library always includes pixel displacement, see device_impl.mm.
+    defines += ["-D__KERNEL_METAL_PIXEL_DISPLACEMENT__",
+                "-D__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__"]
     subprocess.run(["xcrun", "-sdk", "macosx", "metal", "-S", "-emit-llvm", "-std=metal3.2",
                     "-ffast-math", "-w", f"-I{CYCLES}", *defines, "-o", str(output),
                     str(CYCLES / "kernel" / "device" / "metal" / "kernel.metal")], check=True)
@@ -238,24 +244,34 @@ def analyze(ll_path, tables):
     return {k[len("cycles_metal_"):]: (uses_tables(k), depth(k)) for k in kernels}
 
 
+def host_table_order():
+    """MetalVisibleFunctionTable entries from device/metal/kernel.h, as table field names."""
+    text = (CYCLES / "device" / "metal" / "kernel.h").read_text()
+    body = text[text.index("METAL_VFT_SVM,"):text.index("METAL_VFT_NUM")]
+    return ["vft_" + name.lower() for name in re.findall(r"METAL_VFT_(\w+),", body)]
+
+
 def main():
     tables = ancillary_tables()
     errors = []
+    if tables != host_table_order():
+        print("FAILED: MetalAncillaries tables in compat.h do not match MetalVisibleFunctionTable")
+        print("  compat.h: " + ", ".join(tables))
+        print("  kernel.h: " + ", ".join(host_table_order()))
+        return 1
     with tempfile.TemporaryDirectory() as tmp:
-        variants = [(False, False, False), (True, False, False), (True, True, False),
-                    (False, False, True), (True, False, True), (True, True, True)]
-        for metalrt, motion, displacement in variants:
-            linked = host_shading_kernels(displacement)
-            deep_kernels, deep_depth, default_depth = host_call_depths(displacement)
-            ll_path = Path(tmp) / f"kernel_{int(metalrt)}{int(motion)}{int(displacement)}.ll"
-            compile_ir(metalrt, displacement, ll_path, motion)
+        for metalrt, motion in [(False, False), (True, False), (True, True)]:
+            # Only the software BVH traversal calls the displacement ray solver.
+            linked = host_shading_kernels(not metalrt)
+            declared_depth = host_call_depths(not metalrt)
+            ll_path = Path(tmp) / f"kernel_{int(metalrt)}{int(motion)}.ll"
+            compile_ir(metalrt, ll_path, motion)
             for kernel, (uses, depth) in sorted(analyze(ll_path, tables).items()):
-                variant = (("metalrt" + ("_motion" if motion else "")) if metalrt else "software") + \
-                    ("+disp" if displacement else "")
+                variant = ("metalrt" + ("_motion" if motion else "")) if metalrt else "software"
                 if uses and kernel not in linked:
                     errors.append(f"{variant}: {kernel} calls shading functions but does not link them")
                 if kernel in linked:
-                    declared = deep_depth if kernel in deep_kernels else default_depth
+                    declared = declared_depth(kernel)
                     if depth > declared:
                         chain = " -> ".join(c.replace("cycles_metal_", "")[:40]
                                             for c in analyze.chains["cycles_metal_" + kernel])

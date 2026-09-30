@@ -278,7 +278,7 @@ __intersection__tri_shadow_all(constant KernelParamsMetal &launch_params_metal [
   PrimitiveIntersectionResult result;
 #  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
   MetalKernelContext context(launch_params_metal);
-  if (context.pixel_displacement_active(nullptr, prim)) {
+  if (context.pixel_displacement_intersects(nullptr, prim)) {
     result.accept = false;
     result.continue_search = true;
     return result;
@@ -468,7 +468,7 @@ __intersection__tri(constant KernelParamsMetal &launch_params_metal [[buffer(1)]
 
 #  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
   MetalKernelContext context(launch_params_metal);
-  if (context.pixel_displacement_active(nullptr, primitive_id + primitive_id_offset)) {
+  if (context.pixel_displacement_intersects(nullptr, primitive_id + primitive_id_offset)) {
     result.accept = false;
     return result;
   }
@@ -498,7 +498,7 @@ __intersection__tri_shadow(constant KernelParamsMetal &launch_params_metal [[buf
   uint prim = primitive_id + primitive_id_offset;
 #  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
   MetalKernelContext context(launch_params_metal);
-  if (context.pixel_displacement_active(nullptr, prim)) {
+  if (context.pixel_displacement_intersects(nullptr, prim)) {
     PrimitiveIntersectionResult result;
     result.accept = false;
     result.continue_search = true;
@@ -544,7 +544,7 @@ ccl_device_inline bool metalrt_pixel_displacement_intersect(
   }
 
 #  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (context.pixel_displacement_active(kg, prim)) {
+  if (context.pixel_displacement_intersects(kg, prim)) {
     return context.pixel_displacement_intersect_cached_surface(kg,
                                                                object,
                                                                prim,
@@ -698,7 +698,7 @@ __intersection__pixel_displacement(constant KernelParamsMetal &launch_params_met
       result.distance = t;
 #  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
       MetalKernelContext context(launch_params_metal);
-      if (context.pixel_displacement_active(nullptr, prim) && t < payload.pixel_displacement_t) {
+      if (context.pixel_displacement_intersects(nullptr, prim) && t < payload.pixel_displacement_t) {
         payload.pixel_displacement_t = t;
         payload.pixel_displacement_u = u;
         payload.pixel_displacement_v = v;
@@ -1330,18 +1330,62 @@ CCL_METAL_SVM_FUNCTIONS(CCL_METAL_SVM_VISIBLE_FUNCTION)
 }
 #  endif
 
-#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__
-[[visible]] void cycles_metal_pixel_displacement_shader_setup(constant void *launch_params,
-                                                              constant void *ancillaries,
-                                                              thread void *sd,
-                                                              float time,
-                                                              bool motion,
-                                                              thread const float3 *verts)
+[[visible]] float3 cycles_metal_pixel_displacement_eval(constant void *launch_params,
+                                                       constant void *ancillaries,
+                                                       int object,
+                                                       int prim,
+                                                       float u,
+                                                       float v,
+                                                       float time,
+                                                       bool motion,
+                                                       thread const float3 *verts,
+                                                       bool force_full)
 {
   MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
                              (constant MetalAncillaries *)ancillaries);
-  context.pixel_displacement_shader_setup_impl(
-      nullptr, (thread ShaderData *)sd, time, motion, verts);
+  return force_full ? context.pixel_displacement_eval_object_direct<true, false, true>(
+                          nullptr, object, prim, u, v, time, motion, verts) :
+                      context.pixel_displacement_eval_object_direct<true, false, false>(
+                          nullptr, object, prim, u, v, time, motion, verts);
+}
+
+#  ifndef __KERNEL_METALRT__
+[[visible]] bool cycles_metal_scene_intersect(constant void *launch_params,
+                                              constant void *ancillaries,
+                                              thread const void *ray,
+                                              uint visibility,
+                                              thread void *isect,
+                                              bool pixel_displacement_rays)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  /* The caller's kernel decides whether its rays intersect displaced surfaces. */
+  context.pixel_displacement_rays = pixel_displacement_rays;
+  return context.scene_intersect_impl(
+      nullptr, (thread const Ray *)ray, visibility, (thread Intersection *)isect);
+}
+#  endif
+
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+[[visible]] bool cycles_metal_pixel_displacement_intersect(constant void *launch_params,
+                                                           constant void *ancillaries,
+                                                           float3 P,
+                                                           float3 dir,
+                                                           float tmin,
+                                                           float tmax,
+                                                           float time,
+                                                           int object,
+                                                           int prim,
+                                                           bool motion,
+                                                           thread const float3 *verts,
+                                                           thread float *u,
+                                                           thread float *v,
+                                                           thread float *t)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  return context.pixel_displacement_intersect_displaced_surface_impl(
+      nullptr, P, dir, tmin, tmax, time, object, prim, motion, verts, u, v, t);
 }
 #  endif
 

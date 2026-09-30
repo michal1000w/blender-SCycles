@@ -177,6 +177,10 @@ struct ShaderCache {
   /* Separately compiled shading functions, by library checksum. */
   std::map<string, std::shared_ptr<MetalVisibleFunctions>> visible_functions;
   std::vector<std::thread> visible_function_threads;
+  /* Specialized pixel displacement functions, by generic functions and evaluator set. */
+  std::map<std::pair<const MetalVisibleFunctions *, int>,
+           std::shared_ptr<MetalDisplacementFunctions>>
+      displacement_functions;
   /* Requests that are queued or compiling, to avoid compiling the same pipeline twice. */
   std::set<std::pair<DeviceKernel, string>> in_flight;
   std::deque<unique_ptr<MetalKernelPipeline>> link_queue;
@@ -633,10 +637,12 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
   /* A scene edit may replace the device's library while this request is queued. */
   pipeline->mtlLibrary = [device->mtlLibrary[pso_type] retain];
   pipeline->complete_generic = pso_type == PSO_GENERIC && device->use_visible_shading;
-  /* Pixel displacement always uses the scene-specialized library, never the complete one. */
-  pipeline->pixel_displacement_library = false;
+  /* The software BVH library of the complete generic set calls its traversal and the pixel
+   * displacement ray solver as separate functions. */
+  pipeline->software_bvh_library = pipeline->complete_generic &&
+                                         !device->use_metalrt_for_current_scene();
   if (pipeline->complete_generic &&
-      metal_kernel_uses_shading_functions(device_kernel, pipeline->pixel_displacement_library))
+      metal_kernel_uses_shading_functions(device_kernel, pipeline->software_bvh_library))
   {
     pipeline->visible_functions = device->visible_functions;
   }
@@ -815,10 +821,37 @@ bool MetalKernelPipeline::should_use_binary_archive() const
   return false;
 }
 
-static MTLFunctionConstantValues *GetConstantValues(
-    const KernelData *data = nullptr, const MetalPipelineType pso_type = PSO_GENERIC)
+/* Kernels whose rays intersect pixel displaced surfaces. Rays traced while shading use the base
+ * triangles, see pixel_displacement_intersects(). */
+static bool metal_kernel_pixel_displacement_rays(const DeviceKernel kernel)
+{
+  return kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+         kernel <= DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE;
+}
+
+/* `displacement_evaluator_set` specializes the pixel displacement functions when not negative,
+ * see MetalDisplacementFunctions. */
+static MTLFunctionConstantValues *GetConstantValues(const KernelData *data = nullptr,
+                                                    const MetalPipelineType pso_type = PSO_GENERIC,
+                                                    const bool pixel_displacement_rays = false,
+                                                    const int displacement_evaluator_set = -1,
+                                                    const int displacement_bvh_features = 0)
 {
   MTLFunctionConstantValues *constant_values = [MTLFunctionConstantValues new];
+  [constant_values setConstantValue:&pixel_displacement_rays
+                               type:MTLDataTypeBool
+                            atIndex:Kernel_PixelDisplacementRays];
+  const bool displacement_specialized = displacement_evaluator_set >= 0;
+  const int evaluator_set = max(displacement_evaluator_set, 0);
+  [constant_values setConstantValue:&displacement_specialized
+                               type:MTLDataTypeBool
+                            atIndex:Kernel_PixelDisplacementSpecialized];
+  [constant_values setConstantValue:&evaluator_set
+                               type:MTLDataTypeInt
+                            atIndex:Kernel_PixelDisplacementEvaluatorSet];
+  [constant_values setConstantValue:&displacement_bvh_features
+                               type:MTLDataTypeInt
+                            atIndex:Kernel_PixelDisplacementBVHFeatures];
 
   MTLDataType MTLDataType_int = MTLDataTypeInt;
   MTLDataType MTLDataType_float = MTLDataTypeFloat;
@@ -919,7 +952,9 @@ MetalVisibleFunctions::MetalVisibleFunctions(id<MTLDevice> device,
   add_single(METAL_VFT_POLARIZATION, "cycles_metal_polarization_surface_transport");
   add_single(METAL_VFT_DIFFRACTION, "cycles_metal_diffraction_power_column");
   add_single(METAL_VFT_MNEE, "cycles_metal_mnee_sample");
-  add_single(METAL_VFT_PIXEL_DISPLACEMENT, "cycles_metal_pixel_displacement_shader_setup");
+  add_single(METAL_VFT_PIXEL_DISPLACEMENT_EVAL, "cycles_metal_pixel_displacement_eval");
+  add_single(METAL_VFT_PIXEL_DISPLACEMENT_INTERSECT, "cycles_metal_pixel_displacement_intersect");
+  add_single(METAL_VFT_SCENE_INTERSECT, "cycles_metal_scene_intersect");
 }
 
 MetalVisibleFunctions::~MetalVisibleFunctions()
@@ -931,23 +966,37 @@ MetalVisibleFunctions::~MetalVisibleFunctions()
   [library_ release];
 }
 
-id<MTLFunction> MetalVisibleFunctions::compile_function(const string &name, string &error)
+id<MTLFunction> MetalVisibleFunctions::compile_function(const string &name,
+                                                        string &error,
+                                                        const int evaluator_set,
+                                                        const int bvh_features)
 {
   /* MetalDevice only uses visible shading on macOS 13 and newer. */
   if (@available(macOS 13.0, *)) {
-    return compile_function_macos13(name, error);
+    return compile_function_macos13(name, error, evaluator_set, bvh_features);
   }
   error = "unsupported macOS version";
   return nil;
 }
 
+id<MTLFunction> MetalVisibleFunctions::compile_specialized(const string &name,
+                                                           const int evaluator_set,
+                                                           const int bvh_features,
+                                                           string &error)
+{
+  return compile_function(name, error, evaluator_set, bvh_features);
+}
+
 id<MTLFunction> MetalVisibleFunctions::compile_function_macos13(const string &name,
-                                                                string &error)
+                                                                string &error,
+                                                                const int evaluator_set,
+                                                                const int bvh_features)
 {
   MTLFunctionDescriptor *desc = [MTLFunctionDescriptor functionDescriptor];
   desc.name = @(name.c_str());
   desc.options = MTLFunctionOptionCompileToBinary;
-  desc.constantValues = GetConstantValues();
+  desc.constantValues = GetConstantValues(
+      nullptr, PSO_GENERIC, false, evaluator_set, bvh_features);
 
   /* A binary archive per function keeps the GPU binary across sessions, independent of the
    * system shader cache. The library checksum identifies the build and kernel configuration. */
@@ -958,6 +1007,9 @@ id<MTLFunction> MetalVisibleFunctions::compile_function_macos13(const string &na
     MD5Hash md5;
     md5.append(library_md5_);
     md5.append(name);
+    if (evaluator_set >= 0) {
+      md5.append(string_printf("evaluator_set=%d bvh_features=%d", evaluator_set, bvh_features));
+    }
     md5.append([[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String]);
     string device_name = [device_.name UTF8String];
     for (char &c : device_name) {
@@ -965,8 +1017,11 @@ id<MTLFunction> MetalVisibleFunctions::compile_function_macos13(const string &na
         c = '_';
       }
     }
-    archive_path = path_cache_get(
-        path_join("kernels", path_join(device_name, path_join(name, md5.get_hex() + ".bin"))));
+    /* Specialized functions have their own directory, so their variants never evict the
+     * generic functions. */
+    const string directory = (evaluator_set >= 0) ? name + "_specialized" : name;
+    archive_path = path_cache_get(path_join(
+        "kernels", path_join(device_name, path_join(directory, md5.get_hex() + ".bin"))));
     path_create_directories(archive_path);
     loading_archive = path_cache_kernel_exists_and_mark_used(archive_path);
 
@@ -984,7 +1039,11 @@ id<MTLFunction> MetalVisibleFunctions::compile_function_macos13(const string &na
   id<MTLFunction> function = nil;
   if (archive && loading_archive) {
     desc.binaryArchives = @[ archive ];
-    desc.options = MTLFunctionOptionCompileToBinary | MTLFunctionOptionFailOnBinaryArchiveMiss;
+    if (@available(macOS 15.0, *)) {
+      /* Otherwise a stale archive compiles the function again, and is rewritten below only
+       * when it fails to load. */
+      desc.options = MTLFunctionOptionCompileToBinary | MTLFunctionOptionFailOnBinaryArchiveMiss;
+    }
     function = [library_ newFunctionWithDescriptor:desc error:&compile_error];
     desc.binaryArchives = nil;
     desc.options = MTLFunctionOptionCompileToBinary;
@@ -1013,8 +1072,9 @@ id<MTLFunction> MetalVisibleFunctions::compile_function_macos13(const string &na
           [archive serializeToURL:[NSURL fileURLWithPath:@(archive_path.c_str())]
                             error:&archive_error])
       {
-        /* Keep a few variants: software/MetalRT libraries and the previous build. */
-        path_cache_kernel_mark_added_and_clear_old(archive_path, 4);
+        /* Keep a few variants: software/MetalRT libraries and the previous build, or the
+         * evaluator sets of recent scenes. */
+        path_cache_kernel_mark_added_and_clear_old(archive_path, (evaluator_set >= 0) ? 16 : 4);
       }
       else {
         metal_printf("Failed to archive visible function %s: %s",
@@ -1033,92 +1093,70 @@ void MetalVisibleFunctions::compile(const int num_threads)
 
   /* Longest functions first, so short ones fill the remaining compiler threads at the end.
    * The order only affects scheduling; it lists the measured slowest functions. */
-  struct Job {
-    MetalVisibleFunctionTable table;
-    int index;
-    int priority;
-  };
-  const char *slowest_first[] = {"cycles_metal_pixel_displacement_shader_setup",
-                                 "cycles_metal_bsdf_sample",
-                                 "cycles_metal_mnee_sample",
-                                 "cycles_metal_surface_6",
-                                 "cycles_metal_surface_7",
-                                 "cycles_metal_diffraction_power_column",
+  const char *slowest_first[] = {"cycles_metal_bsdf_sample",
                                  "cycles_metal_surface_1",
+                                 "cycles_metal_diffraction_power_column",
                                  "cycles_metal_surface_2",
                                  "cycles_metal_surface_0",
                                  "cycles_metal_svm_node",
-                                 "cycles_metal_bsdf_eval_delta",
+                                 "cycles_metal_pixel_displacement_eval",
+                                 "cycles_metal_svm_1",
+                                 "cycles_metal_surface_4",
+                                 "cycles_metal_mnee_sample",
                                  "cycles_metal_bsdf_eval",
-                                 "cycles_metal_svm_closure"};
-  vector<Job> jobs;
-  for (int table = 0; table < METAL_VFT_NUM; table++) {
-    for (int i = 0; i < int(names_[table].size()); i++) {
-      int priority = int(std::size(slowest_first));
-      for (int p = 0; p < int(std::size(slowest_first)); p++) {
-        if (names_[table][i] == slowest_first[p]) {
-          priority = p;
-        }
-      }
-      jobs.push_back({MetalVisibleFunctionTable(table), i, priority});
-    }
-  }
-  std::stable_sort(jobs.begin(), jobs.end(), [](const Job &a, const Job &b) {
-    return a.priority < b.priority;
-  });
-
-  vector<vector<id<MTLFunction>>> results(METAL_VFT_NUM);
-  for (int table = 0; table < METAL_VFT_NUM; table++) {
-    results[table].resize(names_[table].size(), nil);
-  }
-
-  std::atomic_int next_job = 0;
-  std::atomic_bool failed = false;
-  thread_mutex error_mutex;
-  string first_error;
-  const auto worker = [&]() {
-    while (ShaderCache::running && !failed) {
-      const int job_index = next_job.fetch_add(1);
-      if (job_index >= int(jobs.size())) {
-        return;
-      }
-      const Job &job = jobs[job_index];
-      const string &name = names_[job.table][job.index];
-      @autoreleasepool {
-        const double function_start = time_dt();
-        string error;
-        id<MTLFunction> function = compile_function(name, error);
-        if (!function) {
-          thread_scoped_lock lock(error_mutex);
-          if (first_error.empty()) {
-            first_error = name + ": " + error;
-          }
-          failed = true;
-          return;
-        }
-        results[job.table][job.index] = function;
-        metal_printf("%16s | %-55s | %7.2fs",
-                     "VISIBLE_FUNCTION",
-                     name.c_str(),
-                     time_dt() - function_start);
+                                 "cycles_metal_scene_intersect",
+                                 "cycles_metal_pixel_displacement_intersect",
+                                 "cycles_metal_svm_closure",
+                                 "cycles_metal_surface_6"};
+  const auto priority = [&](const Job &job) {
+    for (int p = 0; p < int(std::size(slowest_first)); p++) {
+      if (names_[job.table][job.index] == slowest_first[p]) {
+        return p;
       }
     }
+    return int(std::size(slowest_first));
   };
 
   vector<std::thread> threads;
-  for (int i = 1; i < max(num_threads, 1); i++) {
-    threads.emplace_back(worker);
+  {
+    thread_scoped_lock lock(mutex_);
+    for (int table = 0; table < METAL_VFT_NUM; table++) {
+      for (int i = 0; i < int(names_[table].size()); i++) {
+        jobs_.push_back({MetalVisibleFunctionTable(table), i});
+      }
+    }
+    std::stable_sort(jobs_.begin(), jobs_.end(), [&](const Job &a, const Job &b) {
+      return priority(a) < priority(b);
+    });
+    results_.resize(METAL_VFT_NUM);
+    for (int table = 0; table < METAL_VFT_NUM; table++) {
+      results_[table].resize(names_[table].size(), nil);
+    }
+    started_ = true;
+    num_threads_ = max(max(num_threads, requested_threads_), 1);
+    active_workers_ = num_threads_;
+    for (int i = 1; i < num_threads_; i++) {
+      threads.emplace_back([this]() { run_worker(); });
+    }
   }
-  worker();
+  run_worker();
   for (std::thread &thread : threads) {
     thread.join();
   }
 
+  int final_num_threads;
+  {
+    /* Threads added by raise_threads() are joined by their owner, but finish the same jobs. */
+    thread_scoped_lock lock(mutex_);
+    cond_.wait(lock, [&] { return active_workers_ == 0; });
+    final_num_threads = num_threads_;
+  }
+
   NSMutableArray *all_functions = [[NSMutableArray alloc] init];
-  bool complete = !failed && ShaderCache::running;
+  bool complete = !failed_ && ShaderCache::running;
   for (int table = 0; table < METAL_VFT_NUM; table++) {
     NSMutableArray *functions = [[NSMutableArray alloc] init];
-    for (id<MTLFunction> function : results[table]) {
+    for (id<MTLFunction> function : results_[table]) {
       if (function) {
         [functions addObject:function];
         [all_functions addObject:function];
@@ -1132,19 +1170,70 @@ void MetalVisibleFunctions::compile(const int num_threads)
   }
   binary_functions = all_functions;
 
-  if (!complete && !first_error.empty()) {
-    LOG_ERROR << "Metal visible function compilation failed: " << first_error;
+  if (!complete && !first_error_.empty()) {
+    LOG_ERROR << "Metal visible function compilation failed: " << first_error_;
   }
   metal_printf("Visible functions %s in %.1f seconds (%d functions, %d threads)",
                complete ? "compiled" : "FAILED",
                time_dt() - start_time,
                int(binary_functions.count),
-               num_threads);
+               final_num_threads);
 
   thread_scoped_lock lock(mutex_);
   success_ = complete;
   finished_ = true;
   cond_.notify_all();
+}
+
+void MetalVisibleFunctions::run_worker()
+{
+  while (ShaderCache::running && !failed_) {
+    const int job_index = next_job_.fetch_add(1);
+    if (job_index >= int(jobs_.size())) {
+      break;
+    }
+    const Job &job = jobs_[job_index];
+    const string &name = names_[job.table][job.index];
+    @autoreleasepool {
+      const double function_start = time_dt();
+      string error;
+      id<MTLFunction> function = compile_function(name, error);
+      if (!function) {
+        thread_scoped_lock lock(mutex_);
+        if (first_error_.empty()) {
+          first_error_ = name + ": " + error;
+        }
+        failed_ = true;
+        break;
+      }
+      results_[job.table][job.index] = function;
+      metal_printf("%16s | %-55s | %7.2fs",
+                   "VISIBLE_FUNCTION",
+                   name.c_str(),
+                   time_dt() - function_start);
+    }
+  }
+  thread_scoped_lock lock(mutex_);
+  active_workers_--;
+  cond_.notify_all();
+}
+
+void MetalVisibleFunctions::raise_threads(const int num_threads,
+                                          std::vector<std::thread> &threads)
+{
+  thread_scoped_lock lock(mutex_);
+  if (!started_) {
+    /* compile() starts with at least this many threads. */
+    requested_threads_ = max(requested_threads_, num_threads);
+    return;
+  }
+  if (finished_ || active_workers_ == 0 || next_job_ >= int(jobs_.size())) {
+    return;
+  }
+  for (; num_threads_ < num_threads; num_threads_++) {
+    active_workers_++;
+    threads.emplace_back([this]() { run_worker(); });
+  }
 }
 
 bool MetalVisibleFunctions::wait()
@@ -1175,6 +1264,121 @@ MetalKernelPipeline::~MetalKernelPipeline()
   for (NSArray *functions : table_functions) {
     [functions release];
   }
+  for (auto &it : displacement_pipelines_) {
+    [it.second release];
+  }
+}
+
+id<MTLComputePipelineState> MetalKernelPipeline::displacement_pipeline(
+    const MetalDisplacementFunctions &functions) const
+{
+  thread_scoped_lock lock(displacement_mutex_);
+  auto it = displacement_pipelines_.find(functions.key());
+  if (it != displacement_pipelines_.end()) {
+    return it->second;
+  }
+  id<MTLComputePipelineState> result = nil;
+  if (pipeline && functions.eval) {
+    /* Linking finished binaries does not recompile the pipeline. */
+    NSMutableArray *added = [NSMutableArray arrayWithObject:functions.eval];
+    if (functions.intersect) {
+      [added addObject:functions.intersect];
+    }
+    if (functions.scene_intersect) {
+      [added addObject:functions.scene_intersect];
+    }
+    NSError *error = nil;
+    result = [pipeline newComputePipelineStateWithAdditionalBinaryFunctions:added error:&error];
+    if (!result) {
+      LOG_WARNING << "Failed to link specialized pixel displacement functions into "
+                  << device_kernel_as_string(device_kernel) << ": "
+                  << (error ? [[error localizedDescription] UTF8String] : "nil");
+    }
+  }
+  /* Also remember failures, the generic functions remain in use. */
+  displacement_pipelines_[functions.key()] = result;
+  return result;
+}
+
+MetalDisplacementFunctions::MetalDisplacementFunctions(
+    std::shared_ptr<MetalVisibleFunctions> generic, const int evaluator_set, const int bvh_features)
+    : generic(std::move(generic)), evaluator_set(evaluator_set), bvh_features(bvh_features)
+{
+}
+
+MetalDisplacementFunctions::~MetalDisplacementFunctions()
+{
+  [eval release];
+  [intersect release];
+  [scene_intersect release];
+}
+
+static std::atomic<int64_t> g_displacement_request_serial = 0;
+
+void MetalDisplacementFunctions::compile()
+{
+  /* Leave the compiler to the functions a scene waits for. */
+  if (!generic->wait() || !ShaderCache::running) {
+    queued = false;
+    return;
+  }
+  static thread_mutex compile_mutex;
+  thread_scoped_lock compile_lock(compile_mutex);
+  if (request_serial != g_displacement_request_serial || !ShaderCache::running) {
+    /* A scene edit requested another specialization meanwhile. Requesting this one again
+     * queues it again. */
+    queued = false;
+    return;
+  }
+  const double start_time = time_dt();
+  /* The ray solver and traversal functions exist only in the software BVH library. */
+  const bool software_bvh =
+      generic->table_functions[METAL_VFT_PIXEL_DISPLACEMENT_INTERSECT].count != 0 &&
+      generic->table_functions[METAL_VFT_SCENE_INTERSECT].count != 0;
+  const char *names[3] = {"cycles_metal_pixel_displacement_eval",
+                          "cycles_metal_pixel_displacement_intersect",
+                          "cycles_metal_scene_intersect"};
+  const int num_functions = software_bvh ? 3 : 1;
+  id<MTLFunction> functions[3] = {nil, nil, nil};
+  string errors[3];
+  vector<std::thread> threads;
+  for (int i = 1; i < num_functions; i++) {
+    threads.emplace_back([&, i]() {
+      @autoreleasepool {
+        functions[i] = generic->compile_specialized(
+            names[i], evaluator_set, bvh_features, errors[i]);
+      }
+    });
+  }
+  @autoreleasepool {
+    functions[0] = generic->compile_specialized(names[0], evaluator_set, bvh_features, errors[0]);
+  }
+  for (std::thread &thread : threads) {
+    thread.join();
+  }
+  for (int i = 0; i < num_functions; i++) {
+    if (!functions[i]) {
+      if (ShaderCache::running) {
+        LOG_WARNING << "Failed to specialize " << names[i] << ": " << errors[i];
+        failed = true;
+      }
+      for (id<MTLFunction> function : functions) {
+        [function release];
+      }
+      queued = false;
+      return;
+    }
+  }
+  eval = functions[0];
+  intersect = functions[1];
+  scene_intersect = functions[2];
+  metal_printf(
+      "Pixel displacement functions specialized for evaluator set %d, BVH features %d in %.1f "
+      "seconds",
+      evaluator_set,
+      bvh_features,
+      time_dt() - start_time);
+  ready_ = true;
 }
 
 void MetalDispatchPipeline::free_visible_function_tables()
@@ -1211,13 +1415,34 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
     return false;
   }
 
-  if (pipeline_id == best_pipeline->pipeline_id) {
+  /* Pixel displacement functions specialized for the scene, once they are compiled and linked.
+   * Until then the generic functions are used. */
+  std::shared_ptr<MetalDisplacementFunctions> displacement;
+  id<MTLComputePipelineState> displacement_pso = nil;
+  /* Only for rendering: preprocessing kernels run with the evaluator set of an unfinished scene
+   * update, which would specialize the functions for flags the render never uses. */
+  if (best_pipeline->visible_functions && kernel >= DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA &&
+      kernel <= DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL)
+  {
+    displacement = metal_device->specialized_displacement_functions(
+        best_pipeline->visible_functions);
+    if (displacement) {
+      displacement_pso = best_pipeline->displacement_pipeline(*displacement);
+      if (!displacement_pso) {
+        displacement = nullptr;
+      }
+    }
+  }
+  const int new_displacement_key = displacement ? displacement->key() : -1;
+
+  if (pipeline_id == best_pipeline->pipeline_id && displacement_key == new_displacement_key) {
     /* The best pipeline is already active - nothing to do. */
     return true;
   }
   pipeline_id = best_pipeline->pipeline_id;
+  displacement_key = new_displacement_key;
   [pipeline release];
-  pipeline = [best_pipeline->pipeline retain];
+  pipeline = [(displacement_pso ? displacement_pso : best_pipeline->pipeline) retain];
   pso_type = best_pipeline->pso_type;
   num_threads_per_block = best_pipeline->num_threads_per_block;
   use_metalrt = best_pipeline->use_metalrt;
@@ -1233,6 +1458,19 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
     for (int table = 0; table < METAL_VFT_NUM; table++) {
       @autoreleasepool {
         NSArray<id<MTLFunction>> *functions = best_pipeline->visible_functions->table_functions[table];
+        if (displacement && table == METAL_VFT_PIXEL_DISPLACEMENT_EVAL) {
+          functions = @[ displacement->eval ];
+        }
+        else if (displacement && displacement->intersect &&
+                 table == METAL_VFT_PIXEL_DISPLACEMENT_INTERSECT)
+        {
+          functions = @[ displacement->intersect ];
+        }
+        else if (displacement && displacement->scene_intersect &&
+                 table == METAL_VFT_SCENE_INTERSECT)
+        {
+          functions = @[ displacement->scene_intersect ];
+        }
         MTLVisibleFunctionTableDescriptor *vft_desc =
             [[[MTLVisibleFunctionTableDescriptor alloc] init] autorelease];
         vft_desc.functionCount = max(int(functions.count), 1);
@@ -1301,11 +1539,12 @@ id<MTLFunction> MetalKernelPipeline::make_intersection_function(const char *func
   MTLFunctionDescriptor *desc = [MTLIntersectionFunctionDescriptor functionDescriptor];
   desc.name = @(function_name);
 
+  const bool pixel_displacement_rays = metal_kernel_pixel_displacement_rays(device_kernel);
   if (pso_type != PSO_GENERIC) {
-    desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
+    desc.constantValues = GetConstantValues(&kernel_data_, pso_type, pixel_displacement_rays);
   }
   else {
-    desc.constantValues = GetConstantValues();
+    desc.constantValues = GetConstantValues(nullptr, PSO_GENERIC, pixel_displacement_rays);
   }
 
   NSError *error = nullptr;
@@ -1342,11 +1581,12 @@ void MetalKernelPipeline::compile()
   MTLFunctionDescriptor *func_desc = [MTLIntersectionFunctionDescriptor functionDescriptor];
   func_desc.name = @(function_name.c_str());
 
+  const bool pixel_displacement_rays = metal_kernel_pixel_displacement_rays(device_kernel);
   if (pso_type != PSO_GENERIC) {
-    func_desc.constantValues = GetConstantValues(&kernel_data_, pso_type);
+    func_desc.constantValues = GetConstantValues(&kernel_data_, pso_type, pixel_displacement_rays);
   }
   else {
-    func_desc.constantValues = GetConstantValues();
+    func_desc.constantValues = GetConstantValues(nullptr, PSO_GENERIC, pixel_displacement_rays);
   }
 
   function = [mtlLibrary newFunctionWithDescriptor:func_desc error:&error];
@@ -1504,7 +1744,7 @@ void MetalKernelPipeline::compile()
     computePipelineStateDescriptor.supportAddingBinaryFunctions = YES;
     computePipelineStateDescriptor.maxCallStackDepth = max(
         int(computePipelineStateDescriptor.maxCallStackDepth),
-        metal_kernel_shading_call_depth(device_kernel, pixel_displacement_library));
+        metal_kernel_shading_call_depth(device_kernel, software_bvh_library));
   }
 
   MTLPipelineOption pipelineOptions = MTLPipelineOptionNone;
@@ -1728,15 +1968,34 @@ void MetalKernelPipeline::compile()
   }
 }
 
+static int visible_function_threads(id<MTLDevice> mtlDevice)
+{
+  /* Compilation is throughput bound. Six threads peak below 5 GB of compiler memory, but keep
+   * machines with less than 16 GB at four. */
+  const int max_threads = ([NSProcessInfo processInfo].physicalMemory >= (16ull << 30)) ? 6 : 4;
+  int num_threads = 4;
+  if (@available(macOS 13.3, *)) {
+    num_threads = std::clamp(
+        int([mtlDevice maximumConcurrentCompilationTaskCount]) - 2, 2, max_threads);
+  }
+  if (const char *str = getenv("CYCLES_METAL_VISIBLE_FUNCTION_THREADS")) {
+    num_threads = max(atoi(str), 1);
+  }
+  return num_threads;
+}
+
 std::shared_ptr<MetalVisibleFunctions> MetalDeviceKernels::request_visible_functions(
     id<MTLDevice> mtlDevice, id<MTLLibrary> library, const string &library_md5)
 {
+  const int num_threads = visible_function_threads(mtlDevice);
   ShaderCache *shader_cache = get_shader_cache(mtlDevice);
   std::shared_ptr<MetalVisibleFunctions> functions;
   {
     thread_scoped_lock lock(shader_cache->cache_mutex);
     auto &entry = shader_cache->visible_functions[library_md5];
     if (entry) {
+      /* The functions may still compile in the background, see prewarm_visible_functions(). */
+      entry->raise_threads(num_threads, shader_cache->visible_function_threads);
       return entry;
     }
     entry = std::make_shared<MetalVisibleFunctions>(mtlDevice, library, library_md5);
@@ -1745,19 +2004,86 @@ std::shared_ptr<MetalVisibleFunctions> MetalDeviceKernels::request_visible_funct
 
   /* Compile concurrently with the kernel pipelines, which wait for these functions only when
    * linking them at the end of their own compilation. */
-  int num_threads = 4;
-  if (@available(macOS 13.3, *)) {
-    num_threads = std::clamp(int([mtlDevice maximumConcurrentCompilationTaskCount]) - 2, 2, 4);
-  }
-  if (const char *str = getenv("CYCLES_METAL_VISIBLE_FUNCTION_THREADS")) {
-    num_threads = max(atoi(str), 1);
-  }
   {
     thread_scoped_lock lock(shader_cache->cache_mutex);
     shader_cache->visible_function_threads.emplace_back(
         [functions, num_threads]() { functions->compile(num_threads); });
   }
   return functions;
+}
+
+std::shared_ptr<MetalDisplacementFunctions> MetalDeviceKernels::request_displacement_functions(
+    id<MTLDevice> mtlDevice,
+    const std::shared_ptr<MetalVisibleFunctions> &generic,
+    const int evaluator_set,
+    const int bvh_features)
+{
+  ShaderCache *shader_cache = get_shader_cache(mtlDevice);
+  thread_scoped_lock lock(shader_cache->cache_mutex);
+  auto &entry =
+      shader_cache->displacement_functions[{generic.get(), evaluator_set | (bvh_features << 24)}];
+  if (!entry) {
+    entry = std::make_shared<MetalDisplacementFunctions>(generic, evaluator_set, bvh_features);
+  }
+  if (!entry->ready() && !entry->failed && !entry->queued.exchange(true)) {
+    entry->request_serial = ++g_displacement_request_serial;
+    shader_cache->visible_function_threads.emplace_back(
+        [functions = entry]() { functions->compile(); });
+  }
+  return entry;
+}
+
+void MetalDeviceKernels::prewarm_visible_functions(id<MTLDevice> mtlDevice,
+                                                   const string &library_path,
+                                                   const string &library_md5)
+{
+  ShaderCache *shader_cache = get_shader_cache(mtlDevice);
+  thread_scoped_lock lock(shader_cache->cache_mutex);
+  if (shader_cache->visible_functions.count(library_md5)) {
+    return;
+  }
+  /* One thread, joined when the cache shuts down, waits and compiles in place. */
+  shader_cache->visible_function_threads.emplace_back(
+      [shader_cache, mtlDevice, library_path, library_md5]() {
+        /* Start after the kernels of the current scene and their shading functions. */
+        while (ShaderCache::running) {
+          {
+            thread_scoped_lock lock(shader_cache->cache_mutex);
+            if (shader_cache->incomplete_scene_requests == 0 &&
+                shader_cache->request_queue.empty())
+            {
+              break;
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        if (!ShaderCache::running) {
+          return;
+        }
+        @autoreleasepool {
+          NSError *error = nil;
+          id<MTLLibrary> library = [mtlDevice
+              newLibraryWithURL:[NSURL fileURLWithPath:@(library_path.c_str())]
+                          error:&error];
+          if (!library) {
+            return;
+          }
+          std::shared_ptr<MetalVisibleFunctions> functions;
+          {
+            thread_scoped_lock lock(shader_cache->cache_mutex);
+            auto &entry = shader_cache->visible_functions[library_md5];
+            if (!entry) {
+              entry = std::make_shared<MetalVisibleFunctions>(mtlDevice, library, library_md5);
+              functions = entry;
+            }
+          }
+          [library release];
+          if (functions) {
+            metal_printf("Compiling shading functions of another library in the background");
+            functions->compile(min(visible_function_threads(mtlDevice), 2));
+          }
+        }
+      });
 }
 
 void MetalKernelPipeline::link_visible_functions()
@@ -1848,6 +2174,8 @@ bool MetalDeviceKernels::load(MetalDevice *device, MetalPipelineType pso_type)
     for (int i = 0; i < DEVICE_KERNEL_NUM; i++) {
       shader_cache->load_kernel((DeviceKernel)i, device, pso_type, true);
     }
+    /* Pixel displacement without a MetalRT compatible cache needs the software BVH library. */
+    device->prewarm_software_library();
   }
   return true;
 }

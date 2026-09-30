@@ -468,12 +468,36 @@ using MetalMNEEFunction = int(constant void *launch_params,
                                bool volume_endpoint,
                                thread float3 *r_vertices,
                                thread void *r_polarization);
-using MetalPixelDisplacementFunction = void(constant void *launch_params,
-                                             constant void *ancillaries,
-                                             thread void *sd,
-                                             float time,
-                                             bool motion,
-                                             thread const float3 *verts);
+using MetalSceneIntersectFunction = bool(constant void *launch_params,
+                                         constant void *ancillaries,
+                                         thread const void *ray,
+                                         uint visibility,
+                                         thread void *isect,
+                                         bool pixel_displacement_rays);
+using MetalPixelDisplacementEvalFunction = float3(constant void *launch_params,
+                                                   constant void *ancillaries,
+                                                   int object,
+                                                   int prim,
+                                                   float u,
+                                                   float v,
+                                                   float time,
+                                                   bool motion,
+                                                   thread const float3 *verts,
+                                                   bool force_full);
+using MetalPixelDisplacementIntersectFunction = bool(constant void *launch_params,
+                                                     constant void *ancillaries,
+                                                     float3 P,
+                                                     float3 dir,
+                                                     float tmin,
+                                                     float tmax,
+                                                     float time,
+                                                     int object,
+                                                     int prim,
+                                                     bool motion,
+                                                     thread const float3 *verts,
+                                                     thread float *u,
+                                                     thread float *v,
+                                                     thread float *t);
 using MetalDiffractionFunction = bool(constant void *launch_params,
                                       constant void *ancillaries,
                                       thread const void *data,
@@ -509,7 +533,8 @@ struct MetalAncillaries {
 #endif
 #ifdef __KERNEL_METAL_VISIBLE_SHADING__
   /* Shading functions compiled once and linked into every pipeline. These follow all other
-   * slots, so their position depends only on whether MetalRT is used. */
+   * slots, so their position depends only on whether MetalRT is used. The order matches
+   * MetalVisibleFunctionTable in `device/metal/kernel.h`. */
   metal::visible_function_table<MetalSVMFunction> vft_svm;
   metal::visible_function_table<MetalSVMNodeFunction> vft_svm_node;
   metal::visible_function_table<MetalSVMClosureFunction> vft_svm_closure;
@@ -520,7 +545,10 @@ struct MetalAncillaries {
   metal::visible_function_table<MetalPolarizationFunction> vft_polarization;
   metal::visible_function_table<MetalDiffractionFunction> vft_diffraction;
   metal::visible_function_table<MetalMNEEFunction> vft_mnee;
-  metal::visible_function_table<MetalPixelDisplacementFunction> vft_pixel_displacement;
+  metal::visible_function_table<MetalPixelDisplacementEvalFunction> vft_pixel_displacement_eval;
+  metal::visible_function_table<MetalPixelDisplacementIntersectFunction>
+      vft_pixel_displacement_intersect;
+  metal::visible_function_table<MetalSceneIntersectFunction> vft_scene_intersect;
 #endif
 };
 

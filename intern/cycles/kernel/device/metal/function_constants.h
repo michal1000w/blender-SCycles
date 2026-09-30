@@ -13,6 +13,17 @@ enum {
   KernelData_kernel_features_64bit,
   KernelData_kernel_features_hi,
   KernelData_kernel_features_lo,
+
+  /* Whether the rays of the kernel intersect pixel displaced surfaces, see
+   * pixel_displacement_intersects(). */
+  Kernel_PixelDisplacementRays,
+  /* Pixel displacement functions specialized for one evaluator set, see
+   * pixel_displacement_evaluator_set(). */
+  Kernel_PixelDisplacementSpecialized,
+  Kernel_PixelDisplacementEvaluatorSet,
+  /* BVH traversal variant of the scene for the specialized functions: bit 0 for object motion,
+   * bit 1 for curves. */
+  Kernel_PixelDisplacementBVHFeatures,
 };
 
 #ifdef __KERNEL_METAL__
@@ -20,6 +31,14 @@ enum {
     constant type kernel_data_##parent##_##name \
         [[function_constant(KernelData_##parent##_##name)]];
 #  include "kernel/data_template.h"
+
+constant bool kernel_pixel_displacement_rays [[function_constant(Kernel_PixelDisplacementRays)]];
+constant bool kernel_pixel_displacement_specialized
+    [[function_constant(Kernel_PixelDisplacementSpecialized)]];
+constant int kernel_pixel_displacement_evaluator_set
+    [[function_constant(Kernel_PixelDisplacementEvaluatorSet)]];
+constant int kernel_pixel_displacement_bvh_features
+    [[function_constant(Kernel_PixelDisplacementBVHFeatures)]];
 
 #  if defined(__METAL_FUNCTION_CONSTANTS_64BIT__)
 constant ulong kernel_data_kernel_features [[function_constant(KernelData_kernel_features_64bit)]];

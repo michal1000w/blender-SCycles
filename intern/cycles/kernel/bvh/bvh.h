@@ -221,10 +221,31 @@ ccl_device_intersect void scene_intersect_shadow_all(KernelGlobals kg,
 #    include "kernel/bvh/traversal.h"
 #  endif
 
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Metal compiles the traversal once as a visible function. Inlined, its loops dominate the
+ * compile time of every shading function that traces rays, see `kernel.metal`. */
+ccl_device_inline bool scene_intersect(KernelGlobals /*kg*/,
+                                       const ccl_private Ray *ray,
+                                       const uint visibility,
+                                       ccl_private Intersection *isect)
+{
+  if (!intersection_ray_valid(ray)) {
+    return false;
+  }
+  return metal_ancillaries->vft_scene_intersect[0](
+      &launch_params_metal, metal_ancillaries, ray, visibility, isect, pixel_displacement_rays);
+}
+
+ccl_device_noinline bool scene_intersect_impl(KernelGlobals kg,
+                                              const ccl_private Ray *ray,
+                                              const uint visibility,
+                                              ccl_private Intersection *isect)
+#  else
 ccl_device_intersect bool scene_intersect(KernelGlobals kg,
                                           const ccl_private Ray *ray,
                                           const uint visibility,
                                           ccl_private Intersection *isect)
+#  endif
 {
   if (!intersection_ray_valid(ray)) {
     return false;
@@ -241,10 +262,23 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
 
   IF_NOT_USING_EMBREE
   {
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+    /* Specialized with the pixel displacement functions, the traversal contains only the variant
+     * of the scene, which then compiles the specialized ray solver inline. */
+    const bool have_motion = kernel_pixel_displacement_specialized ?
+                                 (kernel_pixel_displacement_bvh_features & 1) != 0 :
+                                 bool(kernel_data.bvh.have_motion);
+    const bool have_curves = kernel_pixel_displacement_specialized ?
+                                 (kernel_pixel_displacement_bvh_features & 2) != 0 :
+                                 bool(kernel_data.bvh.have_curves);
+#  else
+    const bool have_motion = kernel_data.bvh.have_motion;
+    const bool have_curves = kernel_data.bvh.have_curves;
+#  endif
 #  ifdef __OBJECT_MOTION__
-    if (kernel_data.bvh.have_motion) {
+    if (have_motion) {
 #    ifdef __HAIR__
-      if (kernel_data.bvh.have_curves) {
+      if (have_curves) {
         return bvh_intersect_hair_motion(kg, ray, isect, visibility);
       }
 #    endif /* __HAIR__ */
@@ -254,11 +288,13 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
 #  endif /* __OBJECT_MOTION__ */
 
 #  ifdef __HAIR__
-    if (kernel_data.bvh.have_curves) {
+    if (have_curves) {
       return bvh_intersect_hair(kg, ray, isect, visibility);
     }
 #  endif /* __HAIR__ */
 
+    (void)have_motion;
+    (void)have_curves;
     return bvh_intersect(kg, ray, isect, visibility);
   }
 

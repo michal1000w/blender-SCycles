@@ -47,7 +47,7 @@ ccl_device_inline bool motion_triangle_intersect(KernelGlobals kg,
   float3 verts[3];
   motion_triangle_vertices(kg, object, prim, time, verts);
 #ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (pixel_displacement_active(kg, prim)) {
+  if (pixel_displacement_intersects(kg, prim)) {
 #ifdef __VISIBILITY_FLAG__
     if (!(kernel_data_fetch(prim_visibility, prim_addr) & visibility)) {
       return false;
