@@ -1269,6 +1269,58 @@ ccl_device_forceinline void integrate_surface_ao(KernelGlobals kg,
 }
 #endif /* defined(__AO__) */
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* The large surface integration stages are compiled once as Metal visible functions (see
+ * `kernel.metal`), so the regular and ray-tracing surface kernels share them and they compile
+ * concurrently with the kernels. Table indices are part of the host and kernel contract. */
+enum MetalSurfaceStage {
+  METAL_SURFACE_STAGE_DIRECT_LIGHT = 0,
+  METAL_SURFACE_STAGE_BIDIRECTIONAL = 1,
+  METAL_SURFACE_STAGE_BSDF_BSSRDF_BOUNCE = 2,
+  METAL_SURFACE_STAGE_PHOTON_GATHER = 3,
+  METAL_SURFACE_STAGE_COHERENT_SPECULAR = 4,
+  METAL_SURFACE_STAGE_EMISSION = 5,
+  METAL_SURFACE_STAGE_DATA_PASSES = 6,
+  METAL_SURFACE_STAGE_DENOISING_FEATURES = 7,
+};
+
+ccl_device_inline int integrate_surface_stage(const MetalSurfaceStage stage,
+                                              IntegratorState state,
+                                              ccl_private ShaderData *sd,
+                                              const ccl_private RNGState *rng_state,
+                                              ccl_global float *render_buffer = nullptr,
+                                              ccl_private float3 *result = nullptr,
+                                              ccl_private float3 *secondary_result = nullptr)
+{
+  return metal_ancillaries->vft_surface[stage](&launch_params_metal,
+                                               metal_ancillaries,
+                                               state,
+                                               sd,
+                                               rng_state,
+                                               render_buffer,
+                                               result,
+                                               secondary_result);
+}
+#endif
+
+template<uint64_t node_feature_mask>
+ccl_device_forceinline ShaderEvalResult
+integrate_surface_direct_light_stage(KernelGlobals kg,
+                                     IntegratorState state,
+                                     ccl_private ShaderData *sd,
+                                     const ccl_private RNGState *rng_state)
+{
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+  /* Direct light does not depend on the node feature mask, so the regular and ray-tracing
+   * surface kernels share one function. */
+  (void)kg;
+  return ShaderEvalResult(
+      integrate_surface_stage(METAL_SURFACE_STAGE_DIRECT_LIGHT, state, sd, rng_state));
+#else
+  return integrate_surface_direct_light<node_feature_mask>(kg, state, sd, rng_state);
+#endif
+}
+
 template<uint64_t node_feature_mask>
 ccl_device int integrate_surface(KernelGlobals kg,
                                  IntegratorState state,
@@ -1370,14 +1422,25 @@ ccl_device int integrate_surface(KernelGlobals kg,
 
 #ifdef __KERNEL_METAL__
       if (kernel_data.integrator.use_photon_mapping) {
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+        Spectrum photon_L = zero_spectrum();
+        integrate_surface_stage(
+            METAL_SURFACE_STAGE_PHOTON_GATHER, state, &sd, nullptr, render_buffer, &photon_L);
+#  else
         const Spectrum photon_L = photon_mapping_gather(kg, state, &sd, render_buffer);
+#  endif
         photon_mapping_write(kg, state, photon_L, render_buffer);
       }
 #endif
 
       /* Write emission. */
       if (sd.runtime_flag & SR_EMISSION) {
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+        integrate_surface_stage(
+            METAL_SURFACE_STAGE_EMISSION, state, &sd, nullptr, render_buffer);
+#  else
         integrate_surface_emission(kg, state, &sd, render_buffer);
+#  endif
       }
 
       /* Perform path termination. Most paths have already been terminated in
@@ -1390,13 +1453,24 @@ ccl_device int integrate_surface(KernelGlobals kg,
       }
 
       /* Write render passes. */
-#ifdef __PASSES__
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+#  ifdef __PASSES__
+      integrate_surface_stage(
+          METAL_SURFACE_STAGE_DATA_PASSES, state, &sd, nullptr, render_buffer);
+#  endif
+#  ifdef __DENOISING_FEATURES__
+      integrate_surface_stage(
+          METAL_SURFACE_STAGE_DENOISING_FEATURES, state, &sd, nullptr, render_buffer);
+#  endif
+#else
+#  ifdef __PASSES__
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_PASSES);
       film_write_data_passes(kg, state, &sd, render_buffer);
-#endif
+#  endif
 
-#ifdef __DENOISING_FEATURES__
+#  ifdef __DENOISING_FEATURES__
       film_write_denoising_features_surface(kg, state, &sd, render_buffer);
+#  endif
 #endif
       }
       else if (((sd.runtime_flag & SR_HOLDOUT) || (sd.object_flag & SD_OBJECT_HOLDOUT_MASK)) &&
@@ -1432,8 +1506,19 @@ ccl_device int integrate_surface(KernelGlobals kg,
          * filtered; unrelated light paths retain their estimators. */
         Spectrum primary_direct;
         const bool light_passes = kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_PASSES;
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+        Spectrum intensity = zero_spectrum();
+        integrate_surface_stage(METAL_SURFACE_STAGE_COHERENT_SPECULAR,
+                                state,
+                                &sd,
+                                nullptr,
+                                nullptr,
+                                &intensity,
+                                light_passes ? &primary_direct : nullptr);
+#else
         Spectrum intensity = coherent_specular_complete_intensity(
             kg, state, &sd, light_passes ? &primary_direct : nullptr);
+#endif
         /* The declared Lambertian detector reradiates an unpolarized field.
          * Camera-side analyzers therefore contract its intensity with A_I. */
         const Spectrum detector_weight = polarization_emission_weight(kg, state);
@@ -1456,7 +1541,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
       }
       /* Direct light. */
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_DIRECT_LIGHT);
-      const ShaderEvalResult result = integrate_surface_direct_light<node_feature_mask>(
+      const ShaderEvalResult result = integrate_surface_direct_light_stage<node_feature_mask>(
           kg, state, &sd, &rng_state);
       if (result == SHADER_EVAL_CACHE_MISS) {
         return LABEL_CACHE_MISS;
@@ -1470,7 +1555,11 @@ ccl_device int integrate_surface(KernelGlobals kg,
 
     if (surface_stage < 3) {
 #ifdef __KERNEL_METAL__
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+      integrate_surface_stage(METAL_SURFACE_STAGE_BIDIRECTIONAL, state, &sd, &rng_state);
+#  else
       integrate_surface_bidirectional(kg, state, &sd, &rng_state);
+#  endif
       if (sd.runtime_flag & SR_CACHE_MISS) {
         return LABEL_CACHE_MISS;
       }
@@ -1491,7 +1580,12 @@ ccl_device int integrate_surface(KernelGlobals kg,
     }
 
     PROFILING_EVENT(PROFILING_SHADE_SURFACE_INDIRECT_LIGHT);
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+    continue_path_label = integrate_surface_stage(
+        METAL_SURFACE_STAGE_BSDF_BSSRDF_BOUNCE, state, &sd, &rng_state);
+#else
     continue_path_label = integrate_surface_bsdf_bssrdf_bounce(kg, state, &sd, &rng_state);
+#endif
     if (continue_path_label == LABEL_CACHE_MISS) {
       return LABEL_CACHE_MISS;
     }

@@ -4,6 +4,9 @@
 
 #ifdef WITH_METAL
 
+#  include <climits>
+#  include <cstdlib>
+#  include <cstring>
 #  include <map>
 #  include <mutex>
 
@@ -99,10 +102,20 @@ MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
     /* Ensure that back-compatibility helpers for getting gpuAddress & gpuResourceID are set up. */
     metal_gpu_address_helper_init(mtlDevice);
 
+    /* Separately compiled shading functions need function pointers and binary functions. */
+    if (@available(macOS 13.0, *)) {
+      use_visible_shading = [mtlDevice supportsFunctionPointers];
+    }
+    if (const char *str = getenv("CYCLES_METAL_VISIBLE_SHADING")) {
+      use_visible_shading = use_visible_shading && atoi(str) != 0;
+    }
+
     /* Enable increased concurrent shader compiler limit.
-     * This is also done by MTLContext::MTLContext, but only in GUI mode. */
+     * This is also done by MTLContext::MTLContext, but only in GUI mode. The separately compiled
+     * shading functions keep each compiler job small enough for low-memory devices too. */
     if (@available(macOS 13.3, *)) {
-      [mtlDevice setShouldMaximizeConcurrentCompilation:!MetalInfo::use_low_memory_compilation()];
+      [mtlDevice setShouldMaximizeConcurrentCompilation:use_visible_shading ||
+                                                        !MetalInfo::use_low_memory_compilation()];
     }
 
     max_threads_per_threadgroup = 512;
@@ -340,9 +353,25 @@ bool MetalDevice::check_peer_access(Device * /*peer_device*/)
   return false;
 }
 
+bool MetalDevice::requires_scene_specialization() const
+{
+  return MetalInfo::use_low_memory_compilation() && !use_visible_shading;
+}
+
+bool MetalDevice::scene_pixel_displacement_active() const
+{
+  return scene_use_pixel_displacement && scene_pixel_displacement_scale != 0.0f &&
+         scene_pixel_displacement_max_distance > 0.0f;
+}
+
+bool MetalDevice::pixel_displacement_requires_specialization() const
+{
+  return scene_pixel_displacement_active();
+}
+
 bool MetalDevice::use_adaptive_compilation()
 {
-  return DebugFlags().metal.adaptive_compile || MetalInfo::use_low_memory_compilation();
+  return DebugFlags().metal.adaptive_compile || requires_scene_specialization();
 }
 
 bool MetalDevice::use_local_atomic_sort() const
@@ -355,10 +384,20 @@ void MetalDevice::set_scene_pixel_displacement(const bool enabled,
                                                const float max_distance,
                                                const bool metalrt_compatible)
 {
+  const bool used_metalrt = use_metalrt_for_current_scene();
   scene_use_pixel_displacement = enabled;
   scene_pixel_displacement_scale = scale;
   scene_pixel_displacement_max_distance = max_distance;
   scene_pixel_displacement_metalrt_compatible = metalrt_compatible;
+
+  /* MetalRT compatibility selects a variant of the complete generic library. The scene reloads
+   * kernels only when feature bits change, so request the variant here. Kernels are only loaded
+   * after the first scene load, which selects the variant by itself. */
+  if (use_visible_shading && scene_kernel_features != 0 &&
+      used_metalrt != use_metalrt_for_current_scene())
+  {
+    load_kernels(scene_kernel_features);
+  }
 }
 
 string MetalDevice::preprocess_source(MetalPipelineType pso_type,
@@ -367,13 +406,20 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
 {
   string global_defines;
 
-  if (pso_type == PSO_GENERIC && MetalInfo::use_low_memory_compilation()) {
+  /* With separately compiled shading functions the generic library contains every kernel and
+   * feature, and nothing in it depends on the scene. It is compiled once per Blender build. */
+  const bool complete_generic = pso_type == PSO_GENERIC && use_visible_shading;
+  if (complete_generic) {
+    global_defines += "#define __KERNEL_METAL_VISIBLE_SHADING__\n";
+  }
+
+  if (pso_type == PSO_GENERIC && !complete_generic && MetalInfo::use_low_memory_compilation()) {
     global_defines += "#define __KERNEL_METAL_GENERIC_NO_SHADE__\n";
     global_defines += "#define __KERNEL_METAL_GENERIC_NO_LIGHT_CACHE__\n";
     global_defines += "#define __KERNEL_METAL_GENERIC_NO_EVAL__\n";
   }
 
-  if (pso_type == PSO_GENERIC &&
+  if (pso_type == PSO_GENERIC && !complete_generic &&
       (MetalInfo::use_low_memory_compilation() ||
        (scene_use_pixel_displacement && scene_pixel_displacement_scale != 0.0f &&
         scene_pixel_displacement_max_distance > 0.0f)))
@@ -411,7 +457,7 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
   }
   if ((pso_type == PSO_GENERIC || pso_type == PSO_SPECIALIZED_INTERSECT ||
        pso_type == PSO_SPECIALIZED_SHADE || pso_type == PSO_SPECIALIZED_LIGHT_CACHE) &&
-      transport_features != METAL_TRANSPORT_FEATURE_MASK)
+      !complete_generic && transport_features != METAL_TRANSPORT_FEATURE_MASK)
   {
     /* Feature bits are available before compiling generic kernels. Keep enabled features
      * dynamic, but remove disabled transport call graphs before Metal optimizes the library.
@@ -487,7 +533,7 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
                       (integrator.use_guiding_mis_weights ? "1\n" : "0\n");
   }
 
-  if (use_adaptive_compilation()) {
+  if (use_adaptive_compilation() && !complete_generic) {
     global_defines += "#define __KERNEL_FEATURES__ " + to_string(kernel_features) + "\n";
   }
 
@@ -661,9 +707,7 @@ bool MetalDevice::load_kernels(const uint64_t _kernel_features)
     if (_kernel_features & KERNEL_FEATURE_PATH_TRACING) {
       scene_kernel_features = _kernel_features;
     }
-    generic_displacement_kernels_skipped = scene_use_pixel_displacement &&
-                                           scene_pixel_displacement_scale != 0.0f &&
-                                           scene_pixel_displacement_max_distance > 0.0f;
+    generic_displacement_kernels_skipped = pixel_displacement_requires_specialization();
 
     /* check if GPU is supported */
     if (!support_device(kernel_features)) {
@@ -752,6 +796,21 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
   kernels_md5[pso_type] = md5.get_hex();
 }
 
+/* Whether the kernel source is the one installed with Blender, which the precompiled libraries
+ * were built from. A kernel path override elsewhere must compile its own source. */
+static bool metal_kernel_source_is_installed()
+{
+  if (getenv("CYCLES_KERNEL_PATH") == nullptr) {
+    return true;
+  }
+  const string installed_source = path_join(path_dirname(path_get("lib")), "source");
+  char installed_real[PATH_MAX];
+  char source_real[PATH_MAX];
+  return realpath(installed_source.c_str(), installed_real) &&
+         realpath(path_get("source").c_str(), source_real) &&
+         strcmp(installed_real, source_real) == 0;
+}
+
 void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_type)
 {
   @autoreleasepool {
@@ -761,6 +820,7 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
     id<MTLDevice> mtlDevice;
     string source;
     string precompiled_library_path;
+    bool visible_shading = false;
 
     /* Safely gather any state required for the MSL->AIR compilation. */
     {
@@ -784,18 +844,15 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
 
       mtlDevice = instance->mtlDevice;
       source = instance->source[pso_type];
+      visible_shading = instance->use_visible_shading;
 
       /* The common generic variants are compiled into the Blender installation. Loading one
        * avoids sending the same multi-megabyte MSL translation unit through the runtime compiler
        * on every cold start. Only use it when every source-affecting option matches; otherwise the
        * existing runtime path below remains the quality-preserving fallback. */
-      if (pso_type == PSO_GENERIC && !instance->use_adaptive_compilation() &&
-          !MetalInfo::use_low_memory_compilation() &&
-          !instance->generic_displacement_kernels_skipped &&
-          (instance->scene_kernel_features & METAL_TRANSPORT_FEATURE_MASK) ==
-              METAL_TRANSPORT_FEATURE_MASK &&
+      if (pso_type == PSO_GENERIC && instance->use_visible_shading &&
           instance->use_local_atomic_sort() && !instance->use_metalrt_extended_limits &&
-          getenv("CYCLES_KERNEL_PATH") == nullptr)
+          metal_kernel_source_is_installed())
       {
 #  ifdef WITH_NANOVDB
         const bool nanovdb_matches = DebugFlags().metal.use_nanovdb;
@@ -808,7 +865,7 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
           if (instance->use_metalrt_for_current_scene()) {
             variant = instance->motion_blur ? "metalrt_motion" : "metalrt";
           }
-          const string filename = string_printf("cycles_kernel_metal_generic_%s_macos_%ld.metallib",
+          const string filename = string_printf("cycles_kernel_metal_shading_%s_macos_%ld.metallib",
                                                 variant.c_str(),
                                                 (long)macos_ver.majorVersion);
           const string candidate = path_get(path_join("lib", filename));
@@ -865,7 +922,15 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
 
     NSError *error = nullptr;
     id<MTLLibrary> mtlLibrary = nil;
-    if (!precompiled_library_path.empty()) {
+    /* The shading functions keep the complete generic library alive: reuse it when a scene
+     * edit requests more of its kernels. */
+    MD5Hash source_md5;
+    source_md5.append(source);
+    const string source_md5_hex = source_md5.get_hex();
+    if (pso_type == PSO_GENERIC && visible_shading) {
+      mtlLibrary = MetalDeviceKernels::find_generic_library(mtlDevice, source_md5_hex);
+    }
+    if (!mtlLibrary && !precompiled_library_path.empty()) {
       mtlLibrary = [mtlDevice
           newLibraryWithURL:[NSURL fileURLWithPath:@(precompiled_library_path.c_str())]
                       error:&error];
@@ -926,6 +991,13 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
 
           [instance->mtlLibrary[pso_type] release];
           instance->mtlLibrary[pso_type] = mtlLibrary;
+
+          if (pso_type == PSO_GENERIC && instance->use_visible_shading) {
+            /* The functions depend only on the library source, not on the scene features that
+             * select pipeline variants, so key them by the source alone. */
+            instance->visible_functions = MetalDeviceKernels::request_visible_functions(
+                instance->mtlDevice, mtlLibrary, source_md5_hex);
+          }
 
           starttime = time_dt();
           MetalDeviceKernels::load(instance, pso_type);
@@ -1220,9 +1292,7 @@ bool MetalDevice::is_ready(string &status) const
     return false;
   }
 
-  if (scene_use_pixel_displacement && scene_pixel_displacement_scale != 0.0f &&
-      scene_pixel_displacement_max_distance > 0.0f)
-  {
+  if (pixel_displacement_requires_specialization()) {
     num_loaded = MetalDeviceKernels::get_loaded_kernel_count(this, PSO_SPECIALIZED_INTERSECT);
     if (num_loaded < DEVICE_KERNEL_NUM) {
       status = string_printf(
@@ -1238,7 +1308,7 @@ bool MetalDevice::is_ready(string &status) const
     }
   }
 
-  if (MetalInfo::use_low_memory_compilation()) {
+  if (requires_scene_specialization()) {
     for (const MetalPipelineType type :
          {PSO_SPECIALIZED_INTERSECT,
           PSO_SPECIALIZED_SHADE,
@@ -1300,7 +1370,7 @@ bool MetalDevice::set_bvh_limits(size_t instance_count, size_t max_prim_count)
 
 void MetalDevice::prepare_shader_eval(Scene *scene)
 {
-  if (!MetalInfo::use_low_memory_compilation()) {
+  if (!requires_scene_specialization()) {
     return;
   }
   {
@@ -1317,28 +1387,33 @@ void MetalDevice::prepare_shader_eval(Scene *scene)
 void MetalDevice::optimize_for_scene(Scene *scene)
 {
   MetalPipelineType specialization_level = kernel_specialization_level;
-  const bool use_pixel_displacement = scene_use_pixel_displacement &&
-                                      scene_pixel_displacement_scale != 0.0f &&
-                                      scene_pixel_displacement_max_distance > 0.0f;
+  /* Only displacement that the generic library cannot render forces specialization. */
+  const bool use_pixel_displacement = pixel_displacement_requires_specialization();
 
   /* Displacement can be disabled without changing kernel feature bits. In that case request
    * the generic pipelines deliberately omitted on the previous displacement render. */
   if (generic_displacement_kernels_skipped && !use_pixel_displacement &&
-      !MetalInfo::use_low_memory_compilation())
+      !requires_scene_specialization())
   {
     load_kernels(scene_kernel_features);
   }
 
-  if (use_pixel_displacement || MetalInfo::use_low_memory_compilation()) {
+  if (use_pixel_displacement || requires_scene_specialization()) {
     specialization_level = (MetalPipelineType)max(int(specialization_level),
                                                   int(PSO_SPECIALIZED_SHADE));
+  }
+  else if (use_visible_shading && MetalInfo::use_low_memory_compilation()) {
+    /* Optional scene specialization recompiles monolithic kernels whenever the scene changes.
+     * Only the inexpensive intersection kernels are worth that on low-memory devices. */
+    specialization_level = (MetalPipelineType)min(int(specialization_level),
+                                                  int(PSO_SPECIALIZED_INTERSECT));
   }
 
   const bool use_bidirectional_or_photons =
       scene->integrator->use_bidirectional_path_tracing_on_device(this) ||
       scene->integrator->use_photon_mapping_on_device(this);
   if (use_bidirectional_or_photons && !use_pixel_displacement &&
-      !MetalInfo::use_low_memory_compilation())
+      !requires_scene_specialization())
   {
     /* The bidirectional/photon kernels dominate render time, while specializing the monolithic
      * surface shader adds tens of seconds of compilation for about one percent end-to-end gain.
@@ -1348,7 +1423,7 @@ void MetalDevice::optimize_for_scene(Scene *scene)
   }
 
   if (!scene->params.background && !use_pixel_displacement &&
-      !MetalInfo::use_low_memory_compilation())
+      !requires_scene_specialization())
   {
     /* In live viewport, don't specialize beyond intersection kernels for responsiveness. */
     specialization_level = (MetalPipelineType)min(specialization_level, PSO_SPECIALIZED_INTERSECT);
@@ -1379,8 +1454,7 @@ void MetalDevice::optimize_for_scene(Scene *scene)
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    if (specialization_level == PSO_SPECIALIZED_SHADE && !MetalInfo::use_low_memory_compilation())
-    {
+    if (specialization_level == PSO_SPECIALIZED_SHADE && !requires_scene_specialization()) {
       /* The intersection and shade libraries are independent. Metal supports concurrent library
        * compilation, so overlap their expensive MSL front ends instead of serializing them. */
       dispatch_apply(2,
@@ -1394,7 +1468,7 @@ void MetalDevice::optimize_for_scene(Scene *scene)
         compile_and_load(this_device_id, MetalPipelineType(level));
       }
     }
-    if (MetalInfo::use_low_memory_compilation()) {
+    if (requires_scene_specialization()) {
       compile_and_load(this_device_id, PSO_SPECIALIZED_LIGHT_CACHE);
     }
   };
@@ -1413,7 +1487,7 @@ void MetalDevice::optimize_for_scene(Scene *scene)
   }
 
   if (specialize_in_background) {
-    if (use_pixel_displacement || MetalInfo::use_low_memory_compilation() ||
+    if (use_pixel_displacement || requires_scene_specialization() ||
         MetalDeviceKernels::num_incomplete_specialization_requests() == 0)
     {
       dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
@@ -1435,18 +1509,16 @@ void MetalDevice::const_copy_to(const char *name, void *host, const size_t size)
     memcpy((uint8_t *)&launch_params->data, host, sizeof(KernelData));
 
     /* Refresh the kernels_md5 checksums for specialized kernel sets. */
-    const bool use_pixel_displacement = scene_use_pixel_displacement &&
-                                        scene_pixel_displacement_scale != 0.0f &&
-                                        scene_pixel_displacement_max_distance > 0.0f;
+    const bool use_pixel_displacement = pixel_displacement_requires_specialization();
     const int specialization_level = (use_pixel_displacement ||
-                                      MetalInfo::use_low_memory_compilation()) ?
+                                      requires_scene_specialization()) ?
                                          max(int(kernel_specialization_level),
                                              int(PSO_SPECIALIZED_SHADE)) :
                                          int(kernel_specialization_level);
     for (int level = 1; level <= specialization_level; level++) {
       refresh_source_and_kernels_md5(MetalPipelineType(level));
     }
-    if (MetalInfo::use_low_memory_compilation()) {
+    if (requires_scene_specialization()) {
       refresh_source_and_kernels_md5(PSO_SPECIALIZED_LIGHT_CACHE);
     }
     return;

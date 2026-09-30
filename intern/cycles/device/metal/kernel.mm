@@ -8,6 +8,8 @@
 #  include <atomic>
 #  include <chrono>
 #  include <deque>
+#  include <map>
+#  include <set>
 #  include <thread>
 #  include <vector>
 
@@ -127,17 +129,26 @@ struct ShaderCache {
 
   /* Non-blocking request for a kernel, optionally specialized to the scene being rendered by
    * device. */
-  void load_kernel(DeviceKernel kernel, MetalDevice *device, MetalPipelineType pso_type);
+  void load_kernel(DeviceKernel kernel,
+                   MetalDevice *device,
+                   MetalPipelineType pso_type,
+                   bool prewarm = false);
 
+  /* With `prewarm`, also accept kernels that the current scene does not use yet. */
   bool should_load_kernel(DeviceKernel device_kernel,
                           const MetalDevice *device,
-                          MetalPipelineType pso_type);
+                          MetalPipelineType pso_type,
+                          bool prewarm = false);
 
   void wait_for_all();
 
   friend ShaderCache *get_shader_cache(id<MTLDevice> mtlDevice);
 
   void compile_thread_func();
+  /* Links pipelines compiled before the shading functions were ready. */
+  void link_thread_func();
+  /* Make a finished pipeline available to get_best_pipeline(). */
+  void publish(unique_ptr<MetalKernelPipeline> pipeline);
 
   using PipelineCollection = std::vector<std::shared_ptr<MetalKernelPipeline>>;
 
@@ -154,9 +165,23 @@ struct ShaderCache {
   static bool running;
   std::condition_variable cond_var;
   std::deque<unique_ptr<MetalKernelPipeline>> request_queue;
+  /* Prewarm requests only start when no request of a scene is pending. */
+  std::deque<unique_ptr<MetalKernelPipeline>> prewarm_queue;
+  int incomplete_scene_requests = 0;
+  /* Prewarming leaves one compilation thread free for requests of a scene. */
+  int active_prewarm_compilations = 0;
   std::vector<std::thread> compile_threads;
   std::atomic_int incomplete_requests = 0;
   std::atomic_int incomplete_specialization_requests = 0;
+
+  /* Separately compiled shading functions, by library checksum. */
+  std::map<string, std::shared_ptr<MetalVisibleFunctions>> visible_functions;
+  std::vector<std::thread> visible_function_threads;
+  /* Requests that are queued or compiling, to avoid compiling the same pipeline twice. */
+  std::set<std::pair<DeviceKernel, string>> in_flight;
+  std::deque<unique_ptr<MetalKernelPipeline>> link_queue;
+  std::condition_variable link_cond;
+  std::thread link_thread;
 };
 
 bool ShaderCache::running = true;
@@ -192,10 +217,17 @@ ShaderCache::~ShaderCache()
 {
   running = false;
   cond_var.notify_all();
+  link_cond.notify_all();
 
   metal_printf("Waiting for ShaderCache threads... (incomplete_requests = %d)",
                int(incomplete_requests));
   for (auto &thread : compile_threads) {
+    thread.join();
+  }
+  if (link_thread.joinable()) {
+    link_thread.join();
+  }
+  for (auto &thread : visible_function_threads) {
     thread.join();
   }
   metal_printf("ShaderCache shut down.");
@@ -208,6 +240,44 @@ void ShaderCache::wait_for_all()
   }
 }
 
+void ShaderCache::publish(unique_ptr<MetalKernelPipeline> pipeline)
+{
+  const DeviceKernel device_kernel = pipeline->device_kernel;
+  const MetalPipelineType pso_type = pipeline->pso_type;
+  {
+    thread_scoped_lock lock(cache_mutex);
+    if (pso_type == PSO_GENERIC) {
+      in_flight.erase({device_kernel, pipeline->kernels_md5});
+    }
+    if (!pipeline->prewarm) {
+      incomplete_scene_requests--;
+    }
+    auto &collection = pipelines[device_kernel];
+
+    /* Cache up to 3 kernel variants with the same pso_type in memory, purging oldest first. */
+    int max_entries_of_same_pso_type = 3;
+    for (int i = (int)collection.size() - 1; i >= 0; i--) {
+      if (collection[i]->pso_type == pso_type) {
+        max_entries_of_same_pso_type -= 1;
+        if (max_entries_of_same_pso_type == 0) {
+          metal_printf("Purging oldest %s:%s kernel from ShaderCache",
+                       kernel_type_as_string(pso_type),
+                       device_kernel_as_string(device_kernel));
+          collection.erase(collection.begin() + i);
+          break;
+        }
+      }
+    }
+    collection.push_back(std::move(pipeline));
+  }
+  incomplete_requests--;
+  if (pso_type != PSO_GENERIC) {
+    incomplete_specialization_requests--;
+  }
+  /* Waiting prewarm requests may start now. */
+  cond_var.notify_all();
+}
+
 void ShaderCache::compile_thread_func()
 {
   while (running) {
@@ -216,26 +286,49 @@ void ShaderCache::compile_thread_func()
     unique_ptr<MetalKernelPipeline> pipeline;
     {
       thread_scoped_lock lock(cache_mutex);
-      cond_var.wait(lock, [&] { return !running || !request_queue.empty(); });
-      if (!running || request_queue.empty()) {
+      const int max_prewarm = max(int(compile_threads.size()) - 1, 1);
+      const auto has_work = [&] {
+        return !request_queue.empty() ||
+               (!prewarm_queue.empty() && incomplete_scene_requests == 0 &&
+                active_prewarm_compilations < max_prewarm);
+      };
+      cond_var.wait(lock, [&] { return !running || has_work(); });
+      if (!running || !has_work()) {
         continue;
       }
 
-      pipeline = std::move(request_queue.front());
-      request_queue.pop_front();
+      auto &queue = request_queue.empty() ? prewarm_queue : request_queue;
+      pipeline = std::move(queue.front());
+      queue.pop_front();
+      if (pipeline->prewarm) {
+        active_prewarm_compilations++;
+      }
     }
 
     /* Service the request. */
     DeviceKernel device_kernel = pipeline->device_kernel;
     MetalPipelineType pso_type = pipeline->pso_type;
 
-    if (MetalDevice::is_device_cancelled(pipeline->originating_device_id)) {
-      /* The originating MetalDevice is no longer active, so this request is obsolete. */
+    if (pso_type != PSO_GENERIC &&
+        MetalDevice::is_device_cancelled(pipeline->originating_device_id))
+    {
+      /* The originating MetalDevice is no longer active, so this scene specialization is
+       * obsolete. Generic pipelines do not depend on the device or scene and are always
+       * finished: a later device reuses them, and may already rely on this request. A cancelled
+       * request is not published, so it does not look like a failed compilation. */
       metal_printf("Cancelling compilation of %s (%s)",
                    device_kernel_as_string(device_kernel),
                    kernel_type_as_string(pso_type));
       [pipeline->mtlLibrary release];
       pipeline->mtlLibrary = nil;
+      {
+        thread_scoped_lock lock(cache_mutex);
+        incomplete_scene_requests--;
+      }
+      incomplete_requests--;
+      incomplete_specialization_requests--;
+      cond_var.notify_all();
+      continue;
     }
     else {
       /* Drain temporary compiler objects after each job. This worker lives for the entire
@@ -249,70 +342,51 @@ void ShaderCache::compile_thread_func()
         [pipeline->mtlLibrary release];
         pipeline->mtlLibrary = nil;
       }
-
-      thread_scoped_lock lock(cache_mutex);
-      auto &collection = pipelines[device_kernel];
-
-      /* Cache up to 3 kernel variants with the same pso_type in memory, purging oldest first. */
-      int max_entries_of_same_pso_type = 3;
-      for (int i = (int)collection.size() - 1; i >= 0; i--) {
-        if (collection[i]->pso_type == pso_type) {
-          max_entries_of_same_pso_type -= 1;
-          if (max_entries_of_same_pso_type == 0) {
-            metal_printf("Purging oldest %s:%s kernel from ShaderCache",
-                         kernel_type_as_string(pso_type),
-                         device_kernel_as_string(device_kernel));
-            collection.erase(collection.begin() + i);
-            break;
-          }
-        }
+      if (pipeline->prewarm) {
+        thread_scoped_lock lock(cache_mutex);
+        active_prewarm_compilations--;
+        cond_var.notify_all();
       }
-      collection.push_back(std::move(pipeline));
+
+      if (pipeline->awaiting_link) {
+        /* Keep compiling other kernels while the shading functions finish. */
+        {
+          thread_scoped_lock lock(cache_mutex);
+          link_queue.push_back(std::move(pipeline));
+        }
+        link_cond.notify_one();
+        continue;
+      }
     }
-    incomplete_requests--;
-    if (pso_type != PSO_GENERIC) {
-      incomplete_specialization_requests--;
-    }
+    publish(std::move(pipeline));
   }
 }
 
-bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
-                                     const MetalDevice *device,
-                                     MetalPipelineType pso_type)
+void ShaderCache::link_thread_func()
 {
-  if (!running) {
-    return false;
+  while (running) {
+    unique_ptr<MetalKernelPipeline> pipeline;
+    {
+      thread_scoped_lock lock(cache_mutex);
+      link_cond.wait(lock, [&] { return !running || !link_queue.empty(); });
+      if (!running || link_queue.empty()) {
+        continue;
+      }
+      pipeline = std::move(link_queue.front());
+      link_queue.pop_front();
+    }
+    @autoreleasepool {
+      pipeline->link_visible_functions();
+    }
+    publish(std::move(pipeline));
   }
+}
 
-  if (!device_kernel_has_gpu_function(device_kernel, true)) {
-    /* Skip megakernel and other markers without a GPU function. */
-    return false;
-  }
-
-  if (pso_type == PSO_GENERIC && MetalInfo::use_low_memory_compilation() &&
-      (is_light_cache_kernel(device_kernel) || is_shader_eval_kernel(device_kernel) ||
-       (device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
-        device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT)))
-  {
-    return false;
-  }
-
-  /* Small-memory devices require the specialized integrator set. Displacement also requires
-   * it on larger devices. Do not compile an unused generic set before the required pipelines. */
-  if (pso_type == PSO_GENERIC &&
-      (MetalInfo::use_low_memory_compilation() ||
-       (device->scene_use_pixel_displacement && device->scene_pixel_displacement_scale != 0.0f &&
-        device->scene_pixel_displacement_max_distance > 0.0f)) &&
-      device_kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
-      device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT)
-  {
-    return false;
-  }
-
-  /* Avoid materializing pipelines that the current scene cannot enqueue. If a scene edit enables
-   * one of these feature bits, load_kernels() is called again and requests the newly required
-   * pipeline. Besides reducing cold-start work, this is particularly important for the mutually
-   * exclusive photon and BDPT kernels, whose large shading call graphs are expensive on Metal. */
+/* Whether the current scene can enqueue the kernel. */
+static bool should_load_kernel_for_scene(const DeviceKernel device_kernel,
+                                         const MetalDevice *device,
+                                         const MetalPipelineType pso_type)
+{
   if (device_kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_BAKE &&
       !(device->kernel_features & KERNEL_FEATURE_BAKING))
   {
@@ -393,13 +467,58 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
     }
   }
 
+  return true;
+}
+
+bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
+                                     const MetalDevice *device,
+                                     MetalPipelineType pso_type,
+                                     const bool prewarm)
+{
+  if (!running) {
+    return false;
+  }
+
+  if (!device_kernel_has_gpu_function(device_kernel, true)) {
+    /* Skip megakernel and other markers without a GPU function. */
+    return false;
+  }
+
+  if (pso_type == PSO_GENERIC && device->requires_scene_specialization() &&
+      (is_light_cache_kernel(device_kernel) || is_shader_eval_kernel(device_kernel) ||
+       (device_kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
+        device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT)))
+  {
+    return false;
+  }
+
+  /* Small-memory devices require the specialized integrator set. Displacement also requires
+   * it on larger devices. Do not compile an unused generic set before the required pipelines. */
+  if (pso_type == PSO_GENERIC &&
+      (device->requires_scene_specialization() ||
+       device->pixel_displacement_requires_specialization()) &&
+      device_kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+      device_kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT)
+  {
+    return false;
+  }
+
+  /* Avoid materializing pipelines that the current scene cannot enqueue. If a scene edit enables
+   * one of these feature bits, load_kernels() is called again and requests the newly required
+   * pipeline. Besides reducing cold-start work, this is particularly important for the mutually
+   * exclusive photon and BDPT kernels, whose large shading call graphs are expensive on Metal.
+   * Prewarming compiles them anyway, behind the pipelines the scene needs. */
+  if (!prewarm && !should_load_kernel_for_scene(device_kernel, device, pso_type)) {
+    return false;
+  }
+
   if (pso_type == PSO_SPECIALIZED_EVAL) {
-    if (!MetalInfo::use_low_memory_compilation() || !is_shader_eval_kernel(device_kernel)) {
+    if (!device->requires_scene_specialization() || !is_shader_eval_kernel(device_kernel)) {
       return false;
     }
   }
   else if (pso_type == PSO_SPECIALIZED_LIGHT_CACHE) {
-    if (!MetalInfo::use_low_memory_compilation() || !is_light_cache_kernel(device_kernel)) {
+    if (!device->requires_scene_specialization() || !is_light_cache_kernel(device_kernel)) {
       return false;
     }
   }
@@ -434,7 +553,8 @@ bool ShaderCache::should_load_kernel(DeviceKernel device_kernel,
 
 void ShaderCache::load_kernel(DeviceKernel device_kernel,
                               MetalDevice *device,
-                              MetalPipelineType pso_type)
+                              MetalPipelineType pso_type,
+                              const bool prewarm)
 {
   {
     /* create compiler threads on first run */
@@ -452,19 +572,47 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
       }
 #  endif
 
-      if (MetalInfo::use_low_memory_compilation()) {
+      if (device->requires_scene_specialization()) {
         max_mtlcompiler_threads = 1;
+      }
+      else if (MetalInfo::use_low_memory_compilation()) {
+        /* Kernels no longer contain the shading code; the shading functions compile on their
+         * own threads concurrently. Bound the total number of compiler jobs by memory. */
+        max_mtlcompiler_threads = min(max_mtlcompiler_threads, 3);
       }
 
       metal_printf("Spawning %d Cycles kernel compilation threads", max_mtlcompiler_threads);
       for (int i = 0; i < max_mtlcompiler_threads; i++) {
         compile_threads.emplace_back([this] { this->compile_thread_func(); });
       }
+      link_thread = std::thread([this] { this->link_thread_func(); });
     }
   }
 
-  if (!should_load_kernel(device_kernel, device, pso_type)) {
+  if (!should_load_kernel(device_kernel, device, pso_type, prewarm)) {
     return;
+  }
+  if (pso_type == PSO_GENERIC) {
+    /* Generic requests are shared by all devices, see compile_thread_func(). */
+    thread_scoped_lock lock(cache_mutex);
+    if (!in_flight.insert({device_kernel, device->kernels_md5[pso_type]}).second) {
+      if (!prewarm) {
+        /* The scene now needs a pipeline that is only queued for prewarming: compile it next. */
+        for (auto it = prewarm_queue.begin(); it != prewarm_queue.end(); ++it) {
+          if ((*it)->device_kernel == device_kernel &&
+              (*it)->kernels_md5 == device->kernels_md5[pso_type])
+          {
+            (*it)->prewarm = false;
+            incomplete_scene_requests++;
+            request_queue.push_front(std::move(*it));
+            prewarm_queue.erase(it);
+            cond_var.notify_one();
+            break;
+          }
+        }
+      }
+      return;
+    }
   }
 
   incomplete_requests++;
@@ -484,6 +632,14 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
   pipeline->kernels_md5 = device->kernels_md5[pso_type];
   /* A scene edit may replace the device's library while this request is queued. */
   pipeline->mtlLibrary = [device->mtlLibrary[pso_type] retain];
+  pipeline->complete_generic = pso_type == PSO_GENERIC && device->use_visible_shading;
+  /* Pixel displacement always uses the scene-specialized library, never the complete one. */
+  pipeline->pixel_displacement_library = false;
+  if (pipeline->complete_generic &&
+      metal_kernel_uses_shading_functions(device_kernel, pipeline->pixel_displacement_library))
+  {
+    pipeline->visible_functions = device->visible_functions;
+  }
   pipeline->device_kernel = device_kernel;
   pipeline->threads_per_threadgroup = device->max_threads_per_threadgroup;
 
@@ -528,9 +684,16 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
       (device->kernel_features & ~(KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION)) |
       (device->scene_kernel_features & (KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION));
 
+  pipeline->prewarm = prewarm;
   {
     thread_scoped_lock lock(cache_mutex);
-    request_queue.push_back(std::move(pipeline));
+    if (prewarm) {
+      prewarm_queue.push_back(std::move(pipeline));
+    }
+    else {
+      incomplete_scene_requests++;
+      request_queue.push_back(std::move(pipeline));
+    }
   }
   cond_var.notify_one();
 }
@@ -540,17 +703,15 @@ std::shared_ptr<const MetalKernelPipeline> ShaderCache::get_best_pipeline(
 {
   /* Generic kernels omit pixel displacement. These specializations are required for
    * correctness, so pending or failed compilation must never select the generic fallback. */
-  const bool requires_displacement = device->scene_use_pixel_displacement &&
-                                     device->scene_pixel_displacement_scale != 0.0f &&
-                                     device->scene_pixel_displacement_max_distance > 0.0f &&
+  const bool requires_displacement = device->pixel_displacement_requires_specialization() &&
                                      kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
                                      kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT;
-  const bool requires_scene_integrator = MetalInfo::use_low_memory_compilation() &&
+  const bool requires_scene_integrator = device->requires_scene_specialization() &&
                                         kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
                                         kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT;
-  const bool requires_light_cache = MetalInfo::use_low_memory_compilation() &&
+  const bool requires_light_cache = device->requires_scene_specialization() &&
                                     is_light_cache_kernel(kernel);
-  const bool requires_shader_eval = MetalInfo::use_low_memory_compilation() &&
+  const bool requires_shader_eval = device->requires_scene_specialization() &&
                                     is_shader_eval_kernel(kernel);
   const MetalPipelineType required_type = requires_shader_eval ? PSO_SPECIALIZED_EVAL :
                                           requires_light_cache ? PSO_SPECIALIZED_LIGHT_CACHE :
@@ -706,6 +867,295 @@ static MTLFunctionConstantValues *GetConstantValues(
   return [constant_values autorelease];
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Separately compiled shading functions
+ * \{ */
+
+static bool metal_binary_archives_enabled()
+{
+  /* Same policy as pipeline archives: issues with binary archives in older macOS versions. */
+  if (@available(macOS 15.4, *)) {
+    if (const char *str = getenv("CYCLES_METAL_DISABLE_BINARY_ARCHIVES")) {
+      return atoi(str) == 0;
+    }
+    return true;
+  }
+  return false;
+}
+
+MetalVisibleFunctions::MetalVisibleFunctions(id<MTLDevice> device,
+                                             id<MTLLibrary> library,
+                                             const string &library_md5)
+    : device_(device), library_([library retain]), library_md5_(library_md5)
+{
+  /* Table entries are numbered consecutively; the library defines how many exist. */
+  const auto add_numbered = [&](const MetalVisibleFunctionTable table, const char *prefix) {
+    for (int i = 0;; i++) {
+      const string name = string_printf("%s%d", prefix, i);
+      id<MTLFunction> function = [library_ newFunctionWithName:@(name.c_str())];
+      if (!function) {
+        break;
+      }
+      [function release];
+      names_[table].push_back(name);
+    }
+  };
+  /* A function can be compiled out together with its feature; its table then stays empty and
+   * no kernel calls it. */
+  const auto add_single = [&](const MetalVisibleFunctionTable table, const char *name) {
+    id<MTLFunction> function = [library_ newFunctionWithName:@(name)];
+    if (function) {
+      [function release];
+      names_[table].push_back(name);
+    }
+  };
+  add_numbered(METAL_VFT_SVM, "cycles_metal_svm_");
+  add_single(METAL_VFT_SVM_NODE, "cycles_metal_svm_node");
+  add_single(METAL_VFT_SVM_CLOSURE, "cycles_metal_svm_closure");
+  add_single(METAL_VFT_BSDF_EVAL, "cycles_metal_bsdf_eval");
+  add_single(METAL_VFT_BSDF_EVAL_DELTA, "cycles_metal_bsdf_eval_delta");
+  add_single(METAL_VFT_BSDF_SAMPLE, "cycles_metal_bsdf_sample");
+  add_numbered(METAL_VFT_SURFACE, "cycles_metal_surface_");
+  add_single(METAL_VFT_POLARIZATION, "cycles_metal_polarization_surface_transport");
+  add_single(METAL_VFT_DIFFRACTION, "cycles_metal_diffraction_power_column");
+  add_single(METAL_VFT_MNEE, "cycles_metal_mnee_sample");
+  add_single(METAL_VFT_PIXEL_DISPLACEMENT, "cycles_metal_pixel_displacement_shader_setup");
+}
+
+MetalVisibleFunctions::~MetalVisibleFunctions()
+{
+  for (NSArray *functions : table_functions) {
+    [functions release];
+  }
+  [binary_functions release];
+  [library_ release];
+}
+
+id<MTLFunction> MetalVisibleFunctions::compile_function(const string &name, string &error)
+{
+  /* MetalDevice only uses visible shading on macOS 13 and newer. */
+  if (@available(macOS 13.0, *)) {
+    return compile_function_macos13(name, error);
+  }
+  error = "unsupported macOS version";
+  return nil;
+}
+
+id<MTLFunction> MetalVisibleFunctions::compile_function_macos13(const string &name,
+                                                                string &error)
+{
+  MTLFunctionDescriptor *desc = [MTLFunctionDescriptor functionDescriptor];
+  desc.name = @(name.c_str());
+  desc.options = MTLFunctionOptionCompileToBinary;
+  desc.constantValues = GetConstantValues();
+
+  /* A binary archive per function keeps the GPU binary across sessions, independent of the
+   * system shader cache. The library checksum identifies the build and kernel configuration. */
+  id<MTLBinaryArchive> archive = nil;
+  string archive_path;
+  bool loading_archive = false;
+  if (metal_binary_archives_enabled()) {
+    MD5Hash md5;
+    md5.append(library_md5_);
+    md5.append(name);
+    md5.append([[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String]);
+    string device_name = [device_.name UTF8String];
+    for (char &c : device_name) {
+      if (!isalnum(c)) {
+        c = '_';
+      }
+    }
+    archive_path = path_cache_get(
+        path_join("kernels", path_join(device_name, path_join(name, md5.get_hex() + ".bin"))));
+    path_create_directories(archive_path);
+    loading_archive = path_cache_kernel_exists_and_mark_used(archive_path);
+
+    MTLBinaryArchiveDescriptor *archive_desc = [[MTLBinaryArchiveDescriptor alloc] init];
+    if (loading_archive) {
+      archive_desc.url = [NSURL fileURLWithPath:@(archive_path.c_str())];
+    }
+    NSError *archive_error = nil;
+    archive = [device_ newBinaryArchiveWithDescriptor:archive_desc error:&archive_error];
+    [archive_desc release];
+    [archive autorelease];
+  }
+
+  NSError *compile_error = nil;
+  id<MTLFunction> function = nil;
+  if (archive && loading_archive) {
+    desc.binaryArchives = @[ archive ];
+    desc.options = MTLFunctionOptionCompileToBinary | MTLFunctionOptionFailOnBinaryArchiveMiss;
+    function = [library_ newFunctionWithDescriptor:desc error:&compile_error];
+    desc.binaryArchives = nil;
+    desc.options = MTLFunctionOptionCompileToBinary;
+    if (!function) {
+      /* Stale or incomplete archive: rebuild it. */
+      path_remove(archive_path);
+      loading_archive = false;
+      NSError *archive_error = nil;
+      MTLBinaryArchiveDescriptor *archive_desc = [[MTLBinaryArchiveDescriptor alloc] init];
+      archive = [[device_ newBinaryArchiveWithDescriptor:archive_desc error:&archive_error]
+          autorelease];
+      [archive_desc release];
+    }
+  }
+
+  if (!function) {
+    compile_error = nil;
+    function = [library_ newFunctionWithDescriptor:desc error:&compile_error];
+    if (!function) {
+      error = compile_error ? [[compile_error localizedDescription] UTF8String] : "unknown error";
+      return nil;
+    }
+    if (archive && ShaderCache::running) {
+      NSError *archive_error = nil;
+      if ([archive addFunctionWithDescriptor:desc library:library_ error:&archive_error] &&
+          [archive serializeToURL:[NSURL fileURLWithPath:@(archive_path.c_str())]
+                            error:&archive_error])
+      {
+        /* Keep a few variants: software/MetalRT libraries and the previous build. */
+        path_cache_kernel_mark_added_and_clear_old(archive_path, 4);
+      }
+      else {
+        metal_printf("Failed to archive visible function %s: %s",
+                     name.c_str(),
+                     archive_error ? [[archive_error localizedDescription] UTF8String] : "nil");
+      }
+    }
+  }
+  function.label = @(name.c_str());
+  return function;
+}
+
+void MetalVisibleFunctions::compile(const int num_threads)
+{
+  const double start_time = time_dt();
+
+  /* Longest functions first, so short ones fill the remaining compiler threads at the end.
+   * The order only affects scheduling; it lists the measured slowest functions. */
+  struct Job {
+    MetalVisibleFunctionTable table;
+    int index;
+    int priority;
+  };
+  const char *slowest_first[] = {"cycles_metal_pixel_displacement_shader_setup",
+                                 "cycles_metal_bsdf_sample",
+                                 "cycles_metal_mnee_sample",
+                                 "cycles_metal_surface_6",
+                                 "cycles_metal_surface_7",
+                                 "cycles_metal_diffraction_power_column",
+                                 "cycles_metal_surface_1",
+                                 "cycles_metal_surface_2",
+                                 "cycles_metal_surface_0",
+                                 "cycles_metal_svm_node",
+                                 "cycles_metal_bsdf_eval_delta",
+                                 "cycles_metal_bsdf_eval",
+                                 "cycles_metal_svm_closure"};
+  vector<Job> jobs;
+  for (int table = 0; table < METAL_VFT_NUM; table++) {
+    for (int i = 0; i < int(names_[table].size()); i++) {
+      int priority = int(std::size(slowest_first));
+      for (int p = 0; p < int(std::size(slowest_first)); p++) {
+        if (names_[table][i] == slowest_first[p]) {
+          priority = p;
+        }
+      }
+      jobs.push_back({MetalVisibleFunctionTable(table), i, priority});
+    }
+  }
+  std::stable_sort(jobs.begin(), jobs.end(), [](const Job &a, const Job &b) {
+    return a.priority < b.priority;
+  });
+
+  vector<vector<id<MTLFunction>>> results(METAL_VFT_NUM);
+  for (int table = 0; table < METAL_VFT_NUM; table++) {
+    results[table].resize(names_[table].size(), nil);
+  }
+
+  std::atomic_int next_job = 0;
+  std::atomic_bool failed = false;
+  thread_mutex error_mutex;
+  string first_error;
+  const auto worker = [&]() {
+    while (ShaderCache::running && !failed) {
+      const int job_index = next_job.fetch_add(1);
+      if (job_index >= int(jobs.size())) {
+        return;
+      }
+      const Job &job = jobs[job_index];
+      const string &name = names_[job.table][job.index];
+      @autoreleasepool {
+        const double function_start = time_dt();
+        string error;
+        id<MTLFunction> function = compile_function(name, error);
+        if (!function) {
+          thread_scoped_lock lock(error_mutex);
+          if (first_error.empty()) {
+            first_error = name + ": " + error;
+          }
+          failed = true;
+          return;
+        }
+        results[job.table][job.index] = function;
+        metal_printf("%16s | %-55s | %7.2fs",
+                     "VISIBLE_FUNCTION",
+                     name.c_str(),
+                     time_dt() - function_start);
+      }
+    }
+  };
+
+  vector<std::thread> threads;
+  for (int i = 1; i < max(num_threads, 1); i++) {
+    threads.emplace_back(worker);
+  }
+  worker();
+  for (std::thread &thread : threads) {
+    thread.join();
+  }
+
+  NSMutableArray *all_functions = [[NSMutableArray alloc] init];
+  bool complete = !failed && ShaderCache::running;
+  for (int table = 0; table < METAL_VFT_NUM; table++) {
+    NSMutableArray *functions = [[NSMutableArray alloc] init];
+    for (id<MTLFunction> function : results[table]) {
+      if (function) {
+        [functions addObject:function];
+        [all_functions addObject:function];
+        [function release];
+      }
+      else {
+        complete = false;
+      }
+    }
+    table_functions[table] = functions;
+  }
+  binary_functions = all_functions;
+
+  if (!complete && !first_error.empty()) {
+    LOG_ERROR << "Metal visible function compilation failed: " << first_error;
+  }
+  metal_printf("Visible functions %s in %.1f seconds (%d functions, %d threads)",
+               complete ? "compiled" : "FAILED",
+               time_dt() - start_time,
+               int(binary_functions.count),
+               num_threads);
+
+  thread_scoped_lock lock(mutex_);
+  success_ = complete;
+  finished_ = true;
+  cond_.notify_all();
+}
+
+bool MetalVisibleFunctions::wait()
+{
+  thread_scoped_lock lock(mutex_);
+  cond_.wait(lock, [&] { return finished_; });
+  return success_;
+}
+
+/** \} */
+
 void MetalDispatchPipeline::free_intersection_function_tables()
 {
   for (int table = 0; table < METALRT_TABLE_NUM; table++) {
@@ -727,9 +1177,21 @@ MetalKernelPipeline::~MetalKernelPipeline()
   }
 }
 
+void MetalDispatchPipeline::free_visible_function_tables()
+{
+  for (int table = 0; table < METAL_VFT_NUM; table++) {
+    if (visible_func_table[table]) {
+      metal_device->metal_mem_free(visible_func_table[table]);
+      visible_func_table[table] = nil;
+    }
+  }
+  use_visible_shading = false;
+}
+
 MetalDispatchPipeline::~MetalDispatchPipeline()
 {
   free_intersection_function_tables();
+  free_visible_function_tables();
   [pipeline release];
 }
 
@@ -763,6 +1225,36 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   /* Release tables from the previous pipeline before an ON/OFF scene switch.
    * A coherent surface pipeline has tables; an ordinary surface pipeline does not. */
   free_intersection_function_tables();
+  free_visible_function_tables();
+
+  /* Function handles are specific to the pipeline that linked the shading functions. */
+  if (best_pipeline->visible_functions) {
+    use_visible_shading = true;
+    for (int table = 0; table < METAL_VFT_NUM; table++) {
+      @autoreleasepool {
+        NSArray<id<MTLFunction>> *functions = best_pipeline->visible_functions->table_functions[table];
+        MTLVisibleFunctionTableDescriptor *vft_desc =
+            [[[MTLVisibleFunctionTableDescriptor alloc] init] autorelease];
+        vft_desc.functionCount = max(int(functions.count), 1);
+        visible_func_table[table] = [pipeline newVisibleFunctionTableWithDescriptor:vft_desc];
+        if (!visible_func_table[table]) {
+          metal_device->set_error(string_printf("Failed to create Metal function table for %s",
+                                                device_kernel_as_string(kernel)));
+          return false;
+        }
+        for (int i = 0; i < int(functions.count); i++) {
+          id<MTLFunctionHandle> handle = [pipeline functionHandleWithFunction:functions[i]];
+          if (!handle) {
+            metal_device->set_error(string_printf("Missing Metal function handle for %s",
+                                                  device_kernel_as_string(kernel)));
+            return false;
+          }
+          [visible_func_table[table] setFunction:handle atIndex:i];
+        }
+        metal_device->metal_mem_alloc(visible_func_table[table]);
+      }
+    }
+  }
 
   /* Create the MTLIntersectionFunctionTables if needed. */
   if (best_pipeline->use_metalrt &&
@@ -835,8 +1327,10 @@ id<MTLFunction> MetalKernelPipeline::make_intersection_function(const char *func
 
 void MetalKernelPipeline::compile()
 {
+  /* Monolithic pipelines can require gigabytes each; compile one at a time on low-memory
+   * devices. Pipelines linking the separately compiled shading functions are small. */
   thread_scoped_lock compilation_lock(metal_compilation_mutex(), std::defer_lock);
-  if (MetalInfo::use_low_memory_compilation()) {
+  if (MetalInfo::use_low_memory_compilation() && !complete_generic) {
     compilation_lock.lock();
   }
 
@@ -1001,6 +1495,17 @@ void MetalKernelPipeline::compile()
   if (use_metalrt && metal_kernel_has_intersection(device_kernel, kernel_features)) {
     computePipelineStateDescriptor.maxCallStackDepth = 2;
   }
+  if (visible_functions) {
+    /* The shading functions compile concurrently with this pipeline and are added afterwards.
+     * They call each other: the shader interpreter calls the shared node and closure functions
+     * or traces rays through intersection functions, and surface kernels call the interpreter
+     * from their separately compiled stages. The GPU reserves stack memory for every level, so
+     * request exactly the depth that each kernel can reach. */
+    computePipelineStateDescriptor.supportAddingBinaryFunctions = YES;
+    computePipelineStateDescriptor.maxCallStackDepth = max(
+        int(computePipelineStateDescriptor.maxCallStackDepth),
+        metal_kernel_shading_call_depth(device_kernel, pixel_displacement_library));
+  }
 
   MTLPipelineOption pipelineOptions = MTLPipelineOptionNone;
 
@@ -1061,6 +1566,7 @@ void MetalKernelPipeline::compile()
   }
 
   bool recreate_archive = false;
+  bool archive_complete = true;
   string compilation_error;
 
   /* Lambda to do the actual pipeline compilation. */
@@ -1122,6 +1628,8 @@ void MetalKernelPipeline::compile()
       if (![archive addComputePipelineFunctionsWithDescriptor:computePipelineStateDescriptor
                                                         error:&error])
       {
+        /* Do not write an archive that would miss on every later load. */
+        archive_complete = false;
         NSString *errStr = [error localizedDescription];
         metal_printf("Failed to add PSO to archive:\n%s", errStr ? [errStr UTF8String] : "nil");
       }
@@ -1172,14 +1680,18 @@ void MetalKernelPipeline::compile()
     return;
   }
 
-  if (!num_threads_per_block) {
+  /* The shading functions are linked once they finished compiling, see
+   * link_visible_functions(). */
+  awaiting_link = visible_functions != nullptr;
+
+  if (!num_threads_per_block && !awaiting_link) {
     num_threads_per_block = round_down(pipeline.maxTotalThreadsPerThreadgroup,
                                        pipeline.threadExecutionWidth);
     num_threads_per_block = std::max(num_threads_per_block, (int)pipeline.threadExecutionWidth);
   }
 
   if (ShaderCache::running) {
-    if (creating_new_archive || recreate_archive) {
+    if ((creating_new_archive || recreate_archive) && archive_complete) {
       if (![archive serializeToURL:[NSURL fileURLWithPath:@(metalbin_path.c_str())] error:&error])
       {
         metal_printf("Failed to save binary archive to %s, error:\n%s",
@@ -1195,7 +1707,7 @@ void MetalKernelPipeline::compile()
     }
   }
 
-  this->loaded = true;
+  this->loaded = !awaiting_link;
   computePipelineStateDescriptor = nil;
 
   if (!use_binary_archive) {
@@ -1216,11 +1728,126 @@ void MetalKernelPipeline::compile()
   }
 }
 
+std::shared_ptr<MetalVisibleFunctions> MetalDeviceKernels::request_visible_functions(
+    id<MTLDevice> mtlDevice, id<MTLLibrary> library, const string &library_md5)
+{
+  ShaderCache *shader_cache = get_shader_cache(mtlDevice);
+  std::shared_ptr<MetalVisibleFunctions> functions;
+  {
+    thread_scoped_lock lock(shader_cache->cache_mutex);
+    auto &entry = shader_cache->visible_functions[library_md5];
+    if (entry) {
+      return entry;
+    }
+    entry = std::make_shared<MetalVisibleFunctions>(mtlDevice, library, library_md5);
+    functions = entry;
+  }
+
+  /* Compile concurrently with the kernel pipelines, which wait for these functions only when
+   * linking them at the end of their own compilation. */
+  int num_threads = 4;
+  if (@available(macOS 13.3, *)) {
+    num_threads = std::clamp(int([mtlDevice maximumConcurrentCompilationTaskCount]) - 2, 2, 4);
+  }
+  if (const char *str = getenv("CYCLES_METAL_VISIBLE_FUNCTION_THREADS")) {
+    num_threads = max(atoi(str), 1);
+  }
+  {
+    thread_scoped_lock lock(shader_cache->cache_mutex);
+    shader_cache->visible_function_threads.emplace_back(
+        [functions, num_threads]() { functions->compile(num_threads); });
+  }
+  return functions;
+}
+
+void MetalKernelPipeline::link_visible_functions()
+{
+  awaiting_link = false;
+  /* Adding the finished binaries links them without recompiling the pipeline. */
+  const double wait_start = time_dt();
+  const bool functions_ready = visible_functions->wait();
+  const double wait_duration = time_dt() - wait_start;
+  id<MTLComputePipelineState> linked_pipeline = nil;
+  NSError *link_error = nil;
+  if (functions_ready && pipeline) {
+    linked_pipeline = [pipeline
+        newComputePipelineStateWithAdditionalBinaryFunctions:visible_functions->binary_functions
+                                                       error:&link_error];
+  }
+  [pipeline release];
+  pipeline = linked_pipeline;
+  if (pipeline == nil) {
+    if (ShaderCache::running) {
+      LOG_ERROR << "Metal pipeline linking failed for " << device_kernel_as_string(device_kernel)
+                << ": "
+                << (link_error ? [[link_error localizedDescription] UTF8String] :
+                                 "shading functions failed to compile");
+    }
+    return;
+  }
+
+  if (!num_threads_per_block) {
+    num_threads_per_block = round_down(pipeline.maxTotalThreadsPerThreadgroup,
+                                       pipeline.threadExecutionWidth);
+    num_threads_per_block = std::max(num_threads_per_block, (int)pipeline.threadExecutionWidth);
+  }
+  loaded = true;
+  metal_printf("%16s | %2d | %-55s | linked after waiting %.1fs",
+               kernel_type_as_string(pso_type),
+               int(device_kernel),
+               device_kernel_as_string(device_kernel),
+               wait_duration);
+}
+
+id<MTLLibrary> MetalDeviceKernels::find_generic_library(id<MTLDevice> mtlDevice,
+                                                        const string &library_md5)
+{
+  ShaderCache *shader_cache = get_shader_cache(mtlDevice);
+  thread_scoped_lock lock(shader_cache->cache_mutex);
+  auto it = shader_cache->visible_functions.find(library_md5);
+  return it != shader_cache->visible_functions.end() ? [it->second->library() retain] : nil;
+}
+
 bool MetalDeviceKernels::load(MetalDevice *device, MetalPipelineType pso_type)
 {
   auto *shader_cache = get_shader_cache(device->mtlDevice);
+  /* Request the most expensive kernels first, so they compile concurrently with each other and
+   * with the shading functions instead of being left for last. */
+  const DeviceKernel expensive_kernels[] = {DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE,
+                                            DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE,
+                                            DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT,
+                                            DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE,
+                                            DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE,
+                                            DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT,
+                                            DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME,
+                                            DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING,
+                                            DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST,
+                                            DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW};
+  for (const DeviceKernel kernel : expensive_kernels) {
+    shader_cache->load_kernel(kernel, device, pso_type);
+  }
   for (int i = 0; i < DEVICE_KERNEL_NUM; i++) {
-    shader_cache->load_kernel((DeviceKernel)i, device, pso_type);
+    if (std::find(std::begin(expensive_kernels), std::end(expensive_kernels), DeviceKernel(i)) ==
+        std::end(expensive_kernels))
+    {
+      shader_cache->load_kernel((DeviceKernel)i, device, pso_type);
+    }
+  }
+
+  /* The complete generic library does not depend on the scene. Compile the kernels of features
+   * the scene does not use yet behind the required ones, so enabling BDPT, photon mapping,
+   * guiding, volumes and other features later needs no compilation. The caches keep them for
+   * later sessions, so this runs once per Blender build. Rendering does not wait for them. */
+  const char *prewarm_env = getenv("CYCLES_METAL_PREWARM_KERNELS");
+  if (pso_type == PSO_GENERIC && device->use_visible_shading &&
+      !(prewarm_env && atoi(prewarm_env) == 0))
+  {
+    for (const DeviceKernel kernel : expensive_kernels) {
+      shader_cache->load_kernel(kernel, device, pso_type, true);
+    }
+    for (int i = 0; i < DEVICE_KERNEL_NUM; i++) {
+      shader_cache->load_kernel((DeviceKernel)i, device, pso_type, true);
+    }
   }
   return true;
 }

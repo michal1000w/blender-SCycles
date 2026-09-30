@@ -1100,7 +1100,7 @@ ccl_device int bsdf_microfacet_sample(KernelGlobals kg,
 /* Fresnel term setup functions. These get called after the distribution-specific setup functions
  * like bsdf_microfacet_ggx_setup. */
 
-ccl_device void bsdf_microfacet_setup_fresnel_conductor(KernelGlobals kg,
+ccl_device_outline_metal void bsdf_microfacet_setup_fresnel_conductor(KernelGlobals kg,
                                                         ccl_private MicrofacetBsdf *bsdf,
                                                         const float3 wi,
                                                         ccl_private FresnelConductor *fresnel,
@@ -1115,7 +1115,7 @@ ccl_device void bsdf_microfacet_setup_fresnel_conductor(KernelGlobals kg,
   }
 }
 
-ccl_device void bsdf_microfacet_setup_fresnel_generalized_schlick(
+ccl_device_outline_metal void bsdf_microfacet_setup_fresnel_generalized_schlick(
     KernelGlobals kg,
     ccl_private MicrofacetBsdf *bsdf,
     const float3 wi,
@@ -1154,7 +1154,7 @@ ccl_device void bsdf_microfacet_setup_fresnel_generalized_schlick(
   }
 }
 
-ccl_device void bsdf_microfacet_setup_fresnel_f82_tint(KernelGlobals kg,
+ccl_device_outline_metal void bsdf_microfacet_setup_fresnel_f82_tint(KernelGlobals kg,
                                                        ccl_private MicrofacetBsdf *bsdf,
                                                        const float3 wi,
                                                        ccl_private FresnelF82Tint *fresnel,
@@ -1177,7 +1177,7 @@ ccl_device void bsdf_microfacet_setup_fresnel_f82_tint(KernelGlobals kg,
   }
 }
 
-ccl_device void bsdf_microfacet_setup_fresnel_constant(KernelGlobals kg,
+ccl_device_outline_metal void bsdf_microfacet_setup_fresnel_constant(KernelGlobals kg,
                                                        ccl_private MicrofacetBsdf *bsdf,
                                                        const float3 wi,
                                                        const Spectrum color)

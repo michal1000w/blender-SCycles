@@ -213,6 +213,18 @@ struct GPUAddressHelper {
     [address_encoder setIntersectionFunctionTable:ift atIndex:0];
     return *(uint64_t *)[resource_buffer contents];
   }
+
+  uint64_t gpuResourceID(id<MTLVisibleFunctionTable> vft)
+  {
+#  ifdef CYCLES_USE_TIER2D_BINDLESS
+    if (@available(macos 13.0, *)) {
+      MTLResourceID resourceID = vft.gpuResourceID;
+      return (uint64_t &)resourceID;
+    }
+#  endif
+    [address_encoder setVisibleFunctionTable:vft atIndex:0];
+    return *(uint64_t *)[resource_buffer contents];
+  }
 };
 
 GPUAddressHelper g_gpu_address_helper;
@@ -240,6 +252,11 @@ uint64_t metal_gpuResourceID(id<MTLAccelerationStructure> accel_struct)
 uint64_t metal_gpuResourceID(id<MTLIntersectionFunctionTable> ift)
 {
   return g_gpu_address_helper.gpuResourceID(ift);
+}
+
+uint64_t metal_gpuResourceID(id<MTLVisibleFunctionTable> vft)
+{
+  return g_gpu_address_helper.gpuResourceID(vft);
 }
 
 CCL_NAMESPACE_END

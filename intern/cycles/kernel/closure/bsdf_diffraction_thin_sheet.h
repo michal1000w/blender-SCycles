@@ -244,7 +244,7 @@ ccl_device_inline bool bsdf_diffraction_thin_sheet_setup(ccl_private ShaderData 
 
 /* Preserve the native two-interface Fresnel and tint computation. The scalar
  * phase screen redistributes each port's already-absorbed spectral power. */
-ccl_device_inline FresnelCoeff bsdf_diffraction_thin_glass_setup(
+ccl_device_inline_outline_metal FresnelCoeff bsdf_diffraction_thin_glass_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const bool reflective,

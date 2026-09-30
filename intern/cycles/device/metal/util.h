@@ -47,6 +47,7 @@ uint64_t metal_gpuAddress(id<MTLBuffer> buffer);
 uint64_t metal_gpuResourceID(id<MTLTexture> texture);
 uint64_t metal_gpuResourceID(id<MTLAccelerationStructure> accel_struct);
 uint64_t metal_gpuResourceID(id<MTLIntersectionFunctionTable> ift);
+uint64_t metal_gpuResourceID(id<MTLVisibleFunctionTable> vft);
 
 CCL_NAMESPACE_END
 

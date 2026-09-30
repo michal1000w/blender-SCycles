@@ -15,8 +15,9 @@
 
 #  define MAX_SAMPLE_BUFFER_LENGTH 4096
 
-/* The number of resources to be contiguously encoded into the MetalAncillaries struct. */
-#  define ANCILLARY_SLOT_COUNT 11
+/* The maximum number of resources contiguously encoded into the MetalAncillaries struct:
+ * textures, MetalRT resources and the visible function tables. */
+#  define ANCILLARY_SLOT_COUNT (11 + METAL_VFT_NUM)
 
 CCL_NAMESPACE_BEGIN
 

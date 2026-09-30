@@ -122,7 +122,11 @@ template<int MaxChannels = DIFFRACTION_MAX_CHANNELS>
 /* This substantial dispatch is shared by sampling and forward/reverse queries.
  * Let the compiler outline it instead of forcing a full matrix-solver expansion
  * at every call site. */
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+ccl_device bool diffraction_data_power_column_impl(
+#else
 ccl_device bool diffraction_data_power_column(
+#endif
     ccl_private const DiffractionSceneData *data,
     const int handle,
     const float3 incident,
@@ -207,6 +211,53 @@ ccl_device bool diffraction_data_power_column(
   *output_incoming_order = incoming_order;
   return true;
 }
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* The matrix solver is compiled once as a Metal visible function, see `kernel.metal`. */
+template<int MaxChannels = DIFFRACTION_MAX_CHANNELS>
+ccl_device_inline bool diffraction_data_power_column(
+    ccl_private const DiffractionSceneData *data,
+    const int handle,
+    const float3 incident,
+    const bool incoming_substrate,
+    const float upper_index,
+    const float lower_index,
+    const float wavelength,
+    const float pitch,
+    ccl_private DiffractionCacheCellView *output_view,
+    ccl_private int *output_incoming_order,
+    ccl_private float *powers)
+{
+  if constexpr (MaxChannels == DIFFRACTION_MAX_CHANNELS) {
+    return metal_ancillaries->vft_diffraction[0](&launch_params_metal,
+                                                 metal_ancillaries,
+                                                 data,
+                                                 handle,
+                                                 incident,
+                                                 incoming_substrate,
+                                                 upper_index,
+                                                 lower_index,
+                                                 wavelength,
+                                                 pitch,
+                                                 output_view,
+                                                 output_incoming_order,
+                                                 powers);
+  }
+  else {
+    return diffraction_data_power_column_impl<MaxChannels>(data,
+                                                           handle,
+                                                           incident,
+                                                           incoming_substrate,
+                                                           upper_index,
+                                                           lower_index,
+                                                           wavelength,
+                                                           pitch,
+                                                           output_view,
+                                                           output_incoming_order,
+                                                           powers);
+  }
+}
+#endif
+
 template<int MaxChannels = DIFFRACTION_MAX_CHANNELS>
 ccl_device_inline bool diffraction_data_sample(ccl_private const DiffractionSceneData *data,
                                                const int handle,
