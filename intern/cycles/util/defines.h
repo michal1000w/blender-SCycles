@@ -82,6 +82,16 @@
 #  endif
 #endif /* __KERNEL_GPU__ */
 
+/* Large closure setup and evaluation helpers. Metal compiles the shading library once as
+ * separately linked functions, where keeping these as real calls bounds compilation time and
+ * memory. Other devices retain their inlining policy. */
+#ifndef ccl_device_inline_outline_metal
+#  define ccl_device_inline_outline_metal ccl_device_inline
+#endif
+#ifndef ccl_device_outline_metal
+#  define ccl_device_outline_metal ccl_device
+#endif
+
 /* Address sanitizer suppression. */
 
 #ifdef __KERNEL_GPU__

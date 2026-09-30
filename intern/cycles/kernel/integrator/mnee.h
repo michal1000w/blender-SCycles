@@ -937,7 +937,51 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
 }
 
 /* Manifold next event estimation path sampling. */
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* The manifold solver is compiled once as a Metal visible function, see `kernel.metal`. */
+ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(
+    KernelGlobals /*kg*/,
+    IntegratorState state,
+    ccl_private ShaderData *sd,
+    ccl_private ShaderData *sd_mnee,
+    const ccl_private RNGState *rng_state,
+    ccl_private LightSample *ls,
+    ccl_private Spectrum *throughput,
+    ccl_private float3 *r_receiver_wo,
+    ccl_private int &r_vertex_count,
+    ccl_private float3 *r_light_wo = nullptr,
+    const bool consider_all_refractive = false,
+    ccl_private float *r_light_distance = nullptr,
+    const float wavelength_rand_override = -1.0f,
+    const bool volume_endpoint = false,
+    ccl_private float3 *r_vertices = nullptr,
+    ccl_private PolarizationMueller *r_polarization = nullptr)
+{
+  return ShaderEvalResult(metal_ancillaries->vft_mnee[0](&launch_params_metal,
+                                                         metal_ancillaries,
+                                                         state,
+                                                         sd,
+                                                         sd_mnee,
+                                                         rng_state,
+                                                         ls,
+                                                         throughput,
+                                                         r_receiver_wo,
+                                                         &r_vertex_count,
+                                                         r_light_wo,
+                                                         consider_all_refractive,
+                                                         r_light_distance,
+                                                         wavelength_rand_override,
+                                                         volume_endpoint,
+                                                         r_vertices,
+                                                         r_polarization));
+}
+#endif
+
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+ccl_device_inline ShaderEvalResult kernel_path_mnee_sample_impl(KernelGlobals kg,
+#else
 ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
+#endif
                                                            IntegratorState state,
                                                            ccl_private ShaderData *sd,
                                                            ccl_private ShaderData *sd_mnee,

@@ -197,7 +197,34 @@ ccl_device_inline bool bsdf_is_transmission(const ccl_private ShaderClosure *sc,
   return dot(sc->N, wo) < 0.0f;
 }
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Closure dispatch is compiled once as a Metal visible function, see `kernel.metal`. */
+ccl_device_inline int bsdf_sample(KernelGlobals /*kg*/,
+                                  ccl_private ShaderData *sd,
+                                  const ccl_private ShaderClosure *sc,
+                                  const float3 rand,
+                                  ccl_private Spectrum *eval,
+                                  ccl_private float3 *wo,
+                                  ccl_private float *pdf,
+                                  ccl_private float2 *sampled_roughness,
+                                  ccl_private float *eta)
+{
+  return metal_ancillaries->vft_bsdf_sample[0](&launch_params_metal,
+                                               metal_ancillaries,
+                                               sd,
+                                               sc,
+                                               rand,
+                                               eval,
+                                               wo,
+                                               pdf,
+                                               sampled_roughness,
+                                               eta);
+}
+
+ccl_device_inline int bsdf_sample_impl(KernelGlobals kg,
+#else
 ccl_device_inline int bsdf_sample(KernelGlobals kg,
+#endif
                                   ccl_private ShaderData *sd,
                                   const ccl_private ShaderClosure *sc,
                                   const float3 rand,
@@ -733,13 +760,31 @@ ccl_device_inline bool bsdf_microfacet_is_matched_transmission_atom(
 /* Evaluate a known grating or smooth microfacet atom for sampled-event mixing.
  * This is a probability mass, scaled by Cycles' delta convention; it must not
  * be used as a solid-angle density for an arbitrary connection direction. */
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* The grating atoms are compiled once as a Metal visible function, see `kernel.metal`. */
+ccl_device_inline Spectrum bsdf_eval_delta(KernelGlobals /*kg*/,
+                                           ccl_private ShaderData *sd,
+                                           ccl_private const ShaderClosure *sc,
+                                           const float3 wo,
+                                           ccl_private float *pdf)
+{
+  return metal_ancillaries->vft_bsdf_eval_delta[0](
+      &launch_params_metal, metal_ancillaries, sd, sc, wo, pdf);
+}
+#endif
+
 #ifdef __KERNEL_METAL__
 /* Keep the grating matrix workspace out of every specialized mixture caller. */
 ccl_device __attribute__((noinline))
 #else
 ccl_device_inline
 #endif
-Spectrum bsdf_eval_delta(KernelGlobals kg,
+Spectrum
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+bsdf_eval_delta_impl(KernelGlobals kg,
+#else
+bsdf_eval_delta(KernelGlobals kg,
+#endif
                                                        ccl_private ShaderData *sd,
                                                        ccl_private const ShaderClosure *sc,
                                                        const float3 wo,
@@ -834,7 +879,22 @@ Spectrum bsdf_eval_delta(KernelGlobals kg,
   return eval;
 }
 
-#if defined(__KERNEL_METAL__) && defined(__KERNEL_METAL_TRANSPORT_FEATURES__) && \
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Closure dispatch is compiled once as a Metal visible function, see `kernel.metal`. */
+ccl_device_inline Spectrum bsdf_eval(KernelGlobals /*kg*/,
+                                     ccl_private ShaderData *sd,
+                                     const ccl_private ShaderClosure *sc,
+                                     const float3 wo,
+                                     ccl_private float *pdf)
+{
+  return metal_ancillaries->vft_bsdf_eval[0](
+      &launch_params_metal, metal_ancillaries, sd, sc, wo, pdf);
+}
+#endif
+
+#if defined(__KERNEL_METAL_VISIBLE_SHADING__)
+ccl_device_inline
+#elif defined(__KERNEL_METAL__) && defined(__KERNEL_METAL_TRANSPORT_FEATURES__) && \
     (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_BDPT) && \
     (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_PATH_GUIDING)
 /* Joint transport queries this dispatch repeatedly for forward/reverse PDFs and
@@ -846,7 +906,11 @@ ccl_device
 ccl_device_inline
 #endif
     Spectrum
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+    bsdf_eval_impl(KernelGlobals kg,
+#else
     bsdf_eval(KernelGlobals kg,
+#endif
               ccl_private ShaderData *sd,
               const ccl_private ShaderClosure *sc,
               const float3 wo,
@@ -1211,7 +1275,7 @@ ccl_device_inline Spectrum closure_albedo(KernelGlobals kg,
 
 /* Compute albedo used for layering this BSDF on top of another. The albedo is usually the
  * reflection albedo. */
-ccl_device_inline Spectrum closure_layer_albedo(KernelGlobals kg,
+ccl_device_inline_outline_metal Spectrum closure_layer_albedo(KernelGlobals kg,
                                                 const ccl_private ShaderData *sd,
                                                 const ccl_private ShaderClosure *sc)
 {

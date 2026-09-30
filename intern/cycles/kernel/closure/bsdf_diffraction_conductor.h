@@ -266,7 +266,7 @@ ccl_device_inline bool bsdf_diffraction_conductor_setup(
   return true;
 }
 
-ccl_device_inline bool bsdf_diffraction_conductor_split_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_conductor_split_setup(
     ccl_private ShaderData *sd, ccl_private MicrofacetBsdf *source,
     const float3 tangent, const float pitch, const float depth, const float duty,
     const float coverage)
@@ -345,7 +345,7 @@ ccl_device_inline Spectrum diffraction_conductor_average_fresnel(
 
 /* The source must be initialized without native planar energy preservation.
  * Split first, then compensate the two physical models independently. */
-ccl_device_inline bool bsdf_diffraction_conductor_multiggx_split_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_conductor_multiggx_split_setup(
     KernelGlobals kg, ccl_private ShaderData *sd, ccl_private MicrofacetBsdf *source,
     const float3 tangent, const float pitch, const float depth, const float duty,
     const float coverage, const int albedo_handle)
@@ -378,7 +378,7 @@ ccl_device_inline bool bsdf_diffraction_conductor_multiggx_split_setup(
 
 /* Glossy retains its existing wavelength-dependent color basis. Its uncoated
  * reflector has unit facet Fresnel; the closure weight carries the color. */
-ccl_device_inline bool bsdf_diffraction_glossy_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_glossy_setup(
     KernelGlobals kg, ccl_private ShaderData *sd, const Spectrum weight,
     const float3 N, const float3 T, const float alpha_x, const float alpha_y,
     const float pitch, const float depth, const float duty, const float medium_ior,

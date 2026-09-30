@@ -90,12 +90,48 @@ ccl_device_inline PolarizationMueller polarization_closure_mueller(
   return polarization_finish_closure_map(bsdf,incoming,outgoing,transmit,m);
 }
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Compiled once as a Metal visible function, see `kernel.metal`. */
+ccl_device_inline PolarizationSpectrumState polarization_surface_transport(
+    KernelGlobals /*kg*/,
+    ccl_private ShaderData *sd,
+    const float3 wo,
+    const ccl_private PolarizationSpectrumState &incoming_state,
+    const bool adjoint,
+    const ccl_private ShaderClosure *sampled_closure,
+    const Spectrum native_total,
+    const bool sampled_delta,
+    const uint light_shader_flags = 0,
+    const bool reciprocal_forward = false)
+{
+  PolarizationSpectrumState result;
+  metal_ancillaries->vft_polarization[0](&launch_params_metal,
+                                         metal_ancillaries,
+                                         &result,
+                                         sd,
+                                         wo,
+                                         &incoming_state,
+                                         adjoint,
+                                         sampled_closure,
+                                         native_total,
+                                         sampled_delta,
+                                         light_shader_flags,
+                                         reciprocal_forward);
+  return result;
+}
+#endif
+
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
 #else
 ccl_device_noinline
 #endif
-PolarizationSpectrumState polarization_surface_transport(
+PolarizationSpectrumState
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+polarization_surface_transport_impl(
+#else
+polarization_surface_transport(
+#endif
     KernelGlobals kg,ccl_private ShaderData *sd,const float3 wo,
     const ccl_private PolarizationSpectrumState &incoming_state,const bool adjoint,
     const ccl_private ShaderClosure *sampled_closure,const Spectrum native_total,
@@ -110,7 +146,12 @@ PolarizationSpectrumState polarization_surface_transport(
     const ccl_private ShaderClosure *sc=&sd->closure[i];
     if(sc==sampled_closure||!CLOSURE_IS_BSDF(sc->type)||_surface_shader_exclude(sc->type,light_shader_flags))continue;
     float pdf;
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+    /* Called directly to keep the Metal visible function call depth bounded. */
+    const Spectrum value=(atomic_mixture?bsdf_eval_delta_impl(kg,sd,sc,wo,&pdf):bsdf_eval(kg,sd,sc,wo,&pdf))*sc->weight;
+#else
     const Spectrum value=(atomic_mixture?bsdf_eval_delta(kg,sd,sc,wo,&pdf):bsdf_eval(kg,sd,sc,wo,&pdf))*sc->weight;
+#endif
     if(!(pdf>0)||is_zero(value))continue;
     other_total+=value;
     const auto transformed=polarization_spectrum_apply(polarization_closure_mueller(sd,sc,wo,adjoint),incoming_state,adjoint&&!reciprocal_forward);

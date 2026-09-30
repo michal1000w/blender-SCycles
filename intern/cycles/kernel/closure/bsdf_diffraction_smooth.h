@@ -20,7 +20,7 @@ static_assert(sizeof(ShaderClosure) >= sizeof(DiffractionSmoothBsdf));
 
 /* Shader compilation must advertise wavelength dependence and register the
  * cache before shading. This setup never substitutes an RGB wavelength. */
-ccl_device bool bsdf_diffraction_smooth_setup(KernelGlobals kg,
+ccl_device_outline_metal bool bsdf_diffraction_smooth_setup(KernelGlobals kg,
                                               ccl_private ShaderData *sd,
                                               const float3 weight,
                                               const float3 normal,
