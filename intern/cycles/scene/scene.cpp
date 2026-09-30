@@ -118,7 +118,8 @@ static bool coherent_interface_shader(const Shader *shader,
                                       const Object::CoherentInterface mode,
                                       float &ior)
 {
-  if (!shader || !shader->graph || shader->graph->output()->input("Volume")->link ||
+  if (!shader || !shader->graph ||
+      (shader->graph->output()->input("Volume")->link && mode != Object::COHERENT_INTERFACE_GLASS) ||
       shader->graph->output()->input("Displacement")->link)
   {
     return false;
@@ -161,6 +162,66 @@ static bool coherent_interface_shader(const Shader *shader,
     ior = glass->get_IOR();
     return true;
   }
+  return false;
+}
+
+/* Homogeneous medium inside a declared streamed Glass volume. Only constant,
+ * non-emissive Absorption, Scatter and Principled Volume closures, combined by
+ * Add or constant-factor Mix, are accepted; returns the RGB extinction
+ * coefficient (per metre) that native volume evaluation uses for meshes. The
+ * coherent field keeps the ballistic part exp(-sigma_t d / 2); light scattered
+ * by the medium stays in native transport. */
+static bool coherent_volume_extinction(const ShaderOutput *output, float3 &sigma, std::string &error)
+{
+  if (!output) {
+    sigma = zero_float3();
+    return true;
+  }
+  ShaderNode *node = output->parent;
+  for (const ShaderInput *input : node->inputs) {
+    if (input->link && input->type() != SocketType::CLOSURE) {
+      error = string("Coherent Glass volume input is not constant: ") + input->name().c_str();
+      return false;
+    }
+  }
+  if (node->type == AddClosureNode::get_node_type() || node->type == MixClosureNode::get_node_type()) {
+    float3 a, b;
+    if (!coherent_volume_extinction(node->input("Closure1")->link, a, error) ||
+        !coherent_volume_extinction(node->input("Closure2")->link, b, error))
+      return false;
+    if (node->type == AddClosureNode::get_node_type()) {
+      sigma = a + b;
+    }
+    else {
+      const float fac = clamp(static_cast<MixClosureNode *>(node)->get_fac(), 0.0f, 1.0f);
+      sigma = (1.0f - fac) * a + fac * b;
+    }
+    return true;
+  }
+  if (node->type == AbsorptionVolumeNode::get_node_type()) {
+    const AbsorptionVolumeNode *v = static_cast<const AbsorptionVolumeNode *>(node);
+    sigma = (one_float3() - v->get_color()) * max(v->get_density(), 0.0f);
+    return true;
+  }
+  if (node->type == ScatterVolumeNode::get_node_type()) {
+    const ScatterVolumeNode *v = static_cast<const ScatterVolumeNode *>(node);
+    sigma = v->get_color() * max(v->get_density(), 0.0f);
+    return true;
+  }
+  if (node->type == PrincipledVolumeNode::get_node_type()) {
+    const PrincipledVolumeNode *v = static_cast<const PrincipledVolumeNode *>(node);
+    if (v->get_emission_strength() != 0.0f || v->get_blackbody_intensity() != 0.0f) {
+      error = "Coherent Glass volumes cannot emit";
+      return false;
+    }
+    const float3 color = v->get_color();
+    const float3 absorption_color = max(sqrt(v->get_absorption_color()), zero_float3());
+    const float3 absorption = max(one_float3() - color, zero_float3()) *
+                              max(one_float3() - absorption_color, zero_float3());
+    sigma = (color + absorption) * max(v->get_density(), 0.0f);
+    return true;
+  }
+  error = "Coherent Glass volumes support constant Absorption, Scatter or Principled Volume closures";
   return false;
 }
 
@@ -229,6 +290,24 @@ static bool coherent_specular_pass_supported(const PassType type)
     case PASS_MOTION_WEIGHT:
     case PASS_DENOISING_BACKWARD_MOTION:
     case PASS_DENOISING_SPECULAR_MOTION:
+    /* Internal bookkeeping passes added by viewport/adaptive sampling,
+     * guiding, denoising history and volume majorants. They carry no
+     * light decomposition; coherent fields enter only Combined. */
+    /* Volume light passes hold only native medium scattering; coherent
+     * ballistic fields never write them. */
+    case PASS_VOLUME:
+    case PASS_VOLUME_DIRECT:
+    case PASS_VOLUME_INDIRECT:
+    case PASS_VOLUME_SCATTER:
+    case PASS_VOLUME_TRANSMIT:
+    case PASS_ADAPTIVE_AUX_BUFFER:
+    case PASS_RENDER_TIME:
+    case PASS_GUIDING_COLOR:
+    case PASS_GUIDING_PROBABILITY:
+    case PASS_GUIDING_AVG_ROUGHNESS:
+    case PASS_VOLUME_MAJORANT:
+    case PASS_VOLUME_MAJORANT_SAMPLE_COUNT:
+    case PASS_DENOISING_PREVIOUS:
       return true;
     default:
       return false;
@@ -270,8 +349,8 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
   }
   const bool stream_facets = scene->integrator->get_coherent_transport_mode() == 1;
   const int max_events = scene->integrator->get_coherent_max_interface_events();
-  if (stream_facets && (max_events < 1 || max_events > 2)) {
-    progress.set_error("Streamed Facets requires Max Interface Events 1 or 2; two events cost O(triangles squared)");
+  if (stream_facets && (max_events < 1 || max_events > 4)) {
+    progress.set_error("Streamed Facets requires Max Interface Events 1 to 4; k events cost O(triangles^k)");
     return false;
   }
   if (max_events < 1 || max_events > 4) {
@@ -290,10 +369,9 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     return false;
   }
   if (scene->integrator->get_sample_clamp_direct() != 0.0f ||
-      scene->integrator->get_sample_clamp_indirect() != 0.0f ||
-      scene->integrator->get_use_photon_mapping() || scene->has_shadow_catcher())
+      scene->integrator->get_sample_clamp_indirect() != 0.0f || scene->has_shadow_catcher())
   {
-    progress.set_error("Coherent specular connections require zero sample clamps, no photon mapping, and no shadow catcher");
+    progress.set_error("Coherent specular connections require zero sample clamps and no shadow catcher");
     return false;
   }
   for (const Pass *pass : scene->passes) {
@@ -313,14 +391,50 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     const Object *object;
     bool glass;
     std::array<double, 3> lower, upper;
+    std::vector<CoherentPlanarTriangle> triangles; /* World, outward for Glass. */
+    /* Rigid motion: the same triangles at every exported object motion step. */
+    std::vector<std::vector<CoherentPlanarTriangle>> motion_triangles;
   };
   std::vector<std::pair<int, CoherentConvexHull>> glass_hulls;
   std::vector<StreamedBounds> streamed_bounds;
   auto mesh_world_bounds = [](const Object *object, const Mesh *mesh, StreamedBounds &bounds) {
     const packed_float3 *positions = mesh->get_position();
     const Transform tfm = object->get_tfm();
+    if (bounds.triangles.empty()) {
+      for (size_t i = 0; i < mesh->num_triangles(); i++) {
+        const Mesh::Triangle tri = mesh->get_triangle(i);
+        CoherentPlanarTriangle triangle{};
+        for (int j = 0; j < 3; j++) {
+          float3 point = positions[tri.v[j]];
+          if (!mesh->transform_applied) point = transform_point(&tfm, point);
+          triangle.point[j] = {double(point.x), double(point.y), double(point.z)};
+          triangle.vertex[j] = tri.v[j];
+        }
+        bounds.triangles.push_back(triangle);
+      }
+    }
     bounds.lower = {DBL_MAX, DBL_MAX, DBL_MAX};
     bounds.upper = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+    bounds.motion_triangles.clear();
+    if (object->use_motion() && !mesh->transform_applied) {
+      /* The same triangles (vertex IDs keep any orientation swap) placed by
+       * every exported object motion step. */
+      for (const Transform &step : object->get_motion()) {
+        std::vector<CoherentPlanarTriangle> moved = bounds.triangles;
+        for (CoherentPlanarTriangle &t : moved) {
+          for (int j = 0; j < 3; j++) {
+            auto &q = t.point[j];
+            const float3 world = transform_point(&step, float3(positions[t.vertex[j]]));
+            q = {double(world.x), double(world.y), double(world.z)};
+            for (int axis = 0; axis < 3; axis++) {
+              bounds.lower[axis] = std::min(bounds.lower[axis], q[axis]);
+              bounds.upper[axis] = std::max(bounds.upper[axis], q[axis]);
+            }
+          }
+        }
+        bounds.motion_triangles.push_back(std::move(moved));
+      }
+    }
     for (size_t i = 0; i < mesh->num_verts(); i++) {
       float3 point = positions[i];
       if (!mesh->transform_applied) point = transform_point(&tfm, point);
@@ -350,8 +464,11 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       return false;
     }
     const Geometry *geometry = object->get_geometry();
-    if (geometry->has_volume) {
-      progress.set_error("Coherent specular connections do not support volumes");
+    if (geometry->has_volume && !(stream_facets && object->get_coherent_interface() ==
+                                                       Object::COHERENT_INTERFACE_GLASS &&
+                                  geometry->is_mesh()))
+    {
+      progress.set_error("Coherent specular connections support volumes only inside streamed Glass meshes");
       return false;
     }
     const Object::CoherentInterface mode = object->get_coherent_interface();
@@ -375,10 +492,18 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
                          object->name.c_str());
       return false;
     }
-    if (object->use_motion() || geometry->get_use_motion_blur() ||
-        geometry->has_true_displacement())
+    /* Streamed facets evaluate every facet at the camera sample's time, so rigid
+     * object motion is supported there; the bounded inventory stores static
+     * patches. A deforming Glass volume could lose closedness or orientation. */
+    if (geometry->has_true_displacement() ||
+        (!stream_facets && (object->use_motion() || geometry->get_use_motion_blur())) ||
+        (stream_facets && mode == Object::COHERENT_INTERFACE_GLASS &&
+         geometry->attributes.find(ATTR_STD_POSITION) &&
+         geometry->attributes.find(ATTR_STD_POSITION)->has_motion()))
     {
-      progress.set_error("Coherent interfaces require static undisplaced geometry");
+      progress.set_error(stream_facets ?
+                             "Coherent interfaces require undisplaced geometry; streamed Glass may move rigidly but not deform" :
+                             "Coherent interfaces require static undisplaced geometry");
       return false;
     }
     if (stream_facets && mode != Object::COHERENT_INTERFACE_DETECTOR &&
@@ -551,7 +676,7 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     if (mode == Object::COHERENT_INTERFACE_DETECTOR) {
       ++detector_count;
       if (stream_facets) {
-        StreamedBounds bounds{object, false, {}, {}};
+        StreamedBounds bounds{object, false, {}, {}, {}};
         mesh_world_bounds(object, mesh, bounds);
         streamed_bounds.push_back(bounds);
       }
@@ -612,14 +737,17 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       }
       CoherentConvexHull hull;
       std::string hull_error;
-      if (!coherent_convex_mesh_validate(triangles, hull, hull_error)) {
+      /* Concave volumes are supported: every route leg is BVH tested, so a
+       * chord leaving and re-entering the volume is blocked, not assumed. */
+      if (!coherent_convex_mesh_validate(triangles, hull, hull_error, false)) {
         progress.set_error(hull_error + " (object " + object->name.c_str() + ")");
         return false;
       }
       glass_hulls.emplace_back(object->index, std::move(hull));
     }
     if (stream_facets) {
-      StreamedBounds bounds{object, mode == Object::COHERENT_INTERFACE_GLASS, {}, {}};
+      StreamedBounds bounds{object, mode == Object::COHERENT_INTERFACE_GLASS, {}, {}, {}};
+      if (bounds.glass) bounds.triangles = triangles; /* Outward winding. */
       mesh_world_bounds(object, mesh, bounds);
       streamed_bounds.push_back(bounds);
       if (patches.size() >= size_t(INT_MAX)) {
@@ -631,6 +759,18 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       patch.mode = int(mode);
       patch.outside_ior = 1.0f;
       patch.inside_ior = mode == Object::COHERENT_INTERFACE_GLASS ? inside_ior : 1.0f;
+      if (mode == Object::COHERENT_INTERFACE_GLASS) {
+        float3 sigma;
+        std::string volume_error;
+        if (!coherent_volume_extinction(material->graph->output()->input("Volume")->link, sigma,
+                                        volume_error) ||
+            !isfinite_safe(sigma))
+        {
+          progress.set_error(volume_error + " (object " + object->name.c_str() + ")");
+          return false;
+        }
+        patch.extinction = sigma;
+      }
       if (!coherent_patch_polarizer(material, object, patch)) {
         progress.set_error("Coherent polarizers require a finite constant angle and unlinked checkbox");
         return false;
@@ -707,9 +847,32 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       for (int axis = 0; axis < 3; axis++) {
         overlap &= glass.lower[axis] <= other.upper[axis] && other.lower[axis] <= glass.upper[axis];
       }
-      if (overlap) {
+      if (!overlap) continue;
+      /* Exact test at the center time and at every motion step: no surface
+       * contact and no nesting (a vertex of either object inside the other
+       * closed Glass volume). All step pairs are tested conservatively. */
+      auto sets = [](const StreamedBounds &b) {
+        std::vector<const std::vector<CoherentPlanarTriangle> *> result{&b.triangles};
+        for (const auto &step : b.motion_triangles) result.push_back(&step);
+        return result;
+      };
+      bool nested = false;
+      for (const auto *g : sets(glass)) {
+        for (const auto *o : sets(other)) {
+          if (nested) break;
+          nested = coherent_triangle_sets_touch(*g, *o);
+          for (const CoherentPlanarTriangle &t : *o) {
+            if (nested) break;
+            nested |= !coherent_closed_mesh_strictly_outside(*g, t.point[0]);
+          }
+          if (!nested && other.glass) {
+            nested = !coherent_closed_mesh_strictly_outside(*o, (*g)[0].point[0]);
+          }
+        }
+      }
+      if (nested) {
         progress.set_error(string("Streamed Glass object ") + glass.object->name.c_str() +
-                           " bounds overlap declared object " + other.object->name.c_str() +
+                           " touches or nests with declared object " + other.object->name.c_str() +
                            "; nested or touching coherent volumes are unsupported");
         return false;
       }
@@ -750,9 +913,14 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       progress.set_error("Streamed Gaussian coherence length is below normal float arithmetic range");
       return false;
     }
-    for (const auto &hull : glass_hulls) {
-      if (!coherent_convex_hull_strictly_outside(
-              hull.second, {double(light.co.x), double(light.co.y), double(light.co.z)}))
+    for (const StreamedBounds &glass : streamed_bounds) {
+      bool inside = glass.glass && !coherent_closed_mesh_strictly_outside(
+          glass.triangles, {double(light.co.x), double(light.co.y), double(light.co.z)});
+      for (const auto &step : glass.motion_triangles) {
+        inside |= glass.glass && !coherent_closed_mesh_strictly_outside(
+            step, {double(light.co.x), double(light.co.y), double(light.co.z)});
+      }
+      if (inside)
       {
         progress.set_error("Streamed Glass sources must lie strictly outside every declared Glass volume");
         return false;

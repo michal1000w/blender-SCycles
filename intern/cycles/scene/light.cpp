@@ -1538,7 +1538,12 @@ static bool validate_coherent_direct_lights(const Scene *scene, Progress &progre
   }
   if (groups.empty()) return true;
 
-  if (scene->integrator->use_photon_mapping_on_device(scene->device))
+  /* With coherent specular connections, caustic photons that follow an owned
+   * source-to-detector history are not stored (integrator_photon_emit), so
+   * photon mapping keeps a disjoint partition. The direct-only model is not
+   * validated with photons. */
+  if (scene->integrator->use_photon_mapping_on_device(scene->device) &&
+      !scene->integrator->get_use_coherent_specular_connections())
   {
     progress.set_error("Coherent direct point sources do not support photon mapping");
     return false;
@@ -1567,7 +1572,11 @@ static bool validate_coherent_direct_lights(const Scene *scene, Progress &progre
       }
       declared_ideal_glass &= !used_by_other_object;
     }
-    if (shader->has_volume || shader->has_volume_connected ||
+    /* A volume used only by declared streamed Glass is validated by the
+     * coherent scene preparation (constant medium, ballistic attenuation). */
+    const bool streamed_glass_volume = declared_ideal_glass &&
+                                       scene->integrator->get_coherent_transport_mode() == 1;
+    if (((shader->has_volume || shader->has_volume_connected) && !streamed_glass_volume) ||
         (shader->has_surface_transparent && shader->get_use_transparent_shadow() &&
          !declared_ideal_glass))
     {

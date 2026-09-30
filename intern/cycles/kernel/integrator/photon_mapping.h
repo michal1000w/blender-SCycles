@@ -13,6 +13,7 @@
 #include "kernel/geom/shader_data.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/surface_shader.h"
+#include "kernel/light/coherent_history_kernel.h"
 #include "kernel/light/distribution.h"
 #include "kernel/light/sample.h"
 #include "kernel/sample/lcg.h"
@@ -680,6 +681,9 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
 #endif
 
   bool had_specular = false;
+  /* Deterministic coherent connections own declared source-to-detector
+   * histories; a caustic photon following one must not be stored there too. */
+  CoherentPathHistory coherent_history = coherent_history_begin();
   for (int bounce = 0; bounce < kernel_data.integrator.photon_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
@@ -767,6 +771,12 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     for (int i = 0; i < sd.num_closure; i++) {
       has_receiver |= surface_shader_photon_mapping_receiver(&sd.closure[i], sd.wi);
     }
+    const bool coherent_owned = kernel_data.integrator.coherent_specular_enabled &&
+                                (sd.object_flag & SD_OBJECT_COHERENT_DETECTOR) &&
+                                coherent_history_owned_candidate(kg, coherent_history, emitter_object);
+    if (had_specular && has_receiver && coherent_owned) {
+      return; /* Owned by the coherent detector estimator. */
+    }
     if (had_specular && has_receiver) {
       photon_store(kg,
                    sd.P,
@@ -808,6 +818,29 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     }
 
     path_state_next(kg, state, label, sd.runtime_flag);
+
+    if (kernel_data.integrator.coherent_specular_enabled) {
+      /* Same ownership state machine as BDPT light prefixes. */
+      const int patch_index = coherent_patch_for_hit(kg, sd.object, sd.prim, sd.type);
+      int patch_mode = 0;
+      int incident_side = 0;
+      if (patch_index >= 0) {
+        const ccl_global KernelCoherentPatch *patch = &kernel_data_fetch(coherent_patches, patch_index);
+        patch_mode = patch->mode;
+        if (patch_mode == 2 && kernel_data.integrator.coherent_transport_mode != 1) {
+          const float3 normal = patch->shape == 1 ? normalize(sd.P - patch->center) :
+              normalize(cross(float3(patch->tangent_u), float3(patch->tangent_v)));
+          incident_side = dot(ray.D, normal) < 0.0f ? 1 : -1;
+        }
+      }
+      coherent_history = kernel_data.integrator.coherent_transport_mode == 1 ?
+          coherent_history_stream_after_interface(
+              coherent_history, patch_index >= 0 ? patch_mode : 0, sd.object, label,
+              (sd.runtime_flag & SR_BACKFACING) ? -1 : 1,
+              uint(kernel_data.integrator.coherent_max_interface_events)) :
+          coherent_history_after_scatter(coherent_history, patch_index, patch_mode, label,
+                                         incident_side);
+    }
 
 #ifdef __VOLUME__
     if (label & LABEL_TRANSMIT) {

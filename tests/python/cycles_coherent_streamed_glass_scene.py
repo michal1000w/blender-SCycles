@@ -165,8 +165,17 @@ def record(folder, name, scene, objects, detector, sources, camera, max_events):
                  'negative_scale': obj.matrix_world.determinant() < 0,
                  'linked_users': obj.data.users}
         if entry['kind'] == 'glass':
-            node = [n for n in obj.data.materials[0].node_tree.nodes if n.type == 'BSDF_GLASS'][0]
+            tree = obj.data.materials[0].node_tree
+            node = [n for n in tree.nodes if n.type == 'BSDF_GLASS'][0]
             entry['ior'] = float(node.inputs['IOR'].default_value)
+            # Constant interior medium: sigma_t per metre, as Cycles evaluates it.
+            sigma = np.zeros(3)
+            for n in tree.nodes:
+                if n.type in ('VOLUME_ABSORPTION', 'VOLUME_SCATTER') and n.outputs[0].is_linked:
+                    color = np.array(n.inputs['Color'].default_value[:3], dtype=float)
+                    density = float(n.inputs['Density'].default_value)
+                    sigma += ((1.0 - color) if n.type == 'VOLUME_ABSORPTION' else color) * density
+            entry['extinction'] = sigma.tolist()
         geometry['objects'].append(entry)
     for light in sources:
         c = light.data.cycles

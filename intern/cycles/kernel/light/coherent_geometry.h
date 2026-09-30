@@ -627,4 +627,145 @@ ccl_device_inline bool coherent_geometry_connect(
   return isfinite_safe(path->spreading) && path->spreading > 0.0f;
 }
 
+/* Mixed reflection/transmission chains. Every planar reflection is an
+ * isometry: unfold the geometry that follows it, so reflections become
+ * non-bending pass-through planes. Fermat's principle is then solved only over
+ * the transmission planes in the unfolded frame (well conditioned even when
+ * internal reflections meet at a corner, where the full Hessian is nearly
+ * singular), with the existing stationary solver and its area-to-solid-angle
+ * spreading, which the isometry preserves. Reflection points are the
+ * intersections of the unfolded straight segments with the unfolded planes;
+ * all points are folded back, and physical side, phase and length checks are
+ * evaluated on the real path. */
+ccl_device_inline float3 coherent_unfold_apply(const float3 A[3], const float3 b, const float3 x)
+{
+  return A[0] * x.x + A[1] * x.y + A[2] * x.z + b;
+}
+ccl_device_inline float3 coherent_unfold_linear(const float3 A[3], const float3 v)
+{
+  return A[0] * v.x + A[1] * v.y + A[2] * v.z;
+}
+ccl_device_inline float3 coherent_unfold_inverse(const float3 A[3], const float3 b, const float3 y)
+{
+  /* A is orthogonal: A^-1 = A^T. */
+  const float3 d = y - b;
+  return make_float3(dot(A[0], d), dot(A[1], d), dot(A[2], d));
+}
+
+ccl_device_inline bool coherent_geometry_connect_unfolded(
+    const float3 source,
+    const float3 receiver,
+    const float3 receiver_normal,
+    const ccl_private CoherentGeometryInterface patches[COHERENT_GEOMETRY_MAX_INTERFACES],
+    const int count,
+    ccl_private CoherentGeometryPath *path)
+{
+  if (count < 1 || count > COHERENT_GEOMETRY_MAX_INTERFACES) return false;
+  float3 A[3] = {make_float3(1.0f, 0.0f, 0.0f), make_float3(0.0f, 1.0f, 0.0f),
+                 make_float3(0.0f, 0.0f, 1.0f)};
+  float3 b = zero_float3();
+  float3 frame_A[COHERENT_GEOMETRY_MAX_INTERFACES][3];
+  float3 frame_b[COHERENT_GEOMETRY_MAX_INTERFACES];
+  float3 plane_center[COHERENT_GEOMETRY_MAX_INTERFACES];
+  float3 plane_normal[COHERENT_GEOMETRY_MAX_INTERFACES];
+  CoherentGeometryInterface reduced[COHERENT_GEOMETRY_MAX_INTERFACES];
+  int transmissions = 0;
+  for (int i = 0; i < count; i++) {
+    for (int k = 0; k < 3; k++) frame_A[i][k] = A[k];
+    frame_b[i] = b;
+    const ccl_private CoherentGeometryInterface &p = patches[i];
+    plane_center[i] = coherent_unfold_apply(A, b, p.center);
+    const float3 tu = coherent_unfold_linear(A, p.tangent_u);
+    const float3 tv = coherent_unfold_linear(A, p.tangent_v);
+    plane_normal[i] = normalize(cross(tu, tv));
+    if (p.event == COHERENT_GEOMETRY_TRANSMIT) {
+      reduced[transmissions] = p;
+      reduced[transmissions].center = plane_center[i];
+      reduced[transmissions].tangent_u = tu;
+      reduced[transmissions].tangent_v = tv;
+      /* Membership is decided on the real triangle by the caller. */
+      reduced[transmissions].half_u = reduced[transmissions].half_v = FLT_MAX;
+      reduced[transmissions].expected_incident_side = 0;
+      transmissions++;
+    }
+    else {
+      /* Compose the Householder reflection about the unfolded plane. */
+      const float3 n = plane_normal[i];
+      for (int k = 0; k < 3; k++) A[k] = A[k] - 2.0f * dot(A[k], n) * n;
+      b = b - 2.0f * dot(b - plane_center[i], n) * n;
+    }
+  }
+  if (transmissions == 0) {
+    return coherent_geometry_connect_reflections(source, receiver, receiver_normal, patches, count, path);
+  }
+  /* Reduced media: every leg between transmissions keeps its medium. */
+  for (int k = 0; k + 1 < transmissions; k++) {
+    if (fabsf(reduced[k].ior_after - reduced[k + 1].ior_before) > 1.0e-5f) return false;
+  }
+  const float3 unfolded_receiver = coherent_unfold_apply(A, b, receiver);
+  const float3 unfolded_normal = coherent_unfold_linear(A, receiver_normal);
+  CoherentGeometryPath solved;
+  if (!coherent_geometry_connect(source, unfolded_receiver, unfolded_normal, reduced, transmissions,
+                                 &solved))
+    return false;
+
+  /* Walk the unfolded straight segments and place every event. */
+  float3 points[COHERENT_GEOMETRY_MAX_INTERFACES + 2];
+  points[0] = source;
+  points[count + 1] = receiver;
+  int next_transmission = 0;
+  float3 begin = source;
+  float3 end = solved.point[0];
+  float last_t = 0.0f;
+  for (int i = 0; i < count; i++) {
+    float3 unfolded;
+    if (patches[i].event == COHERENT_GEOMETRY_TRANSMIT) {
+      unfolded = solved.point[next_transmission++];
+      begin = unfolded;
+      end = next_transmission < transmissions ? solved.point[next_transmission] : unfolded_receiver;
+      last_t = 0.0f;
+    }
+    else {
+      const float3 direction = end - begin;
+      const float denominator = dot(direction, plane_normal[i]);
+      if (!(fabsf(denominator) > 1.0e-20f)) return false;
+      const float t = dot(plane_center[i] - begin, plane_normal[i]) / denominator;
+      if (!(t > last_t && t < 1.0f)) return false;
+      last_t = t;
+      unfolded = begin + t * direction;
+    }
+    points[i + 1] = coherent_unfold_inverse(frame_A[i], frame_b[i], unfolded);
+    path->point[i] = points[i + 1];
+  }
+  /* Physical side conditions on the real path. */
+  float q[COHERENT_GEOMETRY_DIM];
+  for (int i = 0; i < count; i++) {
+    const ccl_private CoherentGeometryInterface &p = patches[i];
+    const float3 normal = cross(p.tangent_u, p.tangent_v);
+    const float3 incoming = points[i] - points[i + 1];
+    const float3 outgoing = points[i + 2] - points[i + 1];
+    const float incoming_distance = len(incoming);
+    const float outgoing_distance = len(outgoing);
+    if (!(incoming_distance > 1.0e-12f && outgoing_distance > 1.0e-12f)) return false;
+    const float side_before = dot(incoming / incoming_distance, normal);
+    const float side_after = dot(outgoing / outgoing_distance, normal);
+    if (fabsf(side_before) <= 1.0e-6f || fabsf(side_after) <= 1.0e-6f) return false;
+    if (p.expected_incident_side != 0 && side_before * float(p.expected_incident_side) <= 0.0f)
+      return false;
+    if (p.event == COHERENT_GEOMETRY_REFLECT ? side_before * side_after <= 0.0f :
+                                               side_before * side_after >= 0.0f)
+      return false;
+    const float3 local = points[i + 1] - p.center;
+    q[2 * i] = dot(local, p.tangent_u);
+    q[2 * i + 1] = dot(local, p.tangent_v);
+  }
+  path->count = count;
+  for (int s = 0; s <= count; s++) path->segment_length[s] = len(points[s + 1] - points[s]);
+  path->optical_length_split = coherent_geometry_optical_length_split(source, receiver, patches, count, q);
+  path->optical_length = path->optical_length_split.x + path->optical_length_split.y;
+  path->source_direction = normalize(points[1] - source);
+  path->spreading = solved.spreading;
+  return isfinite_safe(path->spreading) && path->spreading > 0.0f;
+}
+
 CCL_NAMESPACE_END

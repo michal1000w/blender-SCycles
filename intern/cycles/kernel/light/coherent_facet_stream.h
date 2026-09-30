@@ -97,6 +97,8 @@ enum CoherentFacetRole {
   COHERENT_FACET_GLASS_EXTERIOR_REFLECT = 1,
   COHERENT_FACET_GLASS_ENTER = 2,
   COHERENT_FACET_GLASS_EXIT = 3,
+  /* Internal Fresnel (or total internal) reflection inside one Glass volume. */
+  COHERENT_FACET_GLASS_INTERIOR_REFLECT = 4,
 };
 
 ccl_device_inline void coherent_facet_set_role(ccl_private CoherentGeometryInterface *patch,
@@ -120,6 +122,12 @@ ccl_device_inline void coherent_facet_set_role(ccl_private CoherentGeometryInter
       patch->ior_before = glass_ior;
       patch->ior_after = patch->ior_opposite = 1.0f;
       patch->event = COHERENT_GEOMETRY_TRANSMIT;
+      patch->expected_incident_side = -1;
+      break;
+    case COHERENT_FACET_GLASS_INTERIOR_REFLECT:
+      patch->ior_before = patch->ior_after = glass_ior;
+      patch->ior_opposite = 1.0f;
+      patch->event = COHERENT_GEOMETRY_REFLECT;
       patch->expected_incident_side = -1;
       break;
     default:
@@ -199,6 +207,19 @@ ccl_device_inline bool coherent_facet_transmit_connect(const float3 source,
   return coherent_geometry_connect(source,receiver,receiver_normal,patches,2,path) &&
          coherent_facet_contains(path->point[0],first,first_indices) &&
          coherent_facet_contains(path->point[1],second,second_indices);
+}
+
+/* Ballistic field through a homogeneous interior medium: amplitude
+ * exp(-sigma_t d / 2) per RGB channel, power exp(-sigma_t d). */
+ccl_device_inline void coherent_stream_attenuate(ccl_private CoherentCompletedPathField *field,
+                                                 const float3 sigma, const float length)
+{
+  if (!(sigma.x > 0.0f || sigma.y > 0.0f || sigma.z > 0.0f)) return;
+  const float3 f = make_float3(expf(-0.5f * sigma.x * length), expf(-0.5f * sigma.y * length),
+                               expf(-0.5f * sigma.z * length));
+  field->radiance_amplitude_rgb *= f;
+  field->physical_diagonal_rgb *= f * f;
+  field->native_scalar_diagonal_rgb *= f * f;
 }
 
 struct CoherentStreamComplex {

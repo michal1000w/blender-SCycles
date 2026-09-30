@@ -80,7 +80,28 @@ def main():
             top = max(m.verts, key=lambda v: v.co.z)
             top.co.z *= 0.2
         edit_mesh(p, f)
-    case('concave_mesh', concave, 'convex volume')
+    case('concave_mesh_supported', concave)
+
+    def nested(s, p, d):
+        inner = p.copy()
+        inner.data = p.data.copy()
+        s.collection.objects.link(inner)
+        inner.scale = (0.3, 0.3, 0.3)
+        inner.location = (0.0, 0.0, 0.003)
+    case('nested_glass', nested, 'touches or nests with declared object')
+
+    def touching(s, p, d):
+        other = p.copy()
+        other.data = p.data.copy()
+        s.collection.objects.link(other)
+        other.location = (0.008, 0.0, 0.0)  # Shares the base corner edge region.
+    case('overlapping_glass', touching, 'touches or nests with declared object')
+
+    case('four_events', lambda s, p, d: (setattr(s.cycles, 'coherent_max_interface_events', 4),
+                                         setattr(s.cycles, 'max_bounces', 5),
+                                         setattr(s.cycles, 'glossy_bounces', 4),
+                                         setattr(s.cycles, 'transmission_bounces', 4)))
+
 
     def two_parts(s, p, d):
         def f(m):
@@ -96,7 +117,7 @@ def main():
 
     def overlap(s, p, d):
         d.location = (0.004, 0.0, 0.004)  # Inside the prism bounding box.
-    case('detector_overlaps_glass', overlap, 'bounds overlap declared object')
+    case('detector_overlaps_glass', overlap, 'touches or nests with declared object')
 
     case('scalar_polarization', lambda s, p, d: setattr(s.cycles, 'coherent_polarization_mode', 'SCALAR'),
          'Vector Dipole Ensemble')

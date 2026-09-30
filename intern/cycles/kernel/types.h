@@ -1671,6 +1671,9 @@ struct ccl_align(16) KernelCoherentPatch {
   int pad;
   packed_float3 polarizer_axis;
   int polarizer;
+  /* Streamed Glass: homogeneous interior extinction per metre (RGB). */
+  packed_float3 extinction;
+  float extinction_pad;
 };
 static_assert_align(KernelCoherentPatch, 16);
 

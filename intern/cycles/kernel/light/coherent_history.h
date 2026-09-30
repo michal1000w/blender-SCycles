@@ -118,8 +118,8 @@ ccl_device_inline CoherentPathHistory coherent_history_stream_after_interface(
     const int incident_side,
     const uint max_interfaces)
 {
-  if (!coherent_history_valid(history) || max_interfaces < 1u || max_interfaces > 2u ||
-      !(label & LABEL_SINGULAR))
+  if (!coherent_history_valid(history) || max_interfaces < 1u ||
+      max_interfaces > COHERENT_HISTORY_MAX_EVENTS || !(label & LABEL_SINGULAR))
   {
     return coherent_history_invalidate(history);
   }
@@ -130,13 +130,19 @@ ccl_device_inline CoherentPathHistory coherent_history_stream_after_interface(
   }
   const uint count = coherent_history_count(history);
   if (history.metadata & COHERENT_HISTORY_STREAM_INSIDE) {
-    if (patch_mode != 2 || !transmit || incident_side != -1 || object < 0 ||
-        history.patches != uint(object))
+    /* Inside one Glass volume: internal reflections on its facets, then the
+     * exit. The exit must still fit in the event budget. */
+    if (patch_mode != 2 || incident_side != -1 || object < 0 ||
+        history.patches != uint(object) || count + 1u > max_interfaces ||
+        (reflect && count + 2u > max_interfaces))
     {
       return coherent_history_invalidate(history);
     }
-    CoherentPathHistory result = coherent_history_append(history, 0u, 1u, 0);
-    result.metadata &= ~COHERENT_HISTORY_STREAM_INSIDE;
+    CoherentPathHistory result = coherent_history_append(history, 0u, transmit ? 1u : 0u, 0);
+    result.patches = uint(object);
+    if (transmit) {
+      result.metadata &= ~COHERENT_HISTORY_STREAM_INSIDE;
+    }
     return result;
   }
   if (patch_mode == 1) {
@@ -255,7 +261,7 @@ ccl_device_inline bool coherent_history_candidate_within_budget(
   if (interfaces_override >= 0) {
     /* Streamed routes: the given number of events, of which the stated
      * number are transmissions and the remainder reflections. */
-    if (interfaces_override > 2 || transmissions_override < 0 ||
+    if (interfaces_override > int(COHERENT_HISTORY_MAX_EVENTS) || transmissions_override < 0 ||
         transmissions_override > interfaces_override)
       return false;
     reflections = interfaces_override - transmissions_override;

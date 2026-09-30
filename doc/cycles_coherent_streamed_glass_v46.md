@@ -40,9 +40,32 @@ All renders: 128 samples, seed 19, BOX filter, adaptive and denoising off, fixed
 
 **Oracle correction (preserved).** The first declared references (`build/tests/performance/coherent_streamed_glass_v46`) contained oracle defects, noticed because the negative-scale reference differed from phase 0 although the geometry is identical: the spreading stencil dropped paths within ~1e-7 m of internal triangle edges (13 pixels in two variants), warm starts were shared across sources, and exact shared-edge hits were double counted. The corrections were verified only against geometry identities and the slab oracle, never against render values; gate formulas are unchanged. Originals, CPU results against them (18/18 pass) and `coherent_streamed_glass_v46_oracle_fix/reference_correction_provenance.json` are kept.
 
-## Remaining scope (honest)
+## v47 follow-up
 
-Supported now: native polarizer; bounded planar/sphere histories; streamed mirror facets through two events; streamed closed convex Glass with exterior R, mixed RR and one entry/exit pair. Still unsupported: internal reflections inside streamed Glass (TRT, needs ≥3 events), nested/overlapping or concave dielectrics, general smooth/rough curved surfaces, longer chains, volumes, motion, photon mapping, edge diffraction, and full broadband spectral coherence. These histories keep native incoherent transport.
+* **Viewport fix.** Viewport renders failed with "…unsupported: adaptive_aux_buffer": internal bookkeeping passes (adaptive aux buffer, render time, guiding debug, denoising history, volume majorants) are now accepted. They carry no light decomposition.
+* **Longer chains and internal reflections.** Streamed Facets accept Max Interface Events 1–4. Routes with 3–4 events are enumerated depth-first (`coherent_facet_stream_long_routes`): mirror and exterior Glass reflections in air, entry into a Glass volume, any number of internal reflections (Fresnel or total internal reflection, complex r), exit, and continuation in air. Leg half-space conditions prune whole subtrees. Cost O(F^k). Routes of ≤2 events use the unchanged v46 code, bit-identical.
+* **Concave and non-nested overlapping-bounds Glass.** Convexity is no longer required: every leg is BVH-tested, so a chord that leaves the volume is blocked; exit and re-entry are separate events. Bounding-box rules were replaced by exact tests: no surface contact between declared objects, and no vertex of one inside another Glass volume (generalized winding number). Sources must be strictly outside (winding ≈ 0, not on the surface). Nested Glass remains rejected, because native Cycles has no nested-dielectric priority either.
+* **Volumes.** A declared streamed Glass may contain a constant, non-emissive Absorption / Scatter / Principled Volume medium (Add or constant Mix). The coherent ballistic field is attenuated by exp(−σₜd/2) per RGB channel on interior legs. Medium-scattered light stays native and incoherent: BDPT already invalidates ownership at a medium collision.
+* **Photon mapping.** Photons now carry the same coherent history as BDPT light prefixes, and a caustic photon that follows an owned history is not stored at a declared detector. With oversampling set to 1, the coherent photon-mapped render matches the reference exactly. This also exposed a **pre-existing photon-mapping bug**: with the default camera oversampling (2), final renders and viewport were 2× too bright, because the film was normalized by scheduled samples instead of accumulated samples. It is now fixed in `PathTrace::get_num_accumulated_samples`.
+* **Motion blur.** Streamed facets use `triangle_world_space_vertices` at the sample time for moving objects (static objects keep the direct fetch). Rigid object motion is accepted in streamed mode; Glass validity, source containment and contact tests run at every motion step; deforming Glass is rejected.
+* **Broadband coherence.** The shared per-sample Gaussian phase exp(iZL/Lc) is a sampled wavenumber offset Δk = Z/Lc. For non-dispersive media it is therefore exact Gaussian-spectrum broadband transport, validated by the partial-coherence fixture against Gauss–Hermite spectral integration. **Dispersion** (IOR varying with wavelength inside the coherent sum) is not implemented.
+* **Not implemented:** diffraction at mesh edges (requires a UTD/physical-optics edge model), smooth-shaded or rough curved surfaces in the streamed model (analytic spheres remain in the bounded model), and dispersion.
+
+### v47 evidence (all pass; gates declared before rendering, hashes in each plan folder)
+
+| Set | CPU (PT + guiding) | Metal (PT, BDPT, guiding) |
+| --- | --- | --- |
+| 3–4 events: concave L (TT, exit→exterior R, T-R-R-T incl. corner reflections), slab T-R-T/T-R-R-T, prism total internal reflection, 3-mirror corner | 24/24 | 36/36 |
+| Constant absorbing / scattering medium inside Glass (scattering: PT/guiding only, BDPT adds real scattered light) | 12/12 | 15/15 |
+| Rigid motion blur (moving Glass prism, time-averaged reference; ignore-motion control detectable) | 4/4 | 6/6 |
+| Photon mapping (PT): streamed Glass, v45 mirrors, v39/v40 spheres | — | 9/9, 3/3, 12/12 |
+| Regressions: v46 streamed Glass, closed slab, v45, v44, bounded spheres | earlier runs; ≤2-event output bit-identical | 27/27, 9/9, 9/9, 27/27, 36/36 |
+
+Bugs found and fixed during v47: 4-event chains with internal reflections near a corner failed the full-coordinate Newton solve (near-singular Hessian). Mixed reflection/transmission chains now unfold the reflections as isometries and solve Fermat only over the transmission planes (`coherent_geometry_connect_unfolded`). Separately, volume and rigid-motion scenes were rejected by stale host guards; both guards are fixed. Photon runs set photon bounces to the scene's max bounces. With the default of 8, photons also (correctly) add caustics of longer paths that the ≤2-event references exclude. Oracle bugs fixed before any comparison: TIR complex conjugation, internal-reflection opposite medium, and IOR-independent medium tracking.
+
+## Remaining scope (v46 statement, superseded by the v47 list above)
+
+Supported in v46: native polarizer; bounded planar/sphere histories; streamed mirror facets through two events; streamed closed convex Glass with exterior R, mixed RR and one entry/exit pair.
 
 ## Reproduction
 

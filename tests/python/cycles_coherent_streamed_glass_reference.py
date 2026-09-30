@@ -36,12 +36,13 @@ def unit(v):
 
 
 class Facet:
-    def __init__(self, obj, index, points, kind, ior):
+    def __init__(self, obj, index, points, kind, ior, extinction=(0.0, 0.0, 0.0)):
         self.obj = obj
         self.index = index
         self.p = np.asarray(points, dtype=float)
         self.kind = kind  # 'mirror', 'glass', 'detector', 'opaque'
         self.ior = ior
+        self.extinction = np.asarray(extinction, dtype=float)  # Interior, per metre (RGB).
         e0 = self.p[1] - self.p[0]
         e1 = self.p[2] - self.p[0]
         self.normal = unit(np.cross(e0, e1))  # Outward for validated Glass.
@@ -84,7 +85,8 @@ class Scene:
         self.facets = []
         for obj in data['objects']:
             for i, tri in enumerate(obj['triangles']):
-                self.facets.append(Facet(obj['name'], i, tri, obj['kind'], obj.get('ior', 1.0)))
+                self.facets.append(Facet(obj['name'], i, tri, obj['kind'], obj.get('ior', 1.0),
+                                         obj.get('extinction', (0.0, 0.0, 0.0))))
         self.sources = data['sources']
         self.albedo = float(data.get('detector_albedo', 1.0))
         self.detector_normal = unit(np.asarray(data['detector_normal'], dtype=float))
@@ -100,10 +102,27 @@ class Scene:
             corners = [center] + [center + a * half * right + b * half * up
                                   for a in (-1, 1) for b in (-1, 1)]
             self.route_cache = {}
-            for source in self.sources:
+            events = int(data.get('max_events', 2))
+            lookup = {(f.obj, f.index): f for f in self.facets}
+            for i, source in enumerate(self.sources):
                 position = np.asarray(source['position'], dtype=float)
-                self.route_cache[(tuple(position), int(data.get('max_events', 2)))] = \
-                    prefilter_routes(self, position, corners, int(data.get('max_events', 2)))
+                keys = data.get('route_keys')
+                if keys is not None:
+                    # Routes kept by an earlier prefilter of this exact scene.
+                    routes = [Route(family, tuple(lookup[tuple(f)] for f in facets), tuple(ev))
+                              for family, facets, ev in keys[i]]
+                else:
+                    routes = prefilter_routes(self, position, corners, events)
+                self.route_cache[(tuple(position), events)] = routes
+
+    def route_keys(self):
+        """Serializable kept routes per source, for worker processes."""
+        result = []
+        for source in self.sources:
+            position = tuple(np.asarray(source['position'], dtype=float))
+            routes = next(v for (p, _), v in self.route_cache.items() if p == position)
+            result.append([[r.family, [[f.obj, f.index] for f in r.facets], list(r.events)] for r in routes])
+        return result
 
     def glass_objects(self):
         return sorted({f.obj for f in self.facets if f.kind == 'glass'})
@@ -224,13 +243,120 @@ def solve_transmission(source, receiver, entry, exit_):
     return [p0, p1]
 
 
+def solve_general(source, receiver, facets, events, iors, media=None):
+    """Any planar route: the optical length is a sum of norms of affine maps of
+    the plane coordinates, hence convex, so its stationary point is the unique
+    minimum. Per-event side conditions then decide physical admissibility."""
+    k = len(facets)
+    if media is None:
+        media = [None] + [None if n == 1.0 else True for n in iors[1:]]
+    inside_leg = [m is not None for m in media]
+    # Necessary endpoint conditions (exterior roles need their air endpoint outside).
+    if facets[0].kind == 'glass' and facets[0].plane_distance(source) <= 0.0:
+        return None
+    if facets[-1].kind == 'glass' and facets[-1].plane_distance(receiver) <= 0.0:
+        return None
+    # Necessary half-space conditions for every leg. A Glass event fixes the
+    # side a leg leaves from and arrives on (outside +, inside -); a mirror
+    # keeps both legs on one side. Endpoint sets are the facet vertices.
+    def depart_side(i):
+        f = facets[i]
+        if f.kind != 'glass':
+            return 0
+        return -1 if inside_leg[i + 1] else 1
+
+    def arrive_side(i):
+        f = facets[i]
+        if f.kind != 'glass':
+            return 0
+        return -1 if inside_leg[i] else 1
+
+    sets = [[source]] + [list(f.p) for f in facets] + [[receiver]]
+    for i in range(k):
+        f = facets[i]
+        prev_set, next_set = sets[i], sets[i + 2]
+        a_side, d_side = arrive_side(i), depart_side(i)
+        if a_side and not any(a_side * f.plane_distance(x) > 0.0 for x in prev_set):
+            return None
+        if d_side and not any(d_side * f.plane_distance(x) > 0.0 for x in next_set):
+            return None
+        if f.kind == 'mirror':
+            prev_d = [f.plane_distance(x) for x in prev_set]
+            next_d = [f.plane_distance(x) for x in next_set]
+            if (min(prev_d) > 0 and max(next_d) <= 0) or (max(prev_d) < 0 and min(next_d) >= 0):
+                return None
+    scale = max(np.linalg.norm(receiver - source), 1e-12)
+    centers = [f.p.mean(axis=0) for f in facets]
+
+    def points(q):
+        q = q * scale
+        return [c + q[2 * i] * f.u + q[2 * i + 1] * f.v for i, (c, f) in enumerate(zip(centers, facets))]
+
+    def opl(q):
+        chain = [source] + points(q) + [receiver]
+        return sum(n * np.linalg.norm(b - a) for a, b, n in zip(chain[:-1], chain[1:], iors)) / scale
+
+    def grad(q):
+        chain = [source] + points(q) + [receiver]
+        d = [unit(b - a) for a, b in zip(chain[:-1], chain[1:])]
+        g = np.zeros(2 * k)
+        for i, f in enumerate(facets):
+            v = iors[i] * d[i] - iors[i + 1] * d[i + 1]
+            g[2 * i] = v @ f.u
+            g[2 * i + 1] = v @ f.v
+        return g
+
+    key = (tuple(id(f) for f in facets), tuple(events), tuple(source))
+    q = _WARM.get(key)
+    if q is None or np.max(np.abs(grad(q))) > 1e-3:
+        q = minimize(opl, np.zeros(2 * k), jac=grad, method='BFGS',
+                     options={'gtol': 1e-15, 'maxiter': 20000}).x
+    for _ in range(10):
+        g = grad(q)
+        H = np.zeros((2 * k, 2 * k))
+        for j in range(2 * k):
+            dq = np.zeros(2 * k)
+            dq[j] = 1e-7
+            H[:, j] = (grad(q + dq) - grad(q - dq)) / 2e-7
+        try:
+            q = q - np.linalg.solve(H, g)
+        except np.linalg.LinAlgError:
+            return None
+    if not np.all(np.isfinite(q)) or np.max(np.abs(grad(q))) > 1e-11:
+        _WARM.pop(key, None)
+        return None
+    _WARM[key] = q
+    pts = points(q)
+    chain = [source] + pts + [receiver]
+    for i, (f, ev) in enumerate(zip(facets, events)):
+        before = f.plane_distance(chain[i])
+        after = f.plane_distance(chain[i + 2])
+        inside = inside_leg[i]
+        if ev == 'R':
+            if before * after <= 0.0:
+                return None
+            if f.kind == 'glass' and (before < 0.0) != inside:
+                return None
+        else:
+            if (before > 0.0) == inside or (after > 0.0) == (not inside):
+                return None
+    return pts
+
+
 # --- Field transport ---------------------------------------------------------
 
 
-def fresnel(n1, n2, cos_i):
+def fresnel(n1, n2, cos_i, reflection=False):
+    """Born-Wolf coefficients (p = s x k). Beyond the critical angle only the
+    reflection exists: cos_t is imaginary, r is complex with |r| = 1."""
     sin_t2 = (n1 / n2) ** 2 * (1.0 - cos_i * cos_i)
     if sin_t2 > 1.0:
-        return None
+        if not reflection:
+            return None
+        cos_t = 1j * math.sqrt(sin_t2 - 1.0)
+        rs = (n1 * cos_i - n2 * cos_t) / (n1 * cos_i + n2 * cos_t)
+        rp = (n2 * cos_i - n1 * cos_t) / (n2 * cos_i + n1 * cos_t)
+        return rs, rp, 0.0, 0.0, cos_t
     cos_t = math.sqrt(1.0 - sin_t2)
     rs = (n1 * cos_i - n2 * cos_t) / (n1 * cos_i + n2 * cos_t)
     rp = (n2 * cos_i - n1 * cos_t) / (n2 * cos_i + n1 * cos_t)
@@ -253,7 +379,7 @@ def interface(field, k_in, facet, event, n1, n2):
         s = facet.u
     s = unit(s)
     p_in = np.cross(s, k_in)
-    coefficients = fresnel(n1, n2, cos_i)
+    coefficients = fresnel(n1, n2, cos_i, reflection=event == 'R')
     if coefficients is None:
         return None
     rs, rp, ts, tp, cos_t = coefficients
@@ -277,7 +403,11 @@ def route_field(source, receiver, facets, events, points, iors):
         k = k0
         for i, (f, ev) in enumerate(zip(facets, events)):
             # Exterior Glass reflection: Fresnel against the Glass IOR.
-            opposite = f.ior if (ev == 'R' and f.kind == 'glass') else iors[i + 1]
+            # Glass reflection: against the Glass IOR from air, against air from inside.
+            if ev == 'R' and f.kind == 'glass':
+                opposite = f.ior if iors[i] == 1.0 else 1.0
+            else:
+                opposite = iors[i + 1]
             out = interface(e, k, f, ev, iors[i], opposite)
             if out is None:
                 return None
@@ -307,9 +437,21 @@ class Route:
                 values.append(values[-1])
         return values
 
+    def media(self):
+        """Glass facet whose volume encloses each leg (None for air)."""
+        inside = None
+        result = [None]
+        for f, ev in zip(self.facets, self.events):
+            if ev == 'T' and f.kind == 'glass':
+                inside = f if inside is None else None
+            result.append(inside)
+        return result
+
     def solve(self, source, receiver):
         if not self.facets:
             return []
+        if len(self.facets) >= 3:
+            return solve_general(source, receiver, self.facets, self.events, self.iors(), self.media())
         if self.events == ('T', 'T'):
             return solve_transmission(source, receiver, *self.facets)
         return solve_reflection(source, receiver, self.facets)
@@ -330,6 +472,26 @@ def enumerate_routes(scene, max_events):
                 routes.append(Route('RR_' + kinds, (a, b), ('R', 'R')))
                 if a.kind == 'glass' and b.kind == 'glass' and a.obj == b.obj:
                     routes.append(Route('TT', (a, b), ('T', 'T')))
+    if max_events >= 3:
+        def extend(facets, events, medium):
+            depth = len(facets)
+            if depth >= 3 and medium is None:
+                name = ''.join(('M' if f.kind == 'mirror' else 'G') + e for f, e in zip(facets, events))
+                routes.append(Route('long_' + name, tuple(facets), tuple(events)))
+            if depth == max_events or (medium is not None and depth + 1 > max_events):
+                return
+            for f in interfaces:
+                if facets and f is facets[-1]:
+                    continue
+                if medium is None:
+                    options = [('R', None)] + ([('T', f.obj)] if f.kind == 'glass' else [])
+                elif f.obj == medium:
+                    options = [('R', medium), ('T', None)]
+                else:
+                    continue
+                for event, next_medium in options:
+                    extend(facets + [f], events + [event], next_medium)
+        extend([], [], None)
     return routes
 
 
@@ -435,10 +597,16 @@ def detector_paths(scene, source_data, receiver, max_events, detector_index=0, h
         fields = route_field(source, receiver, route.facets, route.events, points, iors)
         if fields is None:
             continue
-        L = optical_length([source] + list(points) + [receiver], iors)
+        chain = [source] + list(points) + [receiver]
+        L = optical_length(chain, iors)
         amplitude = math.sqrt(source_data['power_W'] / (4 * math.pi) * S)
+        # Ballistic attenuation on legs inside a Glass medium (Beer-Lambert on power).
+        channel = np.ones(3)
+        for leg, medium in enumerate(route.media()):
+            if medium is not None:
+                channel *= np.exp(-0.5 * medium.extinction * np.linalg.norm(chain[leg + 1] - chain[leg]))
         paths.append({'family': route.family, 'L': L, 'amplitude': amplitude,
-                      'fields': fields, 'phase': source_data['phase_rad'],
+                      'fields': fields, 'phase': source_data['phase_rad'], 'channel': channel,
                       'group': source_data['group'], 'wavelength': source_data['wavelength_m'],
                       'coherence_length': source_data['coherence_length_m']})
     return paths
@@ -460,9 +628,12 @@ def radiance(scene, receiver, max_events, omit=(), incoherent=False):
             dL = a['L'] - b['L']
             gamma = math.exp(-0.5 * (dL / a['coherence_length']) ** 2)
             phase = 2 * math.pi * dL / a['wavelength'] + a['phase'] - b['phase']
-            overlap = sum(np.dot(ea, eb) for ea, eb in zip(a['fields'], b['fields']))
-            total += gamma * a['amplitude'] * b['amplitude'] * overlap * math.cos(phase)
-    return scene.albedo / math.pi * total, paths
+            # Complex (e.g. total internal reflection) fields: E_a . conj(E_b).
+            overlap = sum(np.dot(ea, np.conj(eb)) for ea, eb in zip(a['fields'], b['fields']))
+            # RGB channels differ only by interior extinction; report their mean.
+            weight = float(np.mean(a['channel'] * b['channel']))
+            total += gamma * a['amplitude'] * b['amplitude'] * weight * (overlap * np.exp(1j * phase)).real
+    return scene.albedo / math.pi * float(total), paths
 
 
 def pixel_points(camera, row, col, order):

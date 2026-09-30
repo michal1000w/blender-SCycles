@@ -78,24 +78,55 @@ def estimator_moments(scene, point, max_events, nodes=48):
 
 
 _WORKER_SCENE = {}
+TIME_NODES = 6  # Gauss-Legendre nodes over the shutter for moving objects.
+
+
+def time_scenes(data):
+    """(weight, geometry) pairs over the shutter. Rigid motion: each moving
+    object's triangles are translated linearly from its shutter-open to its
+    shutter-close offset, as Cycles interpolates a pure translation."""
+    motion = data.get('motion')
+    if not motion:
+        return [(1.0, data)]
+    x, w = np.polynomial.legendre.leggauss(TIME_NODES)
+    result = []
+    for xi, wi in zip(x, w):
+        t = 0.5 * (xi + 1.0)
+        moved = copy.deepcopy(data)
+        moved.pop('motion')
+        moved.pop('route_keys', None)
+        for obj in moved['objects']:
+            if obj['name'] in motion:
+                start = np.asarray(motion[obj['name']]['offset_open'])
+                end = np.asarray(motion[obj['name']]['offset_close'])
+                offset = start + t * (end - start)
+                obj['triangles'] = (np.asarray(obj['triangles']) + offset).tolist()
+        result.append((0.5 * wi, moved))
+    return result
 
 
 def _row(arguments):
     data, row, order, omit, moments = arguments
-    key = json.dumps(data, sort_keys=True)
-    scene = _WORKER_SCENE.get(key)
-    if scene is None:
-        scene = _WORKER_SCENE[key] = oracle.Scene(data)
+    scenes = []
+    for weight, geometry in time_scenes(data):
+        key = json.dumps(geometry, sort_keys=True)
+        if key not in _WORKER_SCENE:
+            _WORKER_SCENE[key] = oracle.Scene(geometry)
+        scenes.append((weight, _WORKER_SCENE[key]))
     camera = data['camera']
     means, seconds = [], []
     for col in range(int(camera['resolution'])):
         values, second = [], []
         for x in oracle.pixel_points(camera, row, col, order):
-            if moments:
-                m, s = estimator_moments(scene, x, data['max_events'])
-            else:
-                m = oracle.radiance(scene, x, data['max_events'], omit)[0]
-                s = m * m
+            m = s = 0.0
+            for weight, scene in scenes:
+                if moments:
+                    mi, si = estimator_moments(scene, x, data['max_events'])
+                else:
+                    mi = oracle.radiance(scene, x, data['max_events'], omit)[0]
+                    si = mi * mi
+                m += weight * mi
+                s += weight * si  # Second moment over time and position.
             values.append(m)
             second.append(s)
         means.append(np.mean(values))
@@ -116,6 +147,7 @@ def reference_image(data, order, omit=(), moments=False):
 
 def with_ior(data, ior):
     changed = copy.deepcopy(data)
+    changed.pop('route_keys', None)  # Different optics: prefilter again.
     for obj in changed['objects']:
         if obj['kind'] == 'glass':
             obj['ior'] = ior
@@ -125,6 +157,8 @@ def with_ior(data, ior):
 def analyse(geometry_path):
     data = json.loads(Path(geometry_path).read_text())
     scene = oracle.Scene(data)
+    if not data.get('motion'):
+        data['route_keys'] = scene.route_keys()  # Prefilter once, reuse in workers.
     camera = data['camera']
     events = data['max_events']
     finite = any(s['coherence_length_m'] < 1.0 for s in data['sources'])
@@ -135,12 +169,17 @@ def analyse(geometry_path):
     families = sorted({p['family'] for p in paths})
     controls = {}
     for label, omit in [('omit_TT', ('TT',)), ('omit_glass_R', ('glass_R', 'RR_GM', 'RR_MG', 'RR_GG')),
-                        ('omit_two_event_reflections', ('RR',))]:
+                        ('omit_two_event_reflections', ('RR',)),
+                        ('omit_three_and_four_event_routes', ('long',))]:
         present = any(p['family'] in omit or p['family'].split('_')[0] in omit for p in paths)
         if present:
             controls[label] = reference_image(data, 2, omit=omit)[0]
     if any(o['kind'] == 'glass' for o in data['objects']):
         controls['glass_IOR_1'] = reference_image(with_ior(data, 1.0), 2)[0]
+    if data.get('motion'):
+        static = copy.deepcopy(data)
+        static.pop('motion')
+        controls['ignore_motion'] = reference_image(static, 2)[0]
     return data, ref4, var4, ref2, families, controls, finite
 
 
@@ -195,6 +234,10 @@ def main():
                                 incoherent_radiance=r['ref'])
             r['reference_path'] = ref_path
         for transport in ('pt', 'bdpt', 'pt-guiding'):
+            if transport == 'bdpt' and 'scattering' in layout.name:
+                # BDPT also renders light scattered by the medium (native, incoherent),
+                # which this ballistic coherent reference intentionally excludes.
+                continue
             for name, r in results.items():
                 render = output / 'render' / f'{transport}_{layout.name}' / f'{name}.exr'
                 render.parent.mkdir(parents=True, exist_ok=True)
