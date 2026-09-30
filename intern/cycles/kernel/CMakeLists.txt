@@ -46,6 +46,7 @@ set(SRC_KERNEL_CLOSURE_HEADERS
   closure/bsdf_toon.h
   closure/bsdf_transparent.h
   closure/bsdf_util.h
+  closure/polarizer_axis.h
   closure/bsdf_ashikhmin_shirley.h
   closure/bsdf_hair.h
   closure/bssrdf.h
