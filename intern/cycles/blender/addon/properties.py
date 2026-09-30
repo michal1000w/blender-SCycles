@@ -2017,8 +2017,9 @@ class CyclesPreferences(bpy.types.AddonPreferences):
         name="Kernel Optimization",
         description="Kernels can be optimized based on scene content. Optimized kernels are requested at the start of a render. "
                     "If optimized kernels are not available, rendering will proceed using generic kernels until the optimized set "
-                    "is available in the cache. This can result in additional CPU usage for a brief time (tens of seconds)",
-        default='FULL',
+                    "is available in the cache. Optimized kernels are compiled again in the background after scene changes, "
+                    "while generic kernels are compiled once per Blender build",
+        default='OFF',
         items=(
             ('OFF', "Off", "Disable kernel optimization. Slowest rendering, no extra background CPU usage"),
             ('INTERSECT', "Intersection only", "Optimize only intersection kernels. Faster rendering, negligible extra background CPU usage"),

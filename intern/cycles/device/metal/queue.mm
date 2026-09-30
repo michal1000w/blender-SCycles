@@ -458,8 +458,15 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
         write_resource(
             ancillary_args, active_pipeline.intersection_func_table[table_idx], ancillary_index++);
       }
-      assert(ancillary_index == ANCILLARY_SLOT_COUNT);
     }
+
+    /* The shading function tables follow all other slots. */
+    if (active_pipeline.use_visible_shading) {
+      for (int table = 0; table < METAL_VFT_NUM; table++) {
+        write_resource(ancillary_args, active_pipeline.visible_func_table[table], ancillary_index++);
+      }
+    }
+    assert(ancillary_index <= ANCILLARY_SLOT_COUNT);
 
     [mtlComputeCommandEncoder setBytes:dynamic_args length:dynamic_bytes_written atIndex:0];
     [mtlComputeCommandEncoder setBuffer:metal_device_->launch_params_buffer offset:0 atIndex:1];
@@ -487,6 +494,12 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
           [mtlComputeCommandEncoder useResource:active_pipeline.intersection_func_table[table]
                                           usage:MTLResourceUsageRead];
         }
+      }
+    }
+    if (!metal_device_->mtlResidencySet_enabled && active_pipeline.use_visible_shading) {
+      for (int table = 0; table < METAL_VFT_NUM; table++) {
+        [mtlComputeCommandEncoder useResource:active_pipeline.visible_func_table[table]
+                                        usage:MTLResourceUsageRead];
       }
     }
 

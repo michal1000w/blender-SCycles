@@ -7,6 +7,18 @@
 
 CCL_NAMESPACE_BEGIN
 
+template<typename ConstIntegratorGenericState>
+ccl_device_inline void pixel_displacement_shader_eval(KernelGlobals kg,
+                                                      ConstIntegratorGenericState state,
+                                                      ccl_private ShaderData *sd)
+{
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+  displacement_shader_eval_direct(kg, state, sd);
+#else
+  displacement_shader_eval(kg, state, sd);
+#endif
+}
+
 #ifdef __KERNEL_METAL__
 
 ccl_device_inline float3 pixel_displacement_smooth_normal(KernelGlobals kg,
@@ -155,7 +167,7 @@ ccl_device_noinline void pixel_displacement_eval_compact(KernelGlobals kg,
     const uint node_type = kernel_data_fetch(svm_nodes, offset++);
     switch (node_type) {
 #  define DISPLACEMENT_SVM_NODE(name, ...) \
-    SVM_CASE(name) \
+    SVM_CASE_BASE(name) \
     { \
       __VA_ARGS__ \
     } \
@@ -369,7 +381,7 @@ pixel_displacement_eval_object_direct(KernelGlobals kg,
       pixel_displacement_eval_image<false>(kg, sd, evaluator - 2);
     }
     else if (force_full || (evaluator_set & 8)) {
-      displacement_shader_eval(kg, state, sd);
+      pixel_displacement_shader_eval(kg, state, sd);
     }
     else if ((evaluator_set & PIXEL_DISPLACEMENT_EVALUATOR_MASK) == 4 ||
              ((evaluator_set & 4) && evaluator >= 2))
@@ -383,7 +395,7 @@ pixel_displacement_eval_object_direct(KernelGlobals kg,
         pixel_displacement_eval_image<true>(kg, sd, evaluator - 2);
       }
       else {
-        displacement_shader_eval(kg, state, sd);
+        pixel_displacement_shader_eval(kg, state, sd);
       }
     }
     else if ((evaluator_set & PIXEL_DISPLACEMENT_EVALUATOR_MASK) == 1 ||
@@ -395,11 +407,11 @@ pixel_displacement_eval_object_direct(KernelGlobals kg,
       pixel_displacement_eval_compact(kg, sd);
     }
     else {
-      displacement_shader_eval(kg, state, sd);
+      pixel_displacement_shader_eval(kg, state, sd);
     }
   }
   else {
-    displacement_shader_eval(kg, state, sd);
+    pixel_displacement_shader_eval(kg, state, sd);
   }
   if (r_cache_miss) {
     *r_cache_miss = (sd->runtime_flag & SR_CACHE_MISS) != 0;
@@ -823,7 +835,23 @@ ccl_device_noinline void pixel_displacement_displaced_geometry(KernelGlobals kg,
   }
 }
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Compiled once as a Metal visible function instead of inside every shader setup, see
+ * `kernel.metal`. */
+ccl_device_inline void pixel_displacement_shader_setup(KernelGlobals /*kg*/,
+                                                       ccl_private ShaderData *sd,
+                                                       const float time,
+                                                       const bool motion,
+                                                       ccl_private const float3 verts[3])
+{
+  metal_ancillaries->vft_pixel_displacement[0](
+      &launch_params_metal, metal_ancillaries, sd, time, motion, verts);
+}
+
+ccl_device_noinline void pixel_displacement_shader_setup_impl(KernelGlobals kg,
+#else
 ccl_device_noinline void pixel_displacement_shader_setup(KernelGlobals kg,
+#endif
                                                          ccl_private ShaderData *sd,
                                                          const float time,
                                                          const bool motion,

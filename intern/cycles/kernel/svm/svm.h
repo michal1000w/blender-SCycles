@@ -90,20 +90,188 @@
 CCL_NAMESPACE_BEGIN
 
 #ifdef __KERNEL_METAL_SVM_USAGE__
-#  define SVM_CASE(node) \
+#  define SVM_CASE_BASE(node) \
     case node: \
       if (!__KERNEL_METAL_SVM_##node) \
         break;
 #elif defined(__KERNEL_USE_DATA_CONSTANTS__)
-#  define SVM_CASE(node) \
+#  define SVM_CASE_BASE(node) \
     case node: \
       if (!kernel_data_svm_usage_##node) \
         break;
 #else
-#  define SVM_CASE(node) case node:
+#  define SVM_CASE_BASE(node) case node:
+#endif
+
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* A shared-node evaluation never reaches instantiation specific nodes. Returning makes their
+ * implementation unreachable, so it is not compiled into the shared function. */
+#  define SVM_CASE(node) \
+    SVM_CASE_BASE(node) \
+    if constexpr (eval_mode == SVM_EVAL_SHARED_NODE) { \
+      return offset; \
+    }
+#else
+#  define SVM_CASE(node) SVM_CASE_BASE(node)
+#endif
+
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Nodes which do not depend on the node feature mask, shader type or path state. A complete
+ * shader evaluation forwards them to one shared function; the following implementation is then
+ * unreachable in that instantiation and is not compiled into it. */
+#  define SVM_SHARED_CASE(node) \
+    case node: \
+      if constexpr (eval_mode == SVM_EVAL_CORE) { \
+        offset = svm_metal_shared_node(node, offset, sd, stack, path_visibility, path_flag); \
+        break; \
+      }
+#  define SVM_EVAL_RETURN return offset
+#else
+#  define SVM_SHARED_CASE(node) SVM_CASE(node)
+#  define SVM_EVAL_RETURN return
+#endif
+
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Metal compiles every interpreter instantiation once as a visible function and links the
+ * binaries into the kernels, instead of optimizing the complete interpreter again inside every
+ * kernel that evaluates a shader. Each instantiation used by the kernels needs an entry here.
+ * The table index is part of the host and kernel contract, see `kernel.metal`. */
+#  define CCL_METAL_SVM_FUNCTIONS(F) \
+    F(0, KERNEL_FEATURE_NODE_MASK_SURFACE & ~KERNEL_FEATURE_NODE_RAYTRACE, SHADER_TYPE_SURFACE, int) \
+    F(1, KERNEL_FEATURE_NODE_MASK_SURFACE, SHADER_TYPE_SURFACE, int) \
+    F(2, KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT, SHADER_TYPE_SURFACE, int) \
+    F(3, KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW, SHADER_TYPE_SURFACE, int) \
+    F(4, KERNEL_FEATURE_NODE_MASK_SURFACE_BACKGROUND, SHADER_TYPE_SURFACE, int) \
+    F(5, KERNEL_FEATURE_NODE_MASK_VOLUME, SHADER_TYPE_VOLUME, int) \
+    F(6, KERNEL_FEATURE_NODE_MASK_DISPLACEMENT, SHADER_TYPE_DISPLACEMENT, int) \
+    F(7, \
+      KERNEL_FEATURE_NODE_MASK_DISPLACEMENT, \
+      SHADER_TYPE_DISPLACEMENT, \
+      IntegratorBakeState) \
+    F(8, \
+      KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT & ~KERNEL_FEATURE_NODE_LIGHT_PATH, \
+      SHADER_TYPE_SURFACE, \
+      IntegratorBakeState) \
+    F(9, \
+      KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW & ~KERNEL_FEATURE_NODE_LIGHT_PATH, \
+      SHADER_TYPE_SURFACE, \
+      IntegratorBakeState) \
+    F(10, \
+      KERNEL_FEATURE_NODE_MASK_VOLUME & ~KERNEL_FEATURE_NODE_LIGHT_PATH, \
+      SHADER_TYPE_VOLUME, \
+      IntegratorBakeState)
+
+enum SVMEvalMode {
+  SVM_EVAL_CORE = 0,
+  SVM_EVAL_SHARED_NODE = 1,
+};
+
+ccl_device_inline int svm_metal_shared_node(const uint node_type,
+                                            const int offset,
+                                            ccl_private ShaderData *sd,
+                                            ccl_private float *stack,
+                                            const PathRayVisibility path_visibility,
+                                            const uint32_t path_flag)
+{
+  return metal_ancillaries->vft_svm_node[0](&launch_params_metal,
+                                            metal_ancillaries,
+                                            node_type,
+                                            offset,
+                                            sd,
+                                            stack,
+                                            uint(path_visibility),
+                                            path_flag);
+}
+
+ccl_device_inline int svm_metal_closure_bsdf(ccl_private ShaderData *sd,
+                                             ccl_private float *stack,
+                                             const Spectrum closure_weight,
+                                             const int offset,
+                                             const PathRayVisibility path_visibility,
+                                             const uint32_t path_flag)
+{
+  return metal_ancillaries->vft_svm_closure[0](&launch_params_metal,
+                                               metal_ancillaries,
+                                               sd,
+                                               stack,
+                                               closure_weight,
+                                               offset,
+                                               uint(path_visibility),
+                                               path_flag);
+}
+
+template<uint64_t node_feature_mask, ShaderType type, typename StateType>
+static constexpr int svm_metal_function_index()
+{
+#  define CCL_METAL_SVM_FUNCTION_INDEX(index, mask, shader_type, state_type) \
+    if (node_feature_mask == uint64_t(mask) && type == shader_type && \
+        metal::is_same<StateType, state_type>::value) \
+    { \
+      return index; \
+    }
+  CCL_METAL_SVM_FUNCTIONS(CCL_METAL_SVM_FUNCTION_INDEX)
+#  undef CCL_METAL_SVM_FUNCTION_INDEX
+  return -1;
+}
+
+template<uint64_t node_feature_mask, ShaderType type, typename ConstIntegratorGenericState>
+ccl_device_inline void svm_eval_nodes(KernelGlobals /*kg*/,
+                                      ConstIntegratorGenericState state,
+                                      ccl_private ShaderData *sd,
+                                      ccl_global float *render_buffer,
+                                      const PathRayVisibility path_visibility,
+                                      const uint32_t path_flag)
+{
+  constexpr bool is_bake = metal::is_same<ConstIntegratorGenericState, IntegratorBakeState>::value;
+  constexpr int index = svm_metal_function_index<
+      node_feature_mask,
+      type,
+      metal::conditional_t<is_bake, IntegratorBakeState, int>>();
+  static_assert(index >= 0, "Shader interpreter instantiation has no Metal visible function");
+  int state_index = 0;
+  if constexpr (!is_bake) {
+    state_index = int(state);
+  }
+  metal_ancillaries->vft_svm[index](&launch_params_metal,
+                                    metal_ancillaries,
+                                    state_index,
+                                    sd,
+                                    render_buffer,
+                                    uint(path_visibility),
+                                    path_flag);
+}
 #endif
 
 /* Main Interpreter Loop */
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* `SVM_EVAL_CORE` runs a complete shader, forwarding nodes that do not depend on the
+ * instantiation to the shared node function. `SVM_EVAL_SHARED_NODE` executes one such node. */
+template<uint64_t node_feature_mask,
+         ShaderType type,
+         int eval_mode,
+         typename ConstIntegratorGenericState>
+ccl_device int svm_eval_nodes_impl(KernelGlobals kg,
+                                   ConstIntegratorGenericState state,
+                                   ccl_private ShaderData *sd,
+                                   ccl_global float *render_buffer,
+                                   const PathRayVisibility path_visibility,
+                                   const uint32_t path_flag,
+                                   const uint shared_node_type = 0,
+                                   int shared_offset = 0,
+                                   ccl_private float *shared_stack = nullptr)
+{
+  float local_stack[eval_mode == SVM_EVAL_SHARED_NODE ? 1 : SVM_STACK_SIZE];
+  ccl_private float *stack = eval_mode == SVM_EVAL_SHARED_NODE ? shared_stack : local_stack;
+  Spectrum closure_weight = zero_spectrum();
+  int offset = eval_mode == SVM_EVAL_SHARED_NODE ?
+                   shared_offset :
+                   (sd->shader & SHADER_MASK) * (1 + sizeof(SVMNodeShaderJump) / sizeof(uint));
+
+  while (true) {
+    const uint node_type = eval_mode == SVM_EVAL_SHARED_NODE ?
+                               shared_node_type :
+                               kernel_data_fetch(svm_nodes, offset++);
+#else
 template<uint64_t node_feature_mask, ShaderType type, typename ConstIntegratorGenericState>
 ccl_device void svm_eval_nodes(KernelGlobals kg,
                                ConstIntegratorGenericState state,
@@ -125,12 +293,13 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
 
   while (true) {
     const uint node_type = kernel_data_fetch(svm_nodes, offset++);
+#endif
 
     /* NOTE: Every case must always read its full node struct regardless of enabled features,
      * so that the offset advances past the SVM node data. */
     switch (node_type) {
       SVM_CASE(NODE_END)
-      return;
+      SVM_EVAL_RETURN;
       SVM_CASE(NODE_SHADER_JUMP)
       {
         const SVMNodeShaderJump jump = svm_node_get<SVMNodeShaderJump>(kg, &offset);
@@ -144,12 +313,27 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
           offset = jump.offset_displacement;
         }
         else {
-          return;
+          SVM_EVAL_RETURN;
         }
         break;
       }
       SVM_CASE(NODE_CLOSURE_BSDF)
       {
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+        if constexpr (eval_mode == SVM_EVAL_CORE && type == SHADER_TYPE_SURFACE &&
+                      (node_feature_mask & KERNEL_FEATURE_NODE_BSDF))
+        {
+          /* The shared closure function is instantiated for the surface mask. The closure node
+           * only depends on these bits of the mask. */
+          static_assert((node_feature_mask &
+                         (KERNEL_FEATURE_NODE_BSDF | KERNEL_FEATURE_NODE_EMISSION)) ==
+                        (KERNEL_FEATURE_NODE_MASK_SURFACE &
+                         (KERNEL_FEATURE_NODE_BSDF | KERNEL_FEATURE_NODE_EMISSION)));
+          offset = svm_metal_closure_bsdf(
+              sd, stack, closure_weight, offset, path_visibility, path_flag);
+          break;
+        }
+#endif
         const ccl_global SVMNodeClosureBsdf &bsdf_node = svm_node_get<SVMNodeClosureBsdf>(kg,
                                                                                           &offset);
         offset = svm_node_closure_bsdf<node_feature_mask, type>(
@@ -209,10 +393,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_GEOMETRY)
+      SVM_SHARED_CASE(NODE_GEOMETRY)
       svm_node_geometry<float3>(kg, sd, stack, svm_node_get<SVMNodeGeometry>(kg, &offset));
       break;
-      SVM_CASE(NODE_GEOMETRY_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_GEOMETRY_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeGeometry>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -220,10 +405,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_CONVERT)
+      SVM_SHARED_CASE(NODE_CONVERT)
       svm_node_convert<float, float3>(kg, stack, svm_node_get<SVMNodeConvert>(kg, &offset));
       break;
-      SVM_CASE(NODE_CONVERT_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_CONVERT_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeConvert>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -231,13 +417,14 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_TEX_COORD)
+      SVM_SHARED_CASE(NODE_TEX_COORD)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTexCoord>(kg, &offset);
         offset = svm_node_tex_coord(kg, sd, path_visibility, stack, node, offset);
       }
       break;
-      SVM_CASE(NODE_TEX_COORD_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_TEX_COORD_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTexCoord>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -248,10 +435,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_VALUE_F)
+      SVM_SHARED_CASE(NODE_VALUE_F)
       svm_node_value_f<float>(stack, svm_node_get<SVMNodeValueF>(kg, &offset));
       break;
-      SVM_CASE(NODE_VALUE_F_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_VALUE_F_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeValueF>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -259,10 +447,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_VALUE_V)
+      SVM_SHARED_CASE(NODE_VALUE_V)
       svm_node_value_v<float3>(stack, svm_node_get<SVMNodeValueV>(kg, &offset));
       break;
-      SVM_CASE(NODE_VALUE_V_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_VALUE_V_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeValueV>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -283,11 +472,25 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_ATTR_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_ATTR_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeAttr>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
           svm_node_attr_derivative(kg, sd, stack, node);
+        }
+      }
+      break;
+      SVM_SHARED_CASE(NODE_VERTEX_COLOR)
+      svm_node_vertex_color(kg, sd, stack, svm_node_get<SVMNodeVertexColor>(kg, &offset));
+      break;
+      SVM_SHARED_CASE(NODE_VERTEX_COLOR_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
+      {
+        const ccl_global auto &node = svm_node_get<SVMNodeVertexColor>(kg, &offset);
+        IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
+        {
+          svm_node_vertex_color_derivative(kg, sd, stack, node);
         }
       }
       break;
@@ -303,10 +506,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
       svm_node_vector_displacement<node_feature_mask>(
           kg, sd, stack, svm_node_get<SVMNodeVectorDisplacement>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_IMAGE)
+      SVM_SHARED_CASE(NODE_TEX_IMAGE)
       svm_node_tex_image<float3>(kg, sd, stack, svm_node_get<SVMNodeTexImage>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_IMAGE_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_TEX_IMAGE_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTexImage>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -314,10 +518,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_TEX_IMAGE_BOX)
+      SVM_SHARED_CASE(NODE_TEX_IMAGE_BOX)
       svm_node_tex_image_box<float3>(kg, sd, stack, svm_node_get<SVMNodeTexImageBox>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_IMAGE_BOX_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_TEX_IMAGE_BOX_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTexImageBox>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -325,7 +530,7 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_TEX_NOISE)
+      SVM_SHARED_CASE(NODE_TEX_NOISE)
       svm_node_tex_noise(stack, svm_node_get<SVMNodeTexNoise>(kg, &offset));
       break;
       SVM_CASE(NODE_SET_BUMP)
@@ -356,17 +561,17 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_HSV)
+      SVM_SHARED_CASE(NODE_HSV)
       svm_node_hsv(stack, svm_node_get<SVMNodeHSV>(kg, &offset));
       break;
       SVM_CASE(NODE_CLOSURE_HOLDOUT)
       svm_node_closure_holdout(
           sd, stack, closure_weight, svm_node_get<SVMNodeClosureHoldout>(kg, &offset));
       break;
-      SVM_CASE(NODE_FRESNEL)
+      SVM_SHARED_CASE(NODE_FRESNEL)
       svm_node_fresnel(sd, stack, svm_node_get<SVMNodeFresnel>(kg, &offset));
       break;
-      SVM_CASE(NODE_LAYER_WEIGHT)
+      SVM_SHARED_CASE(NODE_LAYER_WEIGHT)
       svm_node_layer_weight(sd, stack, svm_node_get<SVMNodeLayerWeight>(kg, &offset));
       break;
       SVM_CASE(NODE_CLOSURE_VOLUME)
@@ -406,19 +611,14 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
             kg, sd, stack, closure_weight, volume_node, path_visibility, path_flag);
       }
       break;
-      SVM_CASE(NODE_MATH)
+      SVM_SHARED_CASE(NODE_MATH)
       svm_node_math(stack, svm_node_get<SVMNodeMath>(kg, &offset));
       break;
-      SVM_CASE(NODE_BOOLEAN_MATH)
-      svm_node_boolean_math(stack, svm_node_get<SVMNodeBooleanMath>(kg, &offset));
-      break;
-      SVM_CASE(NODE_INTEGER_MATH)
-      svm_node_integer_math(stack, svm_node_get<SVMNodeIntegerMath>(kg, &offset));
-      break;
-      SVM_CASE(NODE_VECTOR_MATH)
+      SVM_SHARED_CASE(NODE_VECTOR_MATH)
       svm_node_vector_math<float3>(stack, svm_node_get<SVMNodeVectorMath>(kg, &offset));
       break;
-      SVM_CASE(NODE_VECTOR_MATH_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_VECTOR_MATH_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeVectorMath>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -426,16 +626,16 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_RGB_RAMP)
+      SVM_SHARED_CASE(NODE_RGB_RAMP)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeRGBRamp>(kg, &offset);
         offset = svm_node_rgb_ramp(kg, stack, node, offset);
       }
       break;
-      SVM_CASE(NODE_GAMMA)
+      SVM_SHARED_CASE(NODE_GAMMA)
       svm_node_gamma(stack, svm_node_get<SVMNodeGamma>(kg, &offset));
       break;
-      SVM_CASE(NODE_BRIGHTCONTRAST)
+      SVM_SHARED_CASE(NODE_BRIGHTCONTRAST)
       svm_node_brightness(stack, svm_node_get<SVMNodeBrightContrast>(kg, &offset));
       break;
       SVM_CASE(NODE_LIGHT_PATH)
@@ -447,22 +647,27 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
                                              path_visibility,
                                              path_flag);
       break;
-      SVM_CASE(NODE_OBJECT_INFO)
+      SVM_SHARED_CASE(NODE_OBJECT_INFO)
       svm_node_object_info(kg, sd, stack, svm_node_get<SVMNodeObjectInfo>(kg, &offset));
       break;
-      SVM_CASE(NODE_PARTICLE_INFO)
+      SVM_SHARED_CASE(NODE_PARTICLE_INFO)
       svm_node_particle_info(kg, sd, stack, svm_node_get<SVMNodeParticleInfo>(kg, &offset));
       break;
-      SVM_CASE(NODE_HAIR_INFO)
+#if defined(__HAIR__)
+      SVM_SHARED_CASE(NODE_HAIR_INFO)
       svm_node_hair_info(kg, sd, stack, svm_node_get<SVMNodeHairInfo>(kg, &offset));
       break;
-      SVM_CASE(NODE_POINT_INFO)
+#endif
+#if defined(__POINTCLOUD__)
+      SVM_SHARED_CASE(NODE_POINT_INFO)
       svm_node_point_info(kg, sd, stack, svm_node_get<SVMNodePointInfo>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEXTURE_MAPPING)
+#endif
+      SVM_SHARED_CASE(NODE_TEXTURE_MAPPING)
       svm_node_texture_mapping<float3>(stack, svm_node_get<SVMNodeTextureMapping>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEXTURE_MAPPING_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_TEXTURE_MAPPING_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTextureMapping>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -470,10 +675,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_MAPPING)
+      SVM_SHARED_CASE(NODE_MAPPING)
       svm_node_mapping<float3>(stack, svm_node_get<SVMNodeMapping>(kg, &offset));
       break;
-      SVM_CASE(NODE_MAPPING_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_MAPPING_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeMapping>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -481,17 +687,18 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_MIN_MAX)
+      SVM_SHARED_CASE(NODE_MIN_MAX)
       svm_node_min_max(stack, svm_node_get<SVMNodeMinMax>(kg, &offset));
       break;
-      SVM_CASE(NODE_CAMERA)
+      SVM_SHARED_CASE(NODE_CAMERA)
       svm_node_camera(kg, sd, stack, svm_node_get<SVMNodeCamera>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_ENVIRONMENT)
+      SVM_SHARED_CASE(NODE_TEX_ENVIRONMENT)
       svm_node_tex_environment<float3>(
           kg, sd, stack, svm_node_get<SVMNodeTexEnvironment>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_ENVIRONMENT_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_TEX_ENVIRONMENT_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTexEnvironment>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -499,55 +706,56 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_TEX_SKY)
+      SVM_SHARED_CASE(NODE_TEX_SKY)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTexSky>(kg, &offset);
         offset = svm_node_tex_sky(kg, sd, path_flag, stack, node, offset);
       }
       break;
-      SVM_CASE(NODE_TEX_GRADIENT)
+      SVM_SHARED_CASE(NODE_TEX_GRADIENT)
       svm_node_tex_gradient(stack, svm_node_get<SVMNodeTexGradient>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_VORONOI)
+      SVM_SHARED_CASE(NODE_TEX_VORONOI)
       svm_node_tex_voronoi<node_feature_mask>(stack, svm_node_get<SVMNodeTexVoronoi>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_GABOR)
+      SVM_SHARED_CASE(NODE_TEX_GABOR)
       svm_node_tex_gabor(stack, svm_node_get<SVMNodeTexGabor>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_WAVE)
+      SVM_SHARED_CASE(NODE_TEX_WAVE)
       svm_node_tex_wave(stack, svm_node_get<SVMNodeTexWave>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_MAGIC)
+      SVM_SHARED_CASE(NODE_TEX_MAGIC)
       svm_node_tex_magic(stack, svm_node_get<SVMNodeTexMagic>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_CHECKER)
+      SVM_SHARED_CASE(NODE_TEX_CHECKER)
       svm_node_tex_checker(stack, svm_node_get<SVMNodeTexChecker>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_BRICK)
+      SVM_SHARED_CASE(NODE_TEX_BRICK)
       svm_node_tex_brick(stack, svm_node_get<SVMNodeTexBrick>(kg, &offset));
       break;
-      SVM_CASE(NODE_TEX_WHITE_NOISE)
+      SVM_SHARED_CASE(NODE_TEX_WHITE_NOISE)
       svm_node_tex_white_noise(stack, svm_node_get<SVMNodeTexWhiteNoise>(kg, &offset));
       break;
-      SVM_CASE(NODE_NORMAL)
+      SVM_SHARED_CASE(NODE_NORMAL)
       svm_node_normal(stack, svm_node_get<SVMNodeNormal>(kg, &offset));
       break;
-      SVM_CASE(NODE_LIGHT_FALLOFF)
+      SVM_SHARED_CASE(NODE_LIGHT_FALLOFF)
       svm_node_light_falloff(sd, stack, svm_node_get<SVMNodeLightFalloff>(kg, &offset));
       break;
-      SVM_CASE(NODE_IES)
+      SVM_SHARED_CASE(NODE_IES)
       svm_node_ies(kg, sd, stack, svm_node_get<SVMNodeIES>(kg, &offset));
       break;
-      SVM_CASE(NODE_CURVES)
+      SVM_SHARED_CASE(NODE_CURVES)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeCurves>(kg, &offset);
         offset = svm_node_curves(kg, stack, node, offset);
       }
       break;
-      SVM_CASE(NODE_TANGENT)
+      SVM_SHARED_CASE(NODE_TANGENT)
       svm_node_tangent<float3>(kg, sd, stack, svm_node_get<SVMNodeTangent>(kg, &offset));
       break;
-      SVM_CASE(NODE_TANGENT_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_TANGENT_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeTangent>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -555,29 +763,30 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_NORMAL_MAP)
+      SVM_SHARED_CASE(NODE_NORMAL_MAP)
       svm_node_normal_map(kg, sd, stack, svm_node_get<SVMNodeNormalMap>(kg, &offset));
       break;
-      SVM_CASE(NODE_RADIAL_TILING)
+      SVM_SHARED_CASE(NODE_RADIAL_TILING)
       svm_node_radial_tiling<node_feature_mask>(stack,
                                                 svm_node_get<SVMNodeRadialTiling>(kg, &offset));
       break;
-      SVM_CASE(NODE_INVERT)
+      SVM_SHARED_CASE(NODE_INVERT)
       svm_node_invert(stack, svm_node_get<SVMNodeInvert>(kg, &offset));
       break;
-      SVM_CASE(NODE_MIX)
+      SVM_SHARED_CASE(NODE_MIX)
       svm_node_mix(stack, svm_node_get<SVMNodeMix>(kg, &offset));
       break;
-      SVM_CASE(NODE_SEPARATE_COLOR)
+      SVM_SHARED_CASE(NODE_SEPARATE_COLOR)
       svm_node_separate_color(stack, svm_node_get<SVMNodeSeparateColor>(kg, &offset));
       break;
-      SVM_CASE(NODE_COMBINE_COLOR)
+      SVM_SHARED_CASE(NODE_COMBINE_COLOR)
       svm_node_combine_color(stack, svm_node_get<SVMNodeCombineColor>(kg, &offset));
       break;
-      SVM_CASE(NODE_SEPARATE_VECTOR)
+      SVM_SHARED_CASE(NODE_SEPARATE_VECTOR)
       svm_node_separate_vector<float3>(stack, svm_node_get<SVMNodeSeparateVector>(kg, &offset));
       break;
-      SVM_CASE(NODE_SEPARATE_VECTOR_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_SEPARATE_VECTOR_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeSeparateVector>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -585,10 +794,11 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_COMBINE_VECTOR)
+      SVM_SHARED_CASE(NODE_COMBINE_VECTOR)
       svm_node_combine_vector<float3>(stack, svm_node_get<SVMNodeCombineVector>(kg, &offset));
       break;
-      SVM_CASE(NODE_COMBINE_VECTOR_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_COMBINE_VECTOR_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeCombineVector>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -596,11 +806,12 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_GET_VECTOR_COMPONENT)
+      SVM_SHARED_CASE(NODE_GET_VECTOR_COMPONENT)
       svm_node_get_vector_component<float3>(stack,
                                             svm_node_get<SVMNodeGetVectorComponent>(kg, &offset));
       break;
-      SVM_CASE(NODE_GET_VECTOR_COMPONENT_DERIVATIVE)
+      SVM_SHARED_CASE(NODE_GET_VECTOR_COMPONENT_DERIVATIVE)
+      IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeGetVectorComponent>(kg, &offset);
         IF_NOT_KERNEL_NODES_FEATURE (VOLUME) {
@@ -608,28 +819,28 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_CASE(NODE_VECTOR_ROTATE)
+      SVM_SHARED_CASE(NODE_VECTOR_ROTATE)
       svm_node_vector_rotate(stack, svm_node_get<SVMNodeVectorRotate>(kg, &offset));
       break;
-      SVM_CASE(NODE_VECTOR_TRANSFORM)
+      SVM_SHARED_CASE(NODE_VECTOR_TRANSFORM)
       svm_node_vector_transform(kg, sd, stack, svm_node_get<SVMNodeVectorTransform>(kg, &offset));
       break;
-      SVM_CASE(NODE_WIREFRAME)
+      SVM_SHARED_CASE(NODE_WIREFRAME)
       svm_node_wireframe(kg, sd, stack, svm_node_get<SVMNodeWireframe>(kg, &offset));
       break;
-      SVM_CASE(NODE_WAVELENGTH)
+      SVM_SHARED_CASE(NODE_WAVELENGTH)
       svm_node_wavelength(kg, stack, svm_node_get<SVMNodeWavelength>(kg, &offset));
       break;
-      SVM_CASE(NODE_BLACKBODY)
+      SVM_SHARED_CASE(NODE_BLACKBODY)
       svm_node_blackbody(kg, stack, svm_node_get<SVMNodeBlackbody>(kg, &offset));
       break;
-      SVM_CASE(NODE_MAP_RANGE)
+      SVM_SHARED_CASE(NODE_MAP_RANGE)
       svm_node_map_range(stack, svm_node_get<SVMNodeMapRange>(kg, &offset));
       break;
-      SVM_CASE(NODE_VECTOR_MAP_RANGE)
+      SVM_SHARED_CASE(NODE_VECTOR_MAP_RANGE)
       svm_node_vector_map_range(stack, svm_node_get<SVMNodeVectorMapRange>(kg, &offset));
       break;
-      SVM_CASE(NODE_CLAMP)
+      SVM_SHARED_CASE(NODE_CLAMP)
       svm_node_clamp(stack, svm_node_get<SVMNodeClamp>(kg, &offset));
       break;
 #ifdef __SHADER_RAYTRACE__
@@ -650,7 +861,7 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
 #endif
       SVM_CASE(NODE_AOV_START)
       if (!svm_node_aov_check(path_flag, render_buffer)) {
-        return;
+        SVM_EVAL_RETURN;
       }
       break;
       SVM_CASE(NODE_AOV_COLOR)
@@ -661,32 +872,37 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
       svm_node_aov_value<node_feature_mask>(
           kg, sd, state, stack, svm_node_get<SVMNodeAOVValue>(kg, &offset), render_buffer);
       break;
-      SVM_CASE(NODE_FLOAT_CURVE)
+      SVM_SHARED_CASE(NODE_FLOAT_CURVE)
       {
         const ccl_global auto &node = svm_node_get<SVMNodeFloatCurve>(kg, &offset);
         offset = svm_node_curve(kg, stack, node, offset);
       }
       break;
-      SVM_CASE(NODE_MIX_COLOR)
+      SVM_SHARED_CASE(NODE_MIX_COLOR)
       svm_node_mix_color(stack, svm_node_get<SVMNodeMixColor>(kg, &offset));
       break;
-      SVM_CASE(NODE_MIX_FLOAT)
+      SVM_SHARED_CASE(NODE_MIX_FLOAT)
       svm_node_mix_float(stack, svm_node_get<SVMNodeMixFloat>(kg, &offset));
       break;
-      SVM_CASE(NODE_MIX_VECTOR)
+      SVM_SHARED_CASE(NODE_MIX_VECTOR)
       svm_node_mix_vector(stack, svm_node_get<SVMNodeMixVector>(kg, &offset));
       break;
-      SVM_CASE(NODE_MIX_VECTOR_NON_UNIFORM)
+      SVM_SHARED_CASE(NODE_MIX_VECTOR_NON_UNIFORM)
       svm_node_mix_vector_non_uniform(stack,
                                       svm_node_get<SVMNodeMixVectorNonUniform>(kg, &offset));
       break;
-      SVM_CASE(NODE_SCENE_TIME)
+      SVM_SHARED_CASE(NODE_SCENE_TIME)
       svm_node_scene_time(kg, stack, svm_node_get<SVMNodeSceneTime>(kg, &offset));
       break;
       default:
         kernel_assert(!"Unknown node type was passed to the SVM machine");
-        return;
+        SVM_EVAL_RETURN;
     }
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+    if constexpr (eval_mode == SVM_EVAL_SHARED_NODE) {
+      return offset;
+    }
+#endif
   }
 }
 

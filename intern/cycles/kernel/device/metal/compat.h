@@ -35,6 +35,11 @@
 #  define ccl_device_noinline ccl_device __attribute__((noinline))
 #endif
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+#  define ccl_device_inline_outline_metal ccl_device __attribute__((noinline))
+#  define ccl_device_outline_metal ccl_device __attribute__((noinline))
+#endif
+
 #define ccl_device_extern extern "C"
 #define ccl_device_noinline_cpu ccl_device
 #define ccl_device_inline_method ccl_device
@@ -388,6 +393,106 @@ struct MetalRTBlasWrapper {
 };
 #endif
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Signatures of the separately compiled shading functions. Kernel types are declared later, so
+ * parameters use untyped pointers; `kernel.metal` casts them back in the definitions. */
+using MetalSVMFunction = void(constant void *launch_params,
+                              constant void *ancillaries,
+                              int state,
+                              thread void *sd,
+                              device float *render_buffer,
+                              uint path_visibility,
+                              uint path_flag);
+using MetalSVMNodeFunction = int(constant void *launch_params,
+                                  constant void *ancillaries,
+                                  uint node_type,
+                                  int offset,
+                                  thread void *sd,
+                                  thread float *stack,
+                                  uint path_visibility,
+                                  uint path_flag);
+using MetalSVMClosureFunction = int(constant void *launch_params,
+                                     constant void *ancillaries,
+                                     thread void *sd,
+                                     thread float *stack,
+                                     float3 closure_weight,
+                                     int offset,
+                                     uint path_visibility,
+                                     uint path_flag);
+using MetalBsdfEvalFunction = float3(constant void *launch_params,
+                                     constant void *ancillaries,
+                                     thread void *sd,
+                                     thread const void *sc,
+                                     float3 wo,
+                                     thread float *pdf);
+using MetalBsdfSampleFunction = int(constant void *launch_params,
+                                    constant void *ancillaries,
+                                    thread void *sd,
+                                    thread const void *sc,
+                                    float3 rand,
+                                    thread float3 *eval,
+                                    thread float3 *wo,
+                                    thread float *pdf,
+                                    thread float2 *sampled_roughness,
+                                    thread float *eta);
+using MetalPolarizationFunction = void(constant void *launch_params,
+                                       constant void *ancillaries,
+                                       thread void *result,
+                                       thread void *sd,
+                                       float3 wo,
+                                       thread const void *incoming_state,
+                                       bool adjoint,
+                                       thread const void *sampled_closure,
+                                       float3 native_total,
+                                       bool sampled_delta,
+                                       uint light_shader_flags,
+                                       bool reciprocal_forward);
+using MetalSurfaceStageFunction = int(constant void *launch_params,
+                                      constant void *ancillaries,
+                                      int state,
+                                      thread void *sd,
+                                      thread const void *rng_state,
+                                      device float *render_buffer,
+                                      thread float3 *result,
+                                      thread float3 *secondary_result);
+using MetalMNEEFunction = int(constant void *launch_params,
+                               constant void *ancillaries,
+                               int state,
+                               thread void *sd,
+                               thread void *sd_mnee,
+                               thread const void *rng_state,
+                               thread void *ls,
+                               thread float3 *throughput,
+                               thread float3 *r_receiver_wo,
+                               thread int *r_vertex_count,
+                               thread float3 *r_light_wo,
+                               bool consider_all_refractive,
+                               thread float *r_light_distance,
+                               float wavelength_rand_override,
+                               bool volume_endpoint,
+                               thread float3 *r_vertices,
+                               thread void *r_polarization);
+using MetalPixelDisplacementFunction = void(constant void *launch_params,
+                                             constant void *ancillaries,
+                                             thread void *sd,
+                                             float time,
+                                             bool motion,
+                                             thread const float3 *verts);
+using MetalDiffractionFunction = bool(constant void *launch_params,
+                                      constant void *ancillaries,
+                                      thread const void *data,
+                                      int handle,
+                                      float3 incident,
+                                      bool incoming_substrate,
+                                      float upper_index,
+                                      float lower_index,
+                                      float wavelength,
+                                      float pitch,
+                                      thread void *output_view,
+                                      thread int *output_incoming_order,
+                                      thread float *powers);
+#endif
+
 /* Additional Metal-specific resources which aren't encoded in KernelData.
  * IMPORTANT: If this layout changes, ANCILLARY_SLOT_COUNT and the host-side encoding must change
  * to match. */
@@ -405,6 +510,21 @@ struct MetalAncillaries {
   metalrt_ift_type ift_local_mblur;
   metalrt_blas_ift_type ift_local_single_hit;
   metalrt_ift_type ift_local_single_hit_mblur;
+#endif
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+  /* Shading functions compiled once and linked into every pipeline. These follow all other
+   * slots, so their position depends only on whether MetalRT is used. */
+  metal::visible_function_table<MetalSVMFunction> vft_svm;
+  metal::visible_function_table<MetalSVMNodeFunction> vft_svm_node;
+  metal::visible_function_table<MetalSVMClosureFunction> vft_svm_closure;
+  metal::visible_function_table<MetalBsdfEvalFunction> vft_bsdf_eval;
+  metal::visible_function_table<MetalBsdfEvalFunction> vft_bsdf_eval_delta;
+  metal::visible_function_table<MetalBsdfSampleFunction> vft_bsdf_sample;
+  metal::visible_function_table<MetalSurfaceStageFunction> vft_surface;
+  metal::visible_function_table<MetalPolarizationFunction> vft_polarization;
+  metal::visible_function_table<MetalDiffractionFunction> vft_diffraction;
+  metal::visible_function_table<MetalMNEEFunction> vft_mnee;
+  metal::visible_function_table<MetalPixelDisplacementFunction> vft_pixel_displacement;
 #endif
 };
 
@@ -435,6 +555,41 @@ constexpr constant metal::array<metal::sampler, SamplerCount> metal_samplers = {
     metal::sampler(metal::address::clamp_to_zero, metal::filter::linear),
     metal::sampler(metal::address::mirrored_repeat, metal::filter::linear),
 };
+
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Separately compiled visible functions lose the constant sampler states when the array above
+ * is indexed dynamically, and fall back to a default sampler. Select an inline constexpr sampler
+ * instead, which works in both kernels and visible functions. */
+template<typename TextureT>
+inline __attribute__((__always_inline__)) float4 metal_sample_2d(const TextureT tex,
+                                                                 const uint sid,
+                                                                 const float2 uv)
+{
+  switch (sid) {
+    case SamplerFilterNearest_AddressRepeat:
+      return tex.sample(metal::sampler(metal::address::repeat, metal::filter::nearest), uv);
+    case SamplerFilterNearest_AddressClampEdge:
+      return tex.sample(metal::sampler(metal::address::clamp_to_edge, metal::filter::nearest), uv);
+    case SamplerFilterNearest_AddressClampZero:
+      return tex.sample(metal::sampler(metal::address::clamp_to_zero, metal::filter::nearest), uv);
+    case SamplerFilterNearest_AddressMirroredRepeat:
+      return tex.sample(metal::sampler(metal::address::mirrored_repeat, metal::filter::nearest),
+                        uv);
+    case SamplerFilterLinear_AddressRepeat:
+      return tex.sample(metal::sampler(metal::address::repeat, metal::filter::linear), uv);
+    case SamplerFilterLinear_AddressClampEdge:
+      return tex.sample(metal::sampler(metal::address::clamp_to_edge, metal::filter::linear), uv);
+    case SamplerFilterLinear_AddressClampZero:
+      return tex.sample(metal::sampler(metal::address::clamp_to_zero, metal::filter::linear), uv);
+    default:
+      return tex.sample(metal::sampler(metal::address::mirrored_repeat, metal::filter::linear),
+                        uv);
+  }
+}
+#  define METAL_SAMPLE_2D(tex, sid, uv) metal_sample_2d(tex, sid, uv)
+#else
+#  define METAL_SAMPLE_2D(tex, sid, uv) (tex).sample(metal_samplers[sid], uv)
+#endif
 
 #ifdef __METAL_GLOBAL_BUILTINS__
 const uint metal_global_id [[thread_position_in_grid]];
