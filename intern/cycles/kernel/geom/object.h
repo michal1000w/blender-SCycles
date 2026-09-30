@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "kernel/closure/polarizer_axis.h"
 #include "kernel/globals.h"
 #include "kernel/types.h"
 
@@ -235,6 +236,26 @@ ccl_device_inline void object_dir_transform(KernelGlobals kg,
 
   const Transform tfm = object_fetch_transform(kg, sd->object, OBJECT_TRANSFORM);
   *D = transform_direction(&tfm, *D);
+}
+
+/* World-space (unnormalized) transmission axis of a polarizer film at the
+ * shading point, see #polarizer_object_axis. The object-space normal is the
+ * transposed object transform applied to Ng; one transform fetch serves both
+ * directions. */
+ccl_device_inline float3 object_polarizer_axis(KernelGlobals kg,
+                                               const ccl_private ShaderData *sd,
+                                               const float angle)
+{
+#ifdef __OBJECT_MOTION__
+  if (sd->object_flag & SD_OBJECT_MOTION) {
+    const float3 N = transform_direction_transposed_auto(&sd->ob_tfm_motion, sd->Ng);
+    return transform_direction_auto(&sd->ob_tfm_motion, polarizer_object_axis(angle, N));
+  }
+#endif
+
+  const Transform tfm = object_fetch_transform(kg, sd->object, OBJECT_TRANSFORM);
+  const float3 N = transform_direction_transposed(&tfm, sd->Ng);
+  return transform_direction(&tfm, polarizer_object_axis(angle, N));
 }
 
 /* Transform direction vector from world to object space */

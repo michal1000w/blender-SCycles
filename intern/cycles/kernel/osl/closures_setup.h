@@ -518,8 +518,7 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
   bsdf_microfacet_setup_fresnel_generalized_schlick(
       kg, bsdf, sd->wi, fresnel, preserve_energy && !multiggx_diffraction);
   if (closure->polarizer) {
-    float3 axis = make_float3(cosf(closure->polarizer_angle), sinf(closure->polarizer_angle), 0);
-    object_dir_transform(kg, sd, &axis);
+    const float3 axis = object_polarizer_axis(kg, sd, closure->polarizer_angle);
     bsdf_microfacet_set_polarizer(bsdf, safe_normalize(axis));
   }
 
@@ -798,8 +797,7 @@ ccl_device void osl_closure_diffraction_glass_setup(
       closure->pitch, closure->depth, closure->duty,
       max(closure->film_ior, 1e-5f), closure->film_thickness, closure->beckmann != 0);
   if (closure->polarizer) {
-    float3 axis=make_float3(cosf(closure->polarizer_angle),sinf(closure->polarizer_angle),0);
-    object_dir_transform(kg,sd,&axis);
+    const float3 axis=object_polarizer_axis(kg,sd,closure->polarizer_angle);
     const bool attached=bsdf_diffraction_glass_set_polarizer(sd,polarizer_first,safe_normalize(axis));
     if (!attached) {sd->num_closure=polarizer_first;sd->num_closure_left=polarizer_left;}
     kernel_assert(attached);
