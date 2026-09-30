@@ -38,6 +38,7 @@
 #include "scene/tables.h"
 #include "scene/volume.h"
 
+#include "kernel/closure/polarizer_axis.h"
 #include "kernel/light/coherent_geometry.h"
 
 #include "session/session.h"
@@ -229,7 +230,8 @@ static bool coherent_volume_extinction(const ShaderOutput *output, float3 &sigma
  * incident normal. The runtime projector uses this same world direction. */
 static bool coherent_patch_polarizer(const Shader *shader,
                                     const Object *object,
-                                    KernelCoherentPatch &patch)
+                                    KernelCoherentPatch &patch,
+                                    const float3 object_normal = make_float3(0.0f, 0.0f, 1.0f))
 {
   if (!shader || !shader->graph) return true;
   const ShaderOutput *surface = shader->graph->output()->input("Surface")->link;
@@ -242,7 +244,8 @@ static bool coherent_patch_polarizer(const Shader *shader,
   const float angle = glass->get_polarizer_angle();
   if (!std::isfinite(angle)) return false;
   const Transform tfm = object->get_tfm();
-  const float3 axis = transform_direction(&tfm, make_float3(cosf(angle), sinf(angle), 0.0f));
+  /* Same in-film axis convention as the native Glass closure. */
+  const float3 axis = transform_direction(&tfm, polarizer_object_axis(angle, object_normal));
   if (!isfinite_safe(axis) || !(len_squared(axis) > 1.0e-12f)) return false;
   patch.polarizer_axis = normalize(axis);
   return true;
@@ -771,7 +774,15 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
         }
         patch.extinction = sigma;
       }
-      if (!coherent_patch_polarizer(material, object, patch)) {
+      /* One axis per mesh: use the dominant object-space facet orientation,
+       * which is the sheet normal of film and slab polarizers. */
+      float3 area = zero_float3();
+      for (size_t i = 0; i < mesh->num_triangles(); ++i) {
+        const Mesh::Triangle tri = mesh->get_triangle(i);
+        area += fabs(cross(positions[tri.v[1]] - positions[tri.v[0]],
+                           positions[tri.v[2]] - positions[tri.v[0]]));
+      }
+      if (!coherent_patch_polarizer(material, object, patch, area)) {
         progress.set_error("Coherent polarizers require a finite constant angle and unlinked checkbox");
         return false;
       }
@@ -818,7 +829,10 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
       patch.inside_ior = inside_ior;
       patch.object = object->index;
       patch.mode = int(mode);
-      if (!coherent_patch_polarizer(material, object, patch)) {
+      if (!coherent_patch_polarizer(material, object, patch,
+                                    transform_direction_transposed(
+                                        &tfm, cross(patch.tangent_u, patch.tangent_v))))
+      {
         progress.set_error("Coherent polarizers require a finite constant angle and unlinked checkbox");
         return false;
       }
