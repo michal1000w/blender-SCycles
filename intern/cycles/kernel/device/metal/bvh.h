@@ -277,7 +277,7 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
 
 #ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
     /* Point IDs use a separate index space; displacement inspects tri_shader. */
-    if ((prim_type & PRIMITIVE_TRIANGLE) && pixel_displacement_active(kg, prim)) {
+    if ((prim_type & PRIMITIVE_TRIANGLE) && pixel_displacement_intersects(kg, prim)) {
       isect->prim = prim;
       isect->type = prim_type;
       isect->u = payload.pixel_displacement_u;
@@ -403,7 +403,7 @@ ccl_device_forceinline float3 metalrt_local_hit_normal(KernelGlobals kg,
                                                        const float time)
 {
 #  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
-  if (pixel_displacement_active(kg, prim)) {
+  if (pixel_displacement_intersects(kg, prim)) {
     float3 verts[3];
     bool motion = false;
 #    ifdef __OBJECT_MOTION__

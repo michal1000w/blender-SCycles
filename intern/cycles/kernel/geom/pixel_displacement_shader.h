@@ -21,6 +21,19 @@ ccl_device_inline void pixel_displacement_shader_eval(KernelGlobals kg,
 
 #ifdef __KERNEL_METAL__
 
+/* Scene-wide evaluator flags. The displacement functions of the complete generic library are
+ * additionally compiled for the flags of the current scene in the background, which removes
+ * the evaluators and fast paths the scene does not use. */
+ccl_device_inline int pixel_displacement_evaluator_set()
+{
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+  if (kernel_pixel_displacement_specialized) {
+    return kernel_pixel_displacement_evaluator_set;
+  }
+#  endif
+  return kernel_data.integrator.pixel_displacement_evaluator_set;
+}
+
 ccl_device_inline float3 pixel_displacement_smooth_normal(KernelGlobals kg,
                                                           const int object,
                                                           const int prim,
@@ -226,7 +239,7 @@ ccl_device_inline float4 pixel_displacement_resident_sample(
   const ccl_global KernelImageTexture &tex = kernel_data_fetch(image_textures, program.image.id);
   const ccl_global KernelImageInfo &info = kernel_data_fetch(image_info, tex.image_info_id);
   float4 color;
-  if (!(kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (!(pixel_displacement_evaluator_set() &
         PIXEL_DISPLACEMENT_SCALAR_IMAGE) &&
       (info.data_type == IMAGE_DATA_TYPE_FLOAT4 || info.data_type == IMAGE_DATA_TYPE_BYTE4 ||
        info.data_type == IMAGE_DATA_TYPE_HALF4 || info.data_type == IMAGE_DATA_TYPE_USHORT4))
@@ -257,7 +270,7 @@ ccl_device_noinline float4 pixel_displacement_image_sample(
     ccl_private ShaderData *sd,
     const ccl_global SVMDisplacementImage &program)
 {
-  if (kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (pixel_displacement_evaluator_set() &
       PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE)
   {
     float3 co = pixel_displacement_image_coordinate<float3, cached_inputs>(kg, sd, program);
@@ -335,7 +348,7 @@ pixel_displacement_eval_object_direct(KernelGlobals kg,
    * for every evaluation in the intersection loop. */
   ShaderDataTinyStorage storage;
   ccl_private ShaderData *sd = AS_SHADER_DATA(&storage);
-  const int evaluator_set = kernel_data.integrator.pixel_displacement_evaluator_set;
+  const int evaluator_set = pixel_displacement_evaluator_set();
   const int evaluator = kernel_data_fetch(shaders, shader & SHADER_MASK).displacement_evaluator;
   /* Varying normals and non-UV inputs retain the original evaluator: its arithmetic
    * is important for stable intersection roots and final shading derivatives. */
@@ -495,7 +508,7 @@ ccl_device_inline bool pixel_displacement_cache_lookup(KernelGlobals kg,
 {
   /* This specialization is only published after a direct-fallback bake. It has
    * no dense micromesh, so remove the unreachable cache traversal code. */
-  if (!(kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (!(pixel_displacement_evaluator_set() &
         PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS) ||
       motion)
   {
@@ -594,6 +607,23 @@ ccl_device_inline float3 pixel_displacement_eval_object(KernelGlobals kg,
     return D;
   }
 
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+  /* The evaluator (shader interpreter and image fast paths) is compiled once as a Metal visible
+   * function, shared by the ray solver and the displaced geometry. Specialized for the scene, it
+   * is small enough to compile into the specialized ray solver. */
+  if (!kernel_pixel_displacement_specialized) {
+    return metal_ancillaries->vft_pixel_displacement_eval[0](&launch_params_metal,
+                                                             metal_ancillaries,
+                                                             object,
+                                                             prim,
+                                                             u,
+                                                             v,
+                                                             time,
+                                                             motion,
+                                                             verts,
+                                                             force_full);
+  }
+#  endif
   return pixel_displacement_eval_object_direct<true, false, force_full>(
       kg, object, prim, u, v, time, motion, verts);
 }
@@ -770,7 +800,7 @@ ccl_device_noinline void pixel_displacement_displaced_geometry(KernelGlobals kg,
 
   /* The lean image evaluator is certified for intersections. Retain the original evaluator
    * for shading derivatives, which amplify otherwise tiny numerical differences. */
-  const bool full_shading = (kernel_data.integrator.pixel_displacement_evaluator_set & 4) &&
+  const bool full_shading = (pixel_displacement_evaluator_set() & 4) &&
                             kernel_data_fetch(shaders, kernel_data_fetch(tri_shader, prim) &
                                                            SHADER_MASK).displacement_evaluator >= 2;
   *P_obj = full_shading ?
@@ -835,23 +865,7 @@ ccl_device_noinline void pixel_displacement_displaced_geometry(KernelGlobals kg,
   }
 }
 
-#ifdef __KERNEL_METAL_VISIBLE_SHADING__
-/* Compiled once as a Metal visible function instead of inside every shader setup, see
- * `kernel.metal`. */
-ccl_device_inline void pixel_displacement_shader_setup(KernelGlobals /*kg*/,
-                                                       ccl_private ShaderData *sd,
-                                                       const float time,
-                                                       const bool motion,
-                                                       ccl_private const float3 verts[3])
-{
-  metal_ancillaries->vft_pixel_displacement[0](
-      &launch_params_metal, metal_ancillaries, sd, time, motion, verts);
-}
-
-ccl_device_noinline void pixel_displacement_shader_setup_impl(KernelGlobals kg,
-#else
 ccl_device_noinline void pixel_displacement_shader_setup(KernelGlobals kg,
-#endif
                                                          ccl_private ShaderData *sd,
                                                          const float time,
                                                          const bool motion,
@@ -941,7 +955,7 @@ ccl_device_inline bool pixel_displacement_clip_bounds(const float3 bounds_min,
 
 ccl_device_inline bool pixel_displacement_certified_image_scene()
 {
-  const int set = kernel_data.integrator.pixel_displacement_evaluator_set;
+  const int set = pixel_displacement_evaluator_set();
   return (set & 4) && (set & PIXEL_DISPLACEMENT_UNIFORM_NORMALS) &&
          !(set & (1 | 2 | 8 | PIXEL_DISPLACEMENT_UNCERTIFIED_INPUTS));
 }
@@ -950,7 +964,7 @@ ccl_device_inline bool pixel_displacement_certified_image_scene()
  * prepare flat texture mapping on the host; dynamic inputs use the original evaluator. */
 ccl_device_inline bool pixel_displacement_normal_image_scene()
 {
-  return (kernel_data.integrator.pixel_displacement_evaluator_set &
+  return (pixel_displacement_evaluator_set() &
           PIXEL_DISPLACEMENT_NORMAL_IMAGE_INPUTS) != 0;
 }
 
@@ -984,7 +998,7 @@ pixel_displacement_image_context(KernelGlobals kg,
     return ctx;
   }
 
-  const int set = kernel_data.integrator.pixel_displacement_evaluator_set;
+  const int set = pixel_displacement_evaluator_set();
   const uint info = kernel_data_fetch(pixel_displacement_info, prim);
   const int metadata = kernel_data_fetch(pixel_displacement_offset, prim);
   if (!pixel_displacement_certified_image_scene() &&
@@ -1059,7 +1073,7 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
 {
   ctx->normal_projection_valid = false;
   ctx->normal_program_offset = -1;
-  if (kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (pixel_displacement_evaluator_set() &
       PIXEL_DISPLACEMENT_PARALLEL_NORMALS)
   {
     return;
@@ -1080,7 +1094,7 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
     }
     ctx->normal_projection_valid = true;
     if (pixel_displacement_normal_image_scene() ||
-        (ctx->program_offset < 0 && (kernel_data.integrator.pixel_displacement_evaluator_set &
+        (ctx->program_offset < 0 && (pixel_displacement_evaluator_set() &
                                      PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE)))
     {
       const int shader = kernel_data_fetch(tri_shader, prim) & SHADER_MASK;
@@ -1134,7 +1148,7 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
   if (ctx->program_offset < 0) {
     ctx->gram = make_float4(d00, d01, d11, determinant > 0.01f * d00 * d11 ? 1.0f : 0.0f);
   }
-  if (ctx->program_offset < 0 && (kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (ctx->program_offset < 0 && (pixel_displacement_evaluator_set() &
                                   PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE))
   {
     const int shader = kernel_data_fetch(tri_shader, prim) & SHADER_MASK;
@@ -1272,7 +1286,7 @@ pixel_displacement_context_sample(KernelGlobals kg,
                                   const float v)
 {
   const float2 uv = triangle_interpolate(u, v, ctx->uv[0], ctx->uv[1], ctx->uv[2]);
-  if (kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (pixel_displacement_evaluator_set() &
       PIXEL_DISPLACEMENT_RESIDENT_LINEAR_IMAGE)
   {
     float3 co = make_float3(uv);
@@ -1351,14 +1365,14 @@ ccl_device_inline float pixel_displacement_normal_scalar(
   const ccl_global auto &program = svm_node_get<SVMDisplacementImage>(kg, &offset);
   float3 uv = make_float3(
       triangle_interpolate(bary.x, bary.y, ctx->uv[0], ctx->uv[1], ctx->uv[2]));
-  if (!(kernel_data.integrator.pixel_displacement_evaluator_set &
+  if (!(pixel_displacement_evaluator_set() &
         PIXEL_DISPLACEMENT_IDENTITY_MAPPING) &&
       program.use_mapping)
   {
     uv = pixel_displacement_image_mapping(uv, program);
   }
   const float4 color = pixel_displacement_resident_sample(kg, make_float2(uv), program);
-  const float height = !(kernel_data.integrator.pixel_displacement_evaluator_set &
+  const float height = !(pixel_displacement_evaluator_set() &
                          PIXEL_DISPLACEMENT_SCALAR_IMAGE) &&
                                program.height_is_alpha ?
                            color.w :
@@ -1379,7 +1393,7 @@ ccl_device_inline float3 pixel_displacement_normal_eval(
   const float3 q = ctx->normal_projection[0] + bary.x * ctx->normal_projection[1] +
                    bary.y * ctx->normal_projection[2];
   float3 normal = (verts[1] - verts[0]) * q.x + (verts[2] - verts[0]) * q.y + Ng * q.z;
-  if ((kernel_data.integrator.pixel_displacement_evaluator_set & PIXEL_DISPLACEMENT_RIGID_TRANSFORMS)) {
+  if ((pixel_displacement_evaluator_set() & PIXEL_DISPLACEMENT_RIGID_TRANSFORMS)) {
     const float distance = kernel_data.integrator.pixel_displacement_max_distance;
     const float scaled = scalar * kernel_data.integrator.pixel_displacement_scale;
     return safe_normalize(normal) *
@@ -1458,7 +1472,7 @@ ccl_device_inline float pixel_displacement_normal_height(
     ccl_private const PixelDisplacementImageContext *ctx)
 {
   if (pixel_displacement_normal_image_scene() ||
-      ((kernel_data.integrator.pixel_displacement_evaluator_set &
+      ((pixel_displacement_evaluator_set() &
         PIXEL_DISPLACEMENT_RIGID_TRANSFORMS) &&
        ctx->program_offset < 0 && ctx->gram.w != 0.0f))
   {
@@ -2359,7 +2373,7 @@ ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
 
   PixelDisplacementImageContext image_ctx = {};
   image_ctx.program_offset = -1;
-  const bool parallel_normals = kernel_data.integrator.pixel_displacement_evaluator_set &
+  const bool parallel_normals = pixel_displacement_evaluator_set() &
                                 PIXEL_DISPLACEMENT_PARALLEL_NORMALS;
   if (!parallel_normals) {
     image_ctx = pixel_displacement_image_context(kg, object, prim, motion, verts);
@@ -2879,7 +2893,52 @@ ccl_device_inline bool pixel_displacement_solve_ray(KernelGlobals kg,
                                             r_v);
 }
 
+#    ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* The ray solver is compiled once as a Metal visible function. Inlined, it multiplies the size
+ * of every BVH traversal variant, see `kernel.metal`. */
 ccl_device_inline bool pixel_displacement_intersect_displaced_surface(KernelGlobals kg,
+                                                                      const float3 P,
+                                                                      const float3 dir,
+                                                                      const float tmin,
+                                                                      const float tmax,
+                                                                      const float time,
+                                                                      const int object,
+                                                                      const int prim,
+                                                                      const bool motion,
+                                                                      ccl_private const float3
+                                                                          verts[3],
+                                                                      ccl_private float *r_u,
+                                                                      ccl_private float *r_v,
+                                                                      ccl_private float *r_t)
+{
+  if (!pixel_displacement_active(kg, prim)) {
+    return false;
+  }
+  if (kernel_pixel_displacement_specialized) {
+    /* The traversal specialized for the scene compiles the specialized ray solver inline. */
+    return pixel_displacement_intersect_displaced_surface_impl(
+        kg, P, dir, tmin, tmax, time, object, prim, motion, verts, r_u, r_v, r_t);
+  }
+  return metal_ancillaries->vft_pixel_displacement_intersect[0](&launch_params_metal,
+                                                                metal_ancillaries,
+                                                                P,
+                                                                dir,
+                                                                tmin,
+                                                                tmax,
+                                                                time,
+                                                                object,
+                                                                prim,
+                                                                motion,
+                                                                verts,
+                                                                r_u,
+                                                                r_v,
+                                                                r_t);
+}
+
+ccl_device_noinline bool pixel_displacement_intersect_displaced_surface_impl(KernelGlobals kg,
+#    else
+ccl_device_inline bool pixel_displacement_intersect_displaced_surface(KernelGlobals kg,
+#    endif
                                                                       const float3 P,
                                                                       const float3 dir,
                                                                       const float tmin,

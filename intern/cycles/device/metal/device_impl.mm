@@ -366,7 +366,9 @@ bool MetalDevice::scene_pixel_displacement_active() const
 
 bool MetalDevice::pixel_displacement_requires_specialization() const
 {
-  return scene_pixel_displacement_active();
+  /* The complete generic library evaluates pixel displacement through separately compiled
+   * functions, and reads every displacement setting at runtime. */
+  return scene_pixel_displacement_active() && !use_visible_shading;
 }
 
 bool MetalDevice::use_adaptive_compilation()
@@ -402,7 +404,8 @@ void MetalDevice::set_scene_pixel_displacement(const bool enabled,
 
 string MetalDevice::preprocess_source(MetalPipelineType pso_type,
                                       const uint64_t kernel_features,
-                                      string *source)
+                                      string *source,
+                                      const int metalrt_override)
 {
   string global_defines;
 
@@ -411,6 +414,9 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
   const bool complete_generic = pso_type == PSO_GENERIC && use_visible_shading;
   if (complete_generic) {
     global_defines += "#define __KERNEL_METAL_VISIBLE_SHADING__\n";
+    /* Pixel displacement is inactive at runtime unless the scene enables it. */
+    global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT__\n";
+    global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__\n";
   }
 
   if (pso_type == PSO_GENERIC && !complete_generic && MetalInfo::use_low_memory_compilation()) {
@@ -552,7 +558,9 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
     global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__\n";
   }
 
-  if (use_metalrt_for_current_scene()) {
+  const bool use_metalrt_source = (metalrt_override >= 0) ? (metalrt_override != 0) :
+                                                            use_metalrt_for_current_scene();
+  if (use_metalrt_source) {
     global_defines += "#define __KERNEL_METALRT__\n";
     if (motion_blur) {
       global_defines += "#define __METALRT_MOTION__\n";
@@ -804,6 +812,84 @@ static bool metal_kernel_source_is_installed()
          strcmp(installed_real, source_real) == 0;
 }
 
+string MetalDevice::precompiled_generic_library_path(const bool metalrt) const
+{
+  /* The common generic variants are compiled into the Blender installation. Loading one avoids
+   * sending the same multi-megabyte MSL translation unit through the runtime compiler on every
+   * cold start. Only use it when every source-affecting option matches; otherwise the runtime
+   * compilation remains the quality-preserving fallback. */
+  if (!use_visible_shading || !use_local_atomic_sort() || use_metalrt_extended_limits ||
+      !metal_kernel_source_is_installed())
+  {
+    return "";
+  }
+#  ifdef WITH_NANOVDB
+  if (!DebugFlags().metal.use_nanovdb) {
+    return "";
+  }
+#  endif
+  NSOperatingSystemVersion macos_ver = [[NSProcessInfo processInfo] operatingSystemVersion];
+  string variant = "software";
+  if (metalrt) {
+    variant = motion_blur ? "metalrt_motion" : "metalrt";
+  }
+  const string filename = string_printf("cycles_kernel_metal_shading_%s_macos_%ld.metallib",
+                                        variant.c_str(),
+                                        (long)macos_ver.majorVersion);
+  const string path = path_get(path_join("lib", filename));
+  return path_exists(path) ? path : "";
+}
+
+std::shared_ptr<MetalDisplacementFunctions> MetalDevice::specialized_displacement_functions(
+    const std::shared_ptr<MetalVisibleFunctions> &generic)
+{
+  if (!scene_pixel_displacement_active() || !generic) {
+    return nullptr;
+  }
+  const KernelData &data = launch_params->data;
+  const int evaluator_set = data.integrator.pixel_displacement_evaluator_set;
+  const int bvh_features = (data.bvh.have_motion ? 1 : 0) | (data.bvh.have_curves ? 2 : 0);
+  thread_scoped_lock lock(displacement_functions_mutex);
+  if (!displacement_functions || displacement_functions->generic != generic ||
+      displacement_functions->evaluator_set != evaluator_set ||
+      displacement_functions->bvh_features != bvh_features ||
+      /* Skipped when superseded by another scene edit, request it again. */
+      (!displacement_functions->ready() && !displacement_functions->queued &&
+       !displacement_functions->failed))
+  {
+    displacement_functions = MetalDeviceKernels::request_displacement_functions(
+        mtlDevice, generic, evaluator_set, bvh_features);
+  }
+  return displacement_functions->ready() ? displacement_functions : nullptr;
+}
+
+void MetalDevice::prewarm_software_library()
+{
+  /* Only MetalRT scenes switch to the software BVH library later. Once per process: the
+   * compiled functions persist in their binary archives and the system shader cache. */
+  static std::atomic_bool requested = false;
+  if (!use_visible_shading || !use_metalrt_for_current_scene() || requested) {
+    return;
+  }
+  const string library_path = precompiled_generic_library_path(false);
+  if (library_path.empty()) {
+    return;
+  }
+  if (requested.exchange(true)) {
+    return;
+  }
+
+  /* The functions are keyed by the library source, see compile_and_load(). */
+  string source = "\n#include \"kernel/device/metal/kernel.metal\"\n";
+  source = path_source_replace_includes(source, path_get("source"));
+  preprocess_source(PSO_GENERIC, kernel_features, &source, 0);
+  MD5Hash source_md5;
+  source_md5.append(source);
+  const string library_md5 = source_md5.get_hex();
+
+  MetalDeviceKernels::prewarm_visible_functions(mtlDevice, library_path, library_md5);
+}
+
 void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_type)
 {
   @autoreleasepool {
@@ -839,33 +925,9 @@ void MetalDevice::compile_and_load(const int device_id, MetalPipelineType pso_ty
       source = instance->source[pso_type];
       visible_shading = instance->use_visible_shading;
 
-      /* The common generic variants are compiled into the Blender installation. Loading one
-       * avoids sending the same multi-megabyte MSL translation unit through the runtime compiler
-       * on every cold start. Only use it when every source-affecting option matches; otherwise the
-       * existing runtime path below remains the quality-preserving fallback. */
-      if (pso_type == PSO_GENERIC && instance->use_visible_shading &&
-          instance->use_local_atomic_sort() && !instance->use_metalrt_extended_limits &&
-          metal_kernel_source_is_installed())
-      {
-#  ifdef WITH_NANOVDB
-        const bool nanovdb_matches = DebugFlags().metal.use_nanovdb;
-#  else
-        const bool nanovdb_matches = true;
-#  endif
-        if (nanovdb_matches) {
-          NSOperatingSystemVersion macos_ver = [[NSProcessInfo processInfo] operatingSystemVersion];
-          string variant = "software";
-          if (instance->use_metalrt_for_current_scene()) {
-            variant = instance->motion_blur ? "metalrt_motion" : "metalrt";
-          }
-          const string filename = string_printf("cycles_kernel_metal_shading_%s_macos_%ld.metallib",
-                                                variant.c_str(),
-                                                (long)macos_ver.majorVersion);
-          const string candidate = path_get(path_join("lib", filename));
-          if (path_exists(candidate)) {
-            precompiled_library_path = candidate;
-          }
-        }
+      if (pso_type == PSO_GENERIC) {
+        precompiled_library_path = instance->precompiled_generic_library_path(
+            instance->use_metalrt_for_current_scene());
       }
     }
 

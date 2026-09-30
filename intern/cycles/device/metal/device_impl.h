@@ -164,9 +164,28 @@ class MetalDevice : public Device {
 
   bool use_metalrt_for_current_scene() const;
 
+  /* `metalrt_override` selects the MetalRT or software BVH source instead of the one of the
+   * current scene, when not negative. */
   string preprocess_source(MetalPipelineType pso_type,
                            uint64_t kernel_features,
-                           string *source = nullptr);
+                           string *source = nullptr,
+                           int metalrt_override = -1);
+
+  /* Path of the complete generic library built with Blender for the given BVH, or empty when
+   * the device configuration or kernel source does not match it. */
+  string precompiled_generic_library_path(bool metalrt) const;
+
+  /* Compile the shading functions of the software BVH library in the background, once the
+   * current scene's kernels are ready. Scenes that need it, such as pixel displacement without
+   * a MetalRT compatible cache, then load without compiling them. */
+  void prewarm_software_library();
+
+  /* Pixel displacement functions specialized for the evaluator set of the scene, if they are
+   * compiled for `generic`. The first call for an evaluator set starts their compilation. */
+  std::shared_ptr<MetalDisplacementFunctions> specialized_displacement_functions(
+      const std::shared_ptr<MetalVisibleFunctions> &generic);
+  thread_mutex displacement_functions_mutex;
+  std::shared_ptr<MetalDisplacementFunctions> displacement_functions;
 
   void set_scene_pixel_displacement(const bool enabled,
                                     const float scale,
