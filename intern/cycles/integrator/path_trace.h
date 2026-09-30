@@ -231,6 +231,7 @@ class PathTrace {
 
   /* Get number of samples in the current state of the render buffers. */
   int get_num_samples_in_buffer();
+  int get_num_accumulated_samples(int num_scheduled_samples) const;
 
   /* Check whether user requested to cancel rendering, so that path tracing is to be finished as
    * soon as possible. */

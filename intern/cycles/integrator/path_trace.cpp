@@ -960,9 +960,23 @@ void PathTrace::cancel()
   render_cancel_.is_requested = false;
 }
 
+/* Photon mapping oversamples the camera: PathTraceWorkGPU renders
+ * photon_camera_samples camera paths per scheduled sample (not with adaptive
+ * sampling). The film then holds that many accumulated samples; every film
+ * normalization must use them, or all passes scale by the oversampling. */
+int PathTrace::get_num_accumulated_samples(const int num_scheduled_samples) const
+{
+  if (device_scene_->data.integrator.use_photon_mapping &&
+      !render_scheduler_.is_adaptive_sampling_used())
+  {
+    return num_scheduled_samples * max(device_scene_->data.integrator.photon_camera_samples, 1);
+  }
+  return num_scheduled_samples;
+}
+
 int PathTrace::get_num_samples_in_buffer()
 {
-  return render_scheduler_.get_num_rendered_samples();
+  return get_num_accumulated_samples(render_scheduler_.get_num_rendered_samples());
 }
 
 bool PathTrace::is_cancel_requested()
@@ -1195,7 +1209,7 @@ int PathTrace::get_num_render_tile_samples() const
     return full_frame_state_.render_buffers->params.samples;
   }
 
-  return render_scheduler_.get_num_rendered_samples();
+  return get_num_accumulated_samples(render_scheduler_.get_num_rendered_samples());
 }
 
 bool PathTrace::get_render_tile_pixels(const PassAccessor &pass_accessor,

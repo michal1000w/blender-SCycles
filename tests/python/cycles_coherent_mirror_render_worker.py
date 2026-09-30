@@ -24,6 +24,8 @@ def main():
     transport = parser.add_mutually_exclusive_group()
     transport.add_argument("--pt-guiding", action="store_true")
     transport.add_argument("--pt", action="store_true")
+    transport.add_argument("--photon-mapping", action="store_true",
+                           help="Metal path tracing with caustic photon mapping")
     parser.add_argument("--require-specular", action="store_true")
     parser.add_argument("--scene-budgets", action="store_true")
     parser.add_argument("--minimum-glossy-bounces", type=int)
@@ -56,7 +58,13 @@ def main():
             raise RuntimeError("BDPT is a Metal feature; CPU cases must request --pt or --pt-guiding")
         scene.cycles.use_adaptive_sampling = False
         scene.cycles.use_denoising = False
-        scene.cycles.use_bidirectional_path_tracing = not (args.pt_guiding or args.pt)
+        scene.cycles.use_bidirectional_path_tracing = not (args.pt_guiding or args.pt or args.photon_mapping)
+        scene.cycles.use_photon_mapping = args.photon_mapping
+        if args.photon_mapping:
+            # Photon bounces are independent of the scene budget; match them so
+            # photons cover exactly the path classes the reference covers.
+            scene.cycles.photon_max_bounces = scene.cycles.max_bounces
+        result["photon_mapping"] = args.photon_mapping
         scene.cycles.use_guiding = args.pt_guiding
         result["bidirectional_path_tracing"] = scene.cycles.use_bidirectional_path_tracing
         result["guiding"] = scene.cycles.use_guiding

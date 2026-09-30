@@ -120,6 +120,24 @@ int main()
                                         hull, error),
          "three faces rejected");
 
+  /* Concave volumes: accepted without the convexity requirement. */
+  expect(coherent_convex_mesh_validate(mesh(concave, cube_faces), hull, error, false),
+         "concave accepted when convexity is not required");
+  const auto cube = mesh(v, cube_faces);
+  expect(std::abs(coherent_closed_mesh_winding(cube, {0.001, 0.002, 0.0}) - 1.0) < 1e-9, "winding inside 1");
+  expect(std::abs(coherent_closed_mesh_winding(cube, {0.02, 0.0, 0.0})) < 1e-9, "winding outside 0");
+  expect(coherent_closed_mesh_strictly_outside(cube, {0.0, 0.0, 0.0051}), "closed: just outside");
+  expect(!coherent_closed_mesh_strictly_outside(cube, {0.0, 0.0, double(0.005f)}), "closed: on surface");
+  expect(!coherent_closed_mesh_strictly_outside(cube, {0.0, 0.0, 0.0}), "closed: inside");
+  /* Point inside the concave notch region is outside the concave volume. */
+  const auto concave_mesh = mesh(concave, cube_faces);
+  expect(coherent_closed_mesh_strictly_outside(concave_mesh, {0.0035, 0.0035, 0.0035}),
+         "concave notch is outside");
+  const auto far_cube = mesh(cube_vertices(0.005, 0.02), cube_faces);
+  const auto touching_cube = mesh(cube_vertices(0.005, 0.009), cube_faces);
+  expect(!coherent_triangle_sets_touch(cube, far_cube), "separated sets do not touch");
+  expect(coherent_triangle_sets_touch(cube, touching_cube), "overlapping sets touch");
+
   /* --- Streamed history ---------------------------------------------------- */
   const int R = LABEL_SINGULAR | LABEL_REFLECT | LABEL_GLOSSY;
   const int T = LABEL_SINGULAR | LABEL_TRANSMIT;
@@ -184,6 +202,37 @@ int main()
   expect(!coherent_history_valid(coherent_history_stream_after_interface(dead, 1, 3, R, 1, 2u)),
          "invalid persists");
 
+  /* Longer chains: internal reflections while inside, within the budget. */
+  auto in4 = coherent_history_stream_after_interface(start, 2, 5, T, 1, 4u);
+  auto trt = coherent_history_stream_after_interface(in4, 2, 5, R, -1, 4u);
+  expect(coherent_history_valid(trt) && !owned(trt, 4), "T R inside, not owned");
+  trt = coherent_history_stream_after_interface(trt, 2, 5, T, -1, 4u);
+  expect(owned(trt, 4) && coherent_history_count(trt) == 3, "TRT owned with four events");
+  auto trrt = coherent_history_stream_after_interface(
+      coherent_history_stream_after_interface(in4, 2, 5, R, -1, 4u), 2, 5, R, -1, 4u);
+  trrt = coherent_history_stream_after_interface(trrt, 2, 5, T, -1, 4u);
+  expect(owned(trrt, 4) && coherent_history_count(trrt) == 4, "TRRT owned");
+  auto trrr = coherent_history_stream_after_interface(
+      coherent_history_stream_after_interface(
+          coherent_history_stream_after_interface(in4, 2, 5, R, -1, 4u), 2, 5, R, -1, 4u),
+      2, 5, R, -1, 4u);
+  expect(!coherent_history_valid(trrr), "no room left for the exit");
+  auto ttr = coherent_history_stream_after_interface(
+      coherent_history_stream_after_interface(in4, 2, 5, T, -1, 4u), 2, 5, R, 1, 4u);
+  expect(owned(ttr, 4) && coherent_history_count(ttr) == 3, "exit then exterior reflection (concave)");
+  auto tttt = coherent_history_stream_after_interface(
+      coherent_history_stream_after_interface(
+          coherent_history_stream_after_interface(in4, 2, 5, T, -1, 4u), 2, 5, T, 1, 4u),
+      2, 5, T, -1, 4u);
+  expect(owned(tttt, 4) && coherent_history_count(tttt) == 4, "re-entry of a concave volume");
+  auto rrr = coherent_history_stream_after_interface(
+      coherent_history_stream_after_interface(
+          coherent_history_stream_after_interface(start, 1, 3, R, 1, 3u), 1, 4, R, 1, 3u),
+      1, 3, R, 1, 3u);
+  expect(owned(rrr, 3) && coherent_history_count(rrr) == 3, "three mirror reflections");
+  expect(!coherent_history_valid(coherent_history_stream_after_interface(rrr, 1, 3, R, 1, 3u)),
+         "fourth reflection over budget");
+
   /* --- Budget split -------------------------------------------------------- */
   KernelCoherentCandidate direct{};
   /* Kernel max_* bounces are stored plus one, as in Integrator::device_update. */
@@ -206,6 +255,10 @@ int main()
   expect(!coherent_history_candidate_within_budget(&direct, 0, 0, 0, max_bounce, max_glossy,
                                                    max_transmission, false, 3, 1024.0f, 2, 3),
          "more transmissions than events rejected");
+  expect(coherent_history_candidate_within_budget(&direct, 0, 0, 0, 6, 3, 3, false, 6, 1024.0f, 4, 2),
+         "TRRT within max 5, glossy 2, transmission 2");
+  expect(!coherent_history_candidate_within_budget(&direct, 0, 0, 0, 6, 2, 3, false, 6, 1024.0f, 4, 2),
+         "TRRT rejected with glossy 1");
 
   std::printf("streamed glass host/history checks=%d failures=%d\n", checks, failures);
   return failures != 0;
