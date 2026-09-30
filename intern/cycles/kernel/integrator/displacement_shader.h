@@ -42,4 +42,20 @@ ccl_device void displacement_shader_eval(KernelGlobals kg,
   }
 }
 
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* Run the displacement interpreter loop in the calling function; only its shared nodes are
+ * separate calls. The pixel displacement function uses this to bound the Metal call depth. */
+template<typename ConstIntegratorGenericState>
+ccl_device void displacement_shader_eval_direct(KernelGlobals kg,
+                                                ConstIntegratorGenericState state,
+                                                ccl_private ShaderData *sd)
+{
+  sd->lcg_state = 0;
+  sd->num_closure = 0;
+  sd->num_closure_left = 0;
+  svm_eval_nodes_impl<KERNEL_FEATURE_NODE_MASK_DISPLACEMENT, SHADER_TYPE_DISPLACEMENT, SVM_EVAL_CORE>(
+      kg, state, sd, nullptr, PATH_RAY_VISIBILITY_NONE, PATH_RAY_FLAG_NONE);
+}
+#endif
+
 CCL_NAMESPACE_END

@@ -9,8 +9,13 @@
 #  include "device/kernel.h"
 #  include "kernel/features.h"
 
+#  include "util/string.h"
+#  include "util/vector.h"
+
 #  include <Metal/Metal.h>
+#  include <condition_variable>
 #  include <memory>
+#  include <mutex>
 
 CCL_NAMESPACE_BEGIN
 
@@ -25,6 +30,51 @@ static inline bool metal_kernel_has_intersection(const DeviceKernel kernel,
   return device_kernel_has_intersection(kernel) ||
          (kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE &&
           (kernel_features & KERNEL_FEATURE_COHERENT_SPECULAR));
+}
+
+/* Kernels that can evaluate shaders or closures and therefore call the separately compiled
+ * shading functions. Only these link the functions: a pipeline able to make such calls gets a
+ * call stack reservation for every thread, which the large thread groups of the sorting and
+ * compaction kernels cannot afford. */
+/* Maximum nesting of shading function calls, including MetalRT intersection functions. The
+ * GPU reserves call stack memory for every level. `pixel_displacement` selects the library
+ * variant that evaluates displacement shaders during intersection, one level deeper. */
+static inline int metal_kernel_shading_call_depth(const DeviceKernel kernel,
+                                                  const bool pixel_displacement)
+{
+  /* Surface stages and the manifold solver (used by surface, volume and BDPT connection
+   * kernels) evaluate the shader interpreter, which calls the shared node functions. */
+  return ((kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE ||
+           kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT) ?
+              3 :
+              2) +
+         (pixel_displacement ? 1 : 0);
+}
+
+/* Kernels that can evaluate shaders or closures and therefore call the separately compiled
+ * shading functions. Only these link the functions: a pipeline able to make such calls gets a
+ * call stack reservation for every thread, which the large thread groups of the sorting and
+ * compaction kernels cannot afford. */
+static inline bool metal_kernel_uses_shading_functions(const DeviceKernel kernel,
+                                                       const bool pixel_displacement)
+{
+  /* Verified against the kernel call graph by tests/python/cycles_metal_visible_call_depth.py,
+   * together with metal_kernel_shading_call_depth(). */
+  return (kernel >= DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND &&
+          kernel <= DEVICE_KERNEL_INTEGRATOR_SHADE_DEDICATED_LIGHT) ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT ||
+         (kernel >= DEVICE_KERNEL_SHADER_EVAL_DISPLACE &&
+          kernel <= DEVICE_KERNEL_SHADER_EVAL_VOLUME_DENSITY) ||
+         /* Displacement is evaluated while intersecting. */
+         (pixel_displacement && kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
+          kernel <= DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT);
 }
 
 enum {
@@ -78,6 +128,63 @@ enum MetalPipelineType {
 
 const char *kernel_type_as_string(MetalPipelineType pso_type);
 
+/* Tables of separately compiled shading functions, in their MetalAncillaries order. The kernel
+ * defines the entries of each table, see `kernel/device/metal/kernel.metal`. */
+enum MetalVisibleFunctionTable {
+  METAL_VFT_SVM,
+  METAL_VFT_SVM_NODE,
+  METAL_VFT_SVM_CLOSURE,
+  METAL_VFT_BSDF_EVAL,
+  METAL_VFT_BSDF_EVAL_DELTA,
+  METAL_VFT_BSDF_SAMPLE,
+  METAL_VFT_SURFACE,
+  METAL_VFT_POLARIZATION,
+  METAL_VFT_DIFFRACTION,
+  METAL_VFT_MNEE,
+  METAL_VFT_PIXEL_DISPLACEMENT,
+  METAL_VFT_NUM
+};
+
+/* GPU binaries of the separately compiled shading functions of one generic library. Compiling
+ * the shader interpreter and closures once, instead of optimizing them again inside every
+ * kernel, keeps cold compilation short and independent of the scene. The functions compile
+ * concurrently with the kernel pipelines, which link them when both are ready. */
+class MetalVisibleFunctions {
+ public:
+  MetalVisibleFunctions(id<MTLDevice> device, id<MTLLibrary> library, const string &library_md5);
+  ~MetalVisibleFunctions();
+
+  /* Compile every function on `num_threads` threads. Blocks until done. */
+  void compile(int num_threads);
+  /* Wait for compile() to finish. Returns false if any function failed to compile. */
+  bool wait();
+
+  /* Functions of each table, ordered by table index. */
+  NSArray<id<MTLFunction>> *table_functions[METAL_VFT_NUM] = {nil};
+  /* All functions, for linking into pipelines. */
+  NSArray<id<MTLFunction>> *binary_functions = nil;
+
+  id<MTLLibrary> library() const
+  {
+    return library_;
+  }
+
+ private:
+  id<MTLFunction> compile_function(const string &name, string &error);
+  API_AVAILABLE(macos(13.0))
+  id<MTLFunction> compile_function_macos13(const string &name, string &error);
+
+  id<MTLDevice> device_ = nil;
+  id<MTLLibrary> library_ = nil;
+  string library_md5_;
+  vector<string> names_[METAL_VFT_NUM];
+
+  std::mutex mutex_;
+  std::condition_variable cond_;
+  bool finished_ = false;
+  bool success_ = false;
+};
+
 /* A pipeline object that can be shared between multiple instances of MetalDeviceQueue. */
 class MetalKernelPipeline {
  public:
@@ -105,6 +212,19 @@ class MetalKernelPipeline {
   id<MTLComputePipelineState> pipeline = nil;
   int num_threads_per_block = 0;
 
+  /* Separately compiled shading functions linked into this pipeline, if its library uses them. */
+  std::shared_ptr<MetalVisibleFunctions> visible_functions;
+  /* compile() finished, the shading functions still have to be linked. */
+  bool awaiting_link = false;
+  /* Requested ahead of time for a feature the scene does not use yet. */
+  bool prewarm = false;
+  /* Compiled from the complete generic library with separately compiled shading functions.
+   * Such pipelines are small and need no low-memory serialization. */
+  bool complete_generic = false;
+  /* The complete generic library variant with pixel displacement. */
+  bool pixel_displacement_library = false;
+  void link_visible_functions();
+
   bool should_use_binary_archive() const;
   id<MTLFunction> make_intersection_function(const char *function_name);
 
@@ -121,6 +241,7 @@ class MetalDispatchPipeline {
 
   bool update(MetalDevice *metal_device, DeviceKernel kernel);
   void free_intersection_function_tables();
+  void free_visible_function_tables();
 
  private:
   friend class MetalDeviceQueue;
@@ -136,6 +257,10 @@ class MetalDispatchPipeline {
 
   API_AVAILABLE(macos(11.0))
   id<MTLIntersectionFunctionTable> intersection_func_table[METALRT_TABLE_NUM] = {nil};
+
+  bool use_visible_shading = false;
+  API_AVAILABLE(macos(11.0))
+  id<MTLVisibleFunctionTable> visible_func_table[METAL_VFT_NUM] = {nil};
 };
 
 /* Cache of Metal kernels for each DeviceKernel. */
@@ -145,6 +270,13 @@ int num_incomplete_specialization_requests();
 int get_loaded_kernel_count(const MetalDevice *device, MetalPipelineType pso_type);
 bool should_load_kernels(const MetalDevice *device, MetalPipelineType pso_type);
 bool load(MetalDevice *device, MetalPipelineType pso_type);
+/* Separately compiled shading functions of a generic library, shared by all devices using the
+ * same library. The first request starts their compilation in the background. */
+std::shared_ptr<MetalVisibleFunctions> request_visible_functions(id<MTLDevice> mtlDevice,
+                                                                 id<MTLLibrary> library,
+                                                                 const string &library_md5);
+/* A generic library with the given source checksum loaded earlier, retained, or nil. */
+id<MTLLibrary> find_generic_library(id<MTLDevice> mtlDevice, const string &library_md5);
 std::shared_ptr<const MetalKernelPipeline> get_best_pipeline(const MetalDevice *device,
                                                            DeviceKernel kernel);
 void wait_for_all();

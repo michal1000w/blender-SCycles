@@ -77,7 +77,7 @@ static void adjust_device_info(DeviceInfo &device, blender::PointerRNA cpreferen
         cpreferences,
         "kernel_optimization_level",
         KERNEL_OPTIMIZATION_NUM_LEVELS,
-        KERNEL_OPTIMIZATION_LEVEL_FULL);
+        KERNEL_OPTIMIZATION_LEVEL_OFF);
   }
 }
 

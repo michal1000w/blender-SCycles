@@ -1040,7 +1040,7 @@ ccl_device_inline bool diffraction_dielectric_parameters_valid(
  * The weights perform the mixture split, while each conditional closure keeps
  * its own normalized PDF. This avoids mixed measures inside guiding RIS. */
 template<MicrofacetType m_type = GGX>
-ccl_device_inline bool bsdf_diffraction_dielectric_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_dielectric_setup(
     ccl_private ShaderData *sd, const Spectrum weight, const float3 normal,
     const float3 tangent, ccl_private const DiffractionRoughDielectric *param,
     const int disabled_lobes = 0)
@@ -1167,7 +1167,7 @@ ccl_device_inline bool bsdf_diffraction_dielectric_setup_coated(
 }
 
 /* Shared physical-input conversion for SVM and OSL Glass nodes. */
-ccl_device_inline bool bsdf_diffraction_glass_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_glass_setup(
     ccl_private ShaderData *sd, const Spectrum reflection, const Spectrum transmission,
     const float3 normal, float3 tangent, const float roughness, const float ior,
     const float pitch, const float depth, const float duty,
@@ -1202,7 +1202,7 @@ ccl_device_inline bool bsdf_diffraction_glass_setup(
 /* Approximate neutral, lossless MultiGGX completion. The first-event closure
  * and this reciprocal two-sided return closure have separate PDFs, so guiding
  * and MIS can select them without a hidden mixture inside either closure. */
-ccl_device_inline bool bsdf_diffraction_glass_two_sided_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_glass_two_sided_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const Spectrum reflection,
@@ -1331,7 +1331,7 @@ ccl_device_inline bool bsdf_diffraction_glass_two_sided_setup(
   return true;
 }
 
-ccl_device_inline bool bsdf_diffraction_principled_transmission_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_principled_transmission_setup(
     ccl_private ShaderData *sd,const Spectrum reflection,const Spectrum transmission,
     const float3 normal,const float3 tangent,const float roughness,const float ior,
     const float pitch,const float depth,const float duty,const Spectrum specular_tint,
@@ -1403,7 +1403,7 @@ ccl_device_inline bool bsdf_diffraction_principled_transmission_setup(
  * dielectric transport as Glass when its generalized tint and dispersion are
  * disabled. Its external closure weights may still mix with other Principled
  * lobes; the neutral return cache is conditional on this lobe only. */
-ccl_device_inline bool bsdf_diffraction_principled_transmission_two_sided_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_principled_transmission_two_sided_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const Spectrum reflection,
@@ -1538,7 +1538,7 @@ ccl_device_inline bool bsdf_diffraction_principled_transmission_two_sided_setup(
   return true;
 }
 
-ccl_device_inline bool bsdf_diffraction_refraction_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_refraction_setup(
     ccl_private ShaderData *sd, const Spectrum weight, const float3 normal,
     float3 tangent, const float roughness, const float ior,
     const float pitch, const float depth, const float duty, const bool beckmann)

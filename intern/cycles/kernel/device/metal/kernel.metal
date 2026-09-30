@@ -1105,3 +1105,335 @@ __intersection__point_shadow_all(constant KernelParamsMetal &launch_params_metal
 }
 
 #endif /* __KERNEL_METALRT__ */
+
+#ifdef __KERNEL_METAL_VISIBLE_SHADING__
+/* --------------------------------------------------------------------
+ * Separately compiled shading functions.
+ *
+ * The host compiles these once to GPU binaries and links them into every pipeline. Kernels call
+ * them through the visible function tables in MetalAncillaries, so the large shader interpreter
+ * and closure dispatch are no longer optimized again inside each kernel. */
+
+static_assert(sizeof(Spectrum) == sizeof(float3), "Metal visible shading functions use float3");
+
+template<typename T> T metal_visible_state(int state);
+template<> int metal_visible_state<int>(int state)
+{
+  return state;
+}
+template<> IntegratorBakeState metal_visible_state<IntegratorBakeState>(int /*state*/)
+{
+  return IntegratorBakeState();
+}
+
+#  define CCL_METAL_SVM_VISIBLE_FUNCTION(index, mask, shader_type, state_type) \
+    [[visible]] void cycles_metal_svm_##index(constant void *launch_params, \
+                                              constant void *ancillaries, \
+                                              int state, \
+                                              thread void *sd, \
+                                              device float *render_buffer, \
+                                              uint path_visibility, \
+                                              uint path_flag) \
+    { \
+      MetalKernelContext context(*(constant KernelParamsMetal *)launch_params, \
+                                 (constant MetalAncillaries *)ancillaries); \
+      context.svm_eval_nodes_impl<mask, shader_type, MetalKernelContext::SVM_EVAL_CORE>( \
+          nullptr, \
+          metal_visible_state<state_type>(state), \
+          (thread ShaderData *)sd, \
+          render_buffer, \
+          PathRayVisibility(path_visibility), \
+          path_flag); \
+    }
+CCL_METAL_SVM_FUNCTIONS(CCL_METAL_SVM_VISIBLE_FUNCTION)
+#  undef CCL_METAL_SVM_VISIBLE_FUNCTION
+
+/* Shader nodes that do not depend on the interpreter instantiation, see SVM_SHARED_CASE. */
+[[visible]] int cycles_metal_svm_node(constant void *launch_params,
+                                      constant void *ancillaries,
+                                      uint node_type,
+                                      int offset,
+                                      thread void *sd,
+                                      thread float *stack,
+                                      uint path_visibility,
+                                      uint path_flag)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  return context.svm_eval_nodes_impl<KERNEL_FEATURE_NODE_MASK_SURFACE,
+                                     SHADER_TYPE_SURFACE,
+                                     MetalKernelContext::SVM_EVAL_SHARED_NODE>(
+      nullptr,
+      0,
+      (thread ShaderData *)sd,
+      nullptr,
+      PathRayVisibility(path_visibility),
+      path_flag,
+      node_type,
+      offset,
+      stack);
+}
+
+/* Surface closure node shared by every interpreter instantiation that creates BSDFs. */
+[[visible]] int cycles_metal_svm_closure(constant void *launch_params,
+                                         constant void *ancillaries,
+                                         thread void *sd,
+                                         thread float *stack,
+                                         float3 closure_weight,
+                                         int offset,
+                                         uint path_visibility,
+                                         uint path_flag)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  using SVMNodeClosureBsdf = MetalKernelContext::SVMNodeClosureBsdf;
+  const ccl_global SVMNodeClosureBsdf &bsdf_node =
+      context.svm_node_get<SVMNodeClosureBsdf>(nullptr, &offset);
+  return context.svm_node_closure_bsdf<KERNEL_FEATURE_NODE_MASK_SURFACE, SHADER_TYPE_SURFACE>(
+      nullptr,
+      (thread ShaderData *)sd,
+      stack,
+      closure_weight,
+      bsdf_node,
+      PathRayVisibility(path_visibility),
+      path_flag,
+      offset);
+}
+
+[[visible]] float3 cycles_metal_bsdf_eval(constant void *launch_params,
+                                          constant void *ancillaries,
+                                          thread void *sd,
+                                          thread const void *sc,
+                                          float3 wo,
+                                          thread float *pdf)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  return context.bsdf_eval_impl(
+      nullptr, (thread ShaderData *)sd, (thread const ShaderClosure *)sc, wo, pdf);
+}
+
+[[visible]] float3 cycles_metal_bsdf_eval_delta(constant void *launch_params,
+                                                constant void *ancillaries,
+                                                thread void *sd,
+                                                thread const void *sc,
+                                                float3 wo,
+                                                thread float *pdf)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  return context.bsdf_eval_delta_impl(
+      nullptr, (thread ShaderData *)sd, (thread const ShaderClosure *)sc, wo, pdf);
+}
+
+[[visible]] void cycles_metal_polarization_surface_transport(constant void *launch_params,
+                                                             constant void *ancillaries,
+                                                             thread void *result,
+                                                             thread void *sd,
+                                                             float3 wo,
+                                                             thread const void *incoming_state,
+                                                             bool adjoint,
+                                                             thread const void *sampled_closure,
+                                                             float3 native_total,
+                                                             bool sampled_delta,
+                                                             uint light_shader_flags,
+                                                             bool reciprocal_forward)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  using PolarizationSpectrumState = MetalKernelContext::PolarizationSpectrumState;
+  *(thread PolarizationSpectrumState *)result = context.polarization_surface_transport_impl(
+      nullptr,
+      (thread ShaderData *)sd,
+      wo,
+      *(thread const PolarizationSpectrumState *)incoming_state,
+      adjoint,
+      (thread const ShaderClosure *)sampled_closure,
+      native_total,
+      sampled_delta,
+      light_shader_flags,
+      reciprocal_forward);
+}
+
+[[visible]] bool cycles_metal_diffraction_power_column(constant void *launch_params,
+                                                       constant void *ancillaries,
+                                                       thread const void *data,
+                                                       int handle,
+                                                       float3 incident,
+                                                       bool incoming_substrate,
+                                                       float upper_index,
+                                                       float lower_index,
+                                                       float wavelength,
+                                                       float pitch,
+                                                       thread void *output_view,
+                                                       thread int *output_incoming_order,
+                                                       thread float *powers)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  using DiffractionSceneData = MetalKernelContext::DiffractionSceneData;
+  using DiffractionCacheCellView = MetalKernelContext::DiffractionCacheCellView;
+  return context.diffraction_data_power_column_impl<DIFFRACTION_MAX_CHANNELS>(
+      (thread const DiffractionSceneData *)data,
+      handle,
+      incident,
+      incoming_substrate,
+      upper_index,
+      lower_index,
+      wavelength,
+      pitch,
+      (thread DiffractionCacheCellView *)output_view,
+      output_incoming_order,
+      powers);
+}
+
+#  ifdef __MNEE__
+[[visible]] int cycles_metal_mnee_sample(constant void *launch_params,
+                                         constant void *ancillaries,
+                                         int state,
+                                         thread void *sd,
+                                         thread void *sd_mnee,
+                                         thread const void *rng_state,
+                                         thread void *ls,
+                                         thread float3 *throughput,
+                                         thread float3 *r_receiver_wo,
+                                         thread int *r_vertex_count,
+                                         thread float3 *r_light_wo,
+                                         bool consider_all_refractive,
+                                         thread float *r_light_distance,
+                                         float wavelength_rand_override,
+                                         bool volume_endpoint,
+                                         thread float3 *r_vertices,
+                                         thread void *r_polarization)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  using RNGState = MetalKernelContext::RNGState;
+  using LightSample = MetalKernelContext::LightSample;
+  using PolarizationMueller = MetalKernelContext::PolarizationMueller;
+  return int(context.kernel_path_mnee_sample_impl(nullptr,
+                                                  state,
+                                                  (thread ShaderData *)sd,
+                                                  (thread ShaderData *)sd_mnee,
+                                                  (thread const RNGState *)rng_state,
+                                                  (thread LightSample *)ls,
+                                                  throughput,
+                                                  r_receiver_wo,
+                                                  *r_vertex_count,
+                                                  r_light_wo,
+                                                  consider_all_refractive,
+                                                  r_light_distance,
+                                                  wavelength_rand_override,
+                                                  volume_endpoint,
+                                                  r_vertices,
+                                                  (thread PolarizationMueller *)r_polarization));
+}
+#  endif
+
+#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__
+[[visible]] void cycles_metal_pixel_displacement_shader_setup(constant void *launch_params,
+                                                              constant void *ancillaries,
+                                                              thread void *sd,
+                                                              float time,
+                                                              bool motion,
+                                                              thread const float3 *verts)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  context.pixel_displacement_shader_setup_impl(
+      nullptr, (thread ShaderData *)sd, time, motion, verts);
+}
+#  endif
+
+[[visible]] int cycles_metal_bsdf_sample(constant void *launch_params,
+                                         constant void *ancillaries,
+                                         thread void *sd,
+                                         thread const void *sc,
+                                         float3 rand,
+                                         thread float3 *eval,
+                                         thread float3 *wo,
+                                         thread float *pdf,
+                                         thread float2 *sampled_roughness,
+                                         thread float *eta)
+{
+  MetalKernelContext context(*(constant KernelParamsMetal *)launch_params,
+                             (constant MetalAncillaries *)ancillaries);
+  return context.bsdf_sample_impl(nullptr,
+                                  (thread ShaderData *)sd,
+                                  (thread const ShaderClosure *)sc,
+                                  rand,
+                                  eval,
+                                  wo,
+                                  pdf,
+                                  sampled_roughness,
+                                  eta);
+}
+#  define CCL_METAL_SURFACE_STAGE_BEGIN(name) \
+    [[visible]] int cycles_metal_surface_##name(constant void *launch_params, \
+                                                constant void *ancillaries, \
+                                                int state, \
+                                                thread void *sd_ptr, \
+                                                thread const void *rng_ptr, \
+                                                device float *render_buffer, \
+                                                thread float3 *result, \
+                                                thread float3 *secondary_result) \
+    { \
+      MetalKernelContext context(*(constant KernelParamsMetal *)launch_params, \
+                                 (constant MetalAncillaries *)ancillaries); \
+      thread ShaderData *sd = (thread ShaderData *)sd_ptr; \
+      const thread MetalKernelContext::RNGState *rng_state = \
+          (const thread MetalKernelContext::RNGState *)rng_ptr; \
+      (void)sd; \
+      (void)rng_state; \
+      (void)render_buffer; \
+      (void)result; \
+      (void)secondary_result;
+#  define CCL_METAL_SURFACE_STAGE_END }
+
+/* Table order must match MetalSurfaceStage. */
+CCL_METAL_SURFACE_STAGE_BEGIN(0)
+return int(context.integrate_surface_direct_light<KERNEL_FEATURE_NODE_MASK_SURFACE &
+                                                  ~KERNEL_FEATURE_NODE_RAYTRACE>(
+    nullptr, state, sd, rng_state));
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(1)
+return int(context.integrate_surface_bidirectional(nullptr, state, sd, rng_state));
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(2)
+return context.integrate_surface_bsdf_bssrdf_bounce(nullptr, state, sd, rng_state);
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(3)
+*result = context.photon_mapping_gather(nullptr, state, sd, render_buffer);
+return 0;
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(4)
+*result = context.coherent_specular_complete_intensity(nullptr, state, sd, secondary_result);
+return 0;
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(5)
+context.integrate_surface_emission(nullptr, state, sd, render_buffer);
+return 0;
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(6)
+#  ifdef __PASSES__
+context.film_write_data_passes(nullptr, state, sd, render_buffer);
+#  endif
+return 0;
+CCL_METAL_SURFACE_STAGE_END
+
+CCL_METAL_SURFACE_STAGE_BEGIN(7)
+#  ifdef __DENOISING_FEATURES__
+context.film_write_denoising_features_surface(nullptr, state, sd, render_buffer);
+#  endif
+return 0;
+CCL_METAL_SURFACE_STAGE_END
+
+#  undef CCL_METAL_SURFACE_STAGE_BEGIN
+#  undef CCL_METAL_SURFACE_STAGE_END
+#endif /* __KERNEL_METAL_VISIBLE_SHADING__ */

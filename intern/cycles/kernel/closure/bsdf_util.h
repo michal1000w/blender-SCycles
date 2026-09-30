@@ -26,7 +26,7 @@ struct FresnelThinFilm {
  * stay in the regular RGB path, avoiding spectral noise and work for the common clear-glass case.
  * Values above one retain their existing artistic energy scale while the normalized chromaticity
  * is reconstructed as a bounded BT.709 transmittance. */
-ccl_device_inline Spectrum bsdf_spectral_transmission_color(KernelGlobals kg,
+ccl_device_inline_outline_metal Spectrum bsdf_spectral_transmission_color(KernelGlobals kg,
                                                             ccl_private ShaderData *sd,
                                                             const float3 color)
 {

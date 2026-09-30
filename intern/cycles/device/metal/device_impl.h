@@ -90,6 +90,17 @@ class MetalDevice : public Device {
   std::mutex mtlResidencySet_mutex;
 #  endif
 
+  /* Compile the shading code once as separately linked functions, so that the generic library
+   * contains every kernel and never depends on the scene. See MetalVisibleFunctions. */
+  bool use_visible_shading = false;
+  std::shared_ptr<MetalVisibleFunctions> visible_functions;
+  /* Whether rendering needs scene-specialized pipelines instead of complete generic ones. */
+  bool requires_scene_specialization() const;
+  bool scene_pixel_displacement_active() const;
+  /* Pixel displacement is compiled into the complete generic library; otherwise it requires
+   * scene-specialized pipelines. */
+  bool pixel_displacement_requires_specialization() const;
+
   uint64_t kernel_features = 0;
   uint64_t scene_kernel_features = 0;
   KernelSVMUsage shader_eval_svm_usage = {};

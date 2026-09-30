@@ -42,10 +42,11 @@ if(WITH_CYCLES_DEVICE_METAL)
 
   add_dependencies(cycles_kernel cycles_kernel_metal)
 
-  # Runtime MSL compilation can take several minutes for the complete Cycles kernel. Build the
-  # common generic libraries ahead of time instead. Scene-specialized variants still use the
-  # runtime compiler, and the device code falls back to it whenever none of these exact variants
-  # match the current OS or debug settings.
+  # Build the complete generic libraries ahead of time, so a cold start only runs the GPU back-end
+  # compiler. They use separately compiled shading functions (__KERNEL_METAL_VISIBLE_SHADING__)
+  # and contain every kernel and feature, independent of the scene. Optional scene-specialized
+  # variants still use the runtime compiler, and the device code falls back to it whenever none of
+  # these exact variants match the current OS or debug settings.
   if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "(^|;)arm64(;|$)")
     find_program(CYCLES_METAL_XCRUN_EXECUTABLE xcrun REQUIRED)
     execute_process(
@@ -76,6 +77,7 @@ if(WITH_CYCLES_DEVICE_METAL)
       -D__METAL_FUNCTION_CONSTANTS_64BIT__
       -D__KERNEL_METAL_TARGET_CPU_ARM64__
       -D__KERNEL_METAL_MACOS__=${CYCLES_METAL_MACOS_MAJOR}
+      -D__KERNEL_METAL_VISIBLE_SHADING__
     )
     if(CYCLES_METAL_MACOS_MAJOR GREATER_EQUAL 14)
       list(APPEND cycles_metal_common_flags -D__METAL_GLOBAL_BUILTINS__)
@@ -87,21 +89,28 @@ if(WITH_CYCLES_DEVICE_METAL)
       list(APPEND cycles_metal_common_flags -DWITH_CYCLES_DEBUG)
     endif()
 
+    # The kernel includes every kernel header, including the Metal device headers, and the shared
+    # utility headers. Depend on all of them so stale precompiled libraries are never installed.
+    file(GLOB_RECURSE cycles_metal_util_headers CONFIGURE_DEPENDS
+      ${CMAKE_SOURCE_DIR}/intern/cycles/util/*.h
+      ${CMAKE_SOURCE_DIR}/intern/cycles/kernel/*.h
+    )
+
     set(cycles_metal_generic_libraries)
     foreach(metal_variant software metalrt metalrt_motion)
       set(metal_variant_flags)
       if(metal_variant MATCHES "^metalrt")
         list(APPEND metal_variant_flags -D__KERNEL_METALRT__)
       endif()
-      if(metal_variant STREQUAL "metalrt_motion")
+      if(metal_variant MATCHES "^metalrt_motion")
         list(APPEND metal_variant_flags -D__METALRT_MOTION__)
       endif()
 
       set(metal_air
-        ${CMAKE_CURRENT_BINARY_DIR}/cycles_kernel_metal_generic_${metal_variant}_macos_${CYCLES_METAL_MACOS_MAJOR}.air
+        ${CMAKE_CURRENT_BINARY_DIR}/cycles_kernel_metal_shading_${metal_variant}_macos_${CYCLES_METAL_MACOS_MAJOR}.air
       )
       set(metal_library
-        ${CMAKE_CURRENT_BINARY_DIR}/cycles_kernel_metal_generic_${metal_variant}_macos_${CYCLES_METAL_MACOS_MAJOR}.metallib
+        ${CMAKE_CURRENT_BINARY_DIR}/cycles_kernel_metal_shading_${metal_variant}_macos_${CYCLES_METAL_MACOS_MAJOR}.metallib
       )
       add_custom_command(
         OUTPUT ${metal_air}
@@ -113,6 +122,7 @@ if(WITH_CYCLES_DEVICE_METAL)
         DEPENDS
           ${CMAKE_CURRENT_SOURCE_DIR}/kernel.metal
           $<TARGET_PROPERTY:cycles_kernel,INTERFACE_SOURCES>
+          ${cycles_metal_util_headers}
         VERBATIM
       )
       add_custom_command(

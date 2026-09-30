@@ -180,7 +180,7 @@ ccl_device_inline Spectrum bsdf_diffraction_ashikhmin_delta(
 
 /* Flat relief is an actual native Ashikhmin closure. In particular this
  * retains its original RGB/spectral weight and native sampling behavior. */
-ccl_device_inline bool bsdf_diffraction_ashikhmin_glossy_setup(
+ccl_device_inline_outline_metal bool bsdf_diffraction_ashikhmin_glossy_setup(
     ccl_private ShaderData *sd, const Spectrum weight, const float3 N,
     const float3 T, const float alpha_x, const float alpha_y,
     const float pitch, const float depth, const float duty,
