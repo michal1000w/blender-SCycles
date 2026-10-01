@@ -109,6 +109,7 @@ class BlenderSession {
 
   string last_status;
   string last_error;
+  string last_warning;
   double last_progress;
   double last_status_time;
 

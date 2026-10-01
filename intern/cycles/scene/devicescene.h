@@ -52,6 +52,7 @@ class DeviceScene {
 
   /* cameras */
   device_vector<DecomposedTransform> camera_motion;
+  device_vector<uint> camera_script_params;
 
   /* attributes */
   device_vector<AttributeMap> attributes_map;

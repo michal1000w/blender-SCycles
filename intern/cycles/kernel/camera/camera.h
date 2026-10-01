@@ -356,6 +356,71 @@ ccl_device_inline Spectrum camera_sample_custom(KernelGlobals kg,
                        ray);
 
   return throughput;
+#elif defined(__KERNEL_METAL_OSL_CAMERA__)
+  /* The device translated the camera shader to a Metal function and linked it into this
+   * kernel, see `device/metal/osl_camera.h`. */
+  r_cache_miss = false;
+
+  /* Transform raster position to camera space. */
+  const ProjectionTransform rastertocamera = cam->rastertocamera;
+  const float3 sensor = transform_perspective(&rastertocamera,
+                                              make_float3(raster.x, raster.y, 0.0f));
+  const float3 dSdx = transform_perspective_direction(&rastertocamera,
+                                                      make_float3(1.0f, 0.0f, 0.0f));
+  const float3 dSdy = transform_perspective_direction(&rastertocamera,
+                                                      make_float3(0.0f, 1.0f, 0.0f));
+  /* The `cam:aperture_position` attribute. */
+  const float2 aperture_position = camera_sample_aperture(cam, rand_lens) * cam->aperturesize;
+
+  /* Layout of MetalOSLCameraInput. */
+  float input[13];
+  input[0] = sensor.x;
+  input[1] = sensor.y;
+  input[2] = sensor.z;
+  input[3] = dSdx.x;
+  input[4] = dSdx.y;
+  input[5] = dSdx.z;
+  input[6] = dSdy.x;
+  input[7] = dSdy.y;
+  input[8] = dSdy.z;
+  input[9] = rand_lens.x;
+  input[10] = rand_lens.y;
+  input[11] = aperture_position.x;
+  input[12] = aperture_position.y;
+
+  /* Execute the shader to sample position, direction and transmission. */
+  float output[21];
+  metal_ancillaries->vft_osl_camera[0](
+      &launch_params_metal, kernel_data_array(camera_script_params), input, output);
+
+  const float3 P = make_float3(output[0], output[1], output[2]);
+  const float3 dPdx = make_float3(output[3], output[4], output[5]);
+  const float3 dPdy = make_float3(output[6], output[7], output[8]);
+  const float3 D = make_float3(output[9], output[10], output[11]);
+  const float3 dDdx = make_float3(output[12], output[13], output[14]);
+  const float3 dDdy = make_float3(output[15], output[16], output[17]);
+  const Spectrum throughput = make_float3(output[18], output[19], output[20]);
+
+  /* Zero throughput indicates failed sampling. */
+  if (is_zero(throughput)) {
+    return zero_spectrum();
+  }
+
+  camera_sample_to_ray(cam,
+                       cam_motion,
+                       P,
+                       D,
+#  ifdef __RAY_DIFFERENTIALS__
+                       P,
+                       D,
+                       P + dPdx,
+                       D + dDdx,
+                       P + dPdy,
+                       D + dDdy,
+#  endif
+                       ray);
+
+  return throughput;
 #else
   (void)kg;
   (void)cam;

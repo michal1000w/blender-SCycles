@@ -17,7 +17,7 @@
 
 /* The maximum number of resources contiguously encoded into the MetalAncillaries struct:
  * textures, MetalRT resources and the visible function tables. */
-#  define ANCILLARY_SLOT_COUNT (11 + METAL_VFT_NUM)
+#  define ANCILLARY_SLOT_COUNT (12 + METAL_VFT_NUM)
 
 CCL_NAMESPACE_BEGIN
 

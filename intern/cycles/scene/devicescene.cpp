@@ -36,6 +36,7 @@ DeviceScene::DeviceScene(Device *device)
       object_flag(device, "object_flag", MEM_GLOBAL),
       object_prim_offset(device, "object_prim_offset", MEM_GLOBAL),
       camera_motion(device, "camera_motion", MEM_GLOBAL),
+      camera_script_params(device, "camera_script_params", MEM_GLOBAL),
       attributes_map(device, "attributes_map", MEM_GLOBAL),
       attributes_float(device, "attributes_float", MEM_GLOBAL),
       attributes_float2(device, "attributes_float2", MEM_GLOBAL),

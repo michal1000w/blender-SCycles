@@ -480,6 +480,11 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     write_resource(ancillary_args, metal_device_->image_bindings, ancillary_index++);
     write_resource(ancillary_args, metal_device_->sampler_bindings, ancillary_index++);
 
+    /* The camera function table directly follows the textures in every library variant. */
+    if (metal_device_->use_osl_camera_function) {
+      write_resource(ancillary_args, active_pipeline.camera_func_table, ancillary_index++);
+    }
+
     if (active_pipeline.use_metalrt) {
       write_resource(ancillary_args, metal_device_->accel_struct, ancillary_index++);
       write_resource(ancillary_args, metal_device_->blas_buffer, ancillary_index++);
@@ -532,6 +537,10 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
         [mtlComputeCommandEncoder useResource:active_pipeline.visible_func_table[table]
                                         usage:MTLResourceUsageRead];
       }
+    }
+    if (!metal_device_->mtlResidencySet_enabled && active_pipeline.camera_func_table) {
+      [mtlComputeCommandEncoder useResource:active_pipeline.camera_func_table
+                                      usage:MTLResourceUsageRead];
     }
 
     [mtlComputeCommandEncoder setComputePipelineState:active_pipeline.pipeline];

@@ -12,6 +12,8 @@
 #include "util/map.h"
 #include "util/set.h"
 #include "util/string.h"
+#include "util/thread.h"
+#include "util/unique_ptr.h"
 
 #include "scene/shader.h"
 #include "scene/shader_graph.h"
@@ -31,6 +33,7 @@ class DeviceScene;
 class ImageHandle;
 class ImageManager;
 class ImageSingle;
+struct MetalOSLCameraProgram;
 class OSLRenderServices;
 struct OSLGlobals;
 class Scene;
@@ -48,6 +51,8 @@ struct OSLShaderInfo {
   OSLShaderInfo() = default;
 
   OSL::OSLQuery query;
+  /* For devices that translate the bytecode of camera shaders themselves. */
+  string bytecode;
   bool has_surface_emission = false;
   bool has_surface_transparent = false;
   bool has_surface_bssrdf = false;
@@ -93,12 +98,28 @@ class OSLManager {
   void tag_update();
   bool need_update() const;
 
+  /* A problem with the custom camera shader that does not stop the render, to show to the user:
+   * the camera renders black on the devices that cannot run the shader. Empty if there is none.
+   * May be called from any thread. */
+  string get_camera_warning() const;
+
  private:
 #ifdef WITH_OSL
   void shading_system_free();
 
   void foreach_shading_system(const std::function<void(OSL::ShadingSystem *)> &callback);
   void foreach_render_services(const std::function<void(OSLRenderServices *)> &callback);
+
+#  ifdef WITH_METAL
+  /* Custom camera for Metal devices, which run a translation of the shader. */
+  void device_update_camera_metal(Device *device, Scene *scene);
+  /* The translation of the current camera shader, to translate it only when it changes. */
+  string camera_metal_key_;
+  unique_ptr<MetalOSLCameraProgram> camera_metal_program_;
+  string camera_metal_error_;
+#  endif
+  mutable thread_mutex camera_warning_mutex_;
+  string camera_warning_;
 
   Device *device_;
   map<string, OSLShaderInfo> loaded_shaders;
