@@ -135,7 +135,10 @@ CCL_NAMESPACE_BEGIN
 /* Metal compiles every interpreter instantiation once as a visible function and links the
  * binaries into the kernels, instead of optimizing the complete interpreter again inside every
  * kernel that evaluates a shader. Each instantiation used by the kernels needs an entry here.
- * The table index is part of the host and kernel contract, see `kernel.metal`. */
+ * The table index is part of the host and kernel contract, see `kernel.metal`.
+ *
+ * The state type is part of the instantiation: main and shadow path states are both indices on
+ * the GPU, and the Light Path node reads its depths from different state arrays for them. */
 #  define CCL_METAL_SVM_FUNCTIONS(F) \
     F(0, KERNEL_FEATURE_NODE_MASK_SURFACE & ~KERNEL_FEATURE_NODE_RAYTRACE, SHADER_TYPE_SURFACE, int) \
     F(1, KERNEL_FEATURE_NODE_MASK_SURFACE, SHADER_TYPE_SURFACE, int) \
@@ -159,7 +162,10 @@ CCL_NAMESPACE_BEGIN
     F(10, \
       KERNEL_FEATURE_NODE_MASK_VOLUME & ~KERNEL_FEATURE_NODE_LIGHT_PATH, \
       SHADER_TYPE_VOLUME, \
-      IntegratorBakeState)
+      IntegratorBakeState) \
+    F(11, KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW, SHADER_TYPE_SURFACE, IntegratorShadowState) \
+    F(12, KERNEL_FEATURE_NODE_MASK_VOLUME, SHADER_TYPE_VOLUME, IntegratorShadowState) \
+    F(13, KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT, SHADER_TYPE_SURFACE, IntegratorShadowState)
 
 enum SVMEvalMode {
   SVM_EVAL_CORE = 0,
@@ -223,10 +229,14 @@ ccl_device_inline void svm_eval_nodes(KernelGlobals /*kg*/,
                                       const uint32_t path_flag)
 {
   constexpr bool is_bake = metal::is_same<ConstIntegratorGenericState, IntegratorBakeState>::value;
+  constexpr bool is_shadow =
+      metal::is_same<ConstIntegratorGenericState, IntegratorShadowState>::value;
   constexpr int index = svm_metal_function_index<
       node_feature_mask,
       type,
-      metal::conditional_t<is_bake, IntegratorBakeState, int>>();
+      metal::conditional_t<is_bake,
+                           IntegratorBakeState,
+                           metal::conditional_t<is_shadow, IntegratorShadowState, int>>>();
   static_assert(index >= 0, "Shader interpreter instantiation has no Metal visible function");
   int state_index = 0;
   if constexpr (!is_bake) {
