@@ -345,7 +345,17 @@ ccl_device_intersect bool scene_intersect(KernelGlobals kg,
         return false;
       }
       return true;
-  }
+    }
+#  ifdef __GSPLATS__
+    if (prim_type & PRIMITIVE_GSPLAT) {
+      /* The intersection function accepted this stochastic hit, at the reported distance. */
+      isect->prim = prim;
+      isect->type = prim_type;
+      isect->u = 0.0f;
+      isect->v = 0.0f;
+      return true;
+    }
+#  endif
 #endif /* __POINTCLOUD__ */
   }
 
@@ -424,14 +434,12 @@ ccl_device_forceinline float3 metalrt_local_hit_normal(KernelGlobals kg,
   }
 #  endif
 
+  /* Positions have their own array, `position_offset` does not index `attributes_float3`. */
   const int position_offset = kernel_data_fetch(objects, object).position_offset;
   const packed_uint3 tri_vindex = kernel_data_fetch(tri_vindex, prim);
-  const float3 tri_a = float3(
-      kernel_data_fetch(attributes_float3, position_offset + tri_vindex.x));
-  const float3 tri_b = float3(
-      kernel_data_fetch(attributes_float3, position_offset + tri_vindex.y));
-  const float3 tri_c = float3(
-      kernel_data_fetch(attributes_float3, position_offset + tri_vindex.z));
+  const float3 tri_a = float3(kernel_data_fetch(tri_verts, position_offset + tri_vindex.x));
+  const float3 tri_b = float3(kernel_data_fetch(tri_verts, position_offset + tri_vindex.y));
+  const float3 tri_c = float3(kernel_data_fetch(tri_verts, position_offset + tri_vindex.z));
   return normalize(cross(tri_b - tri_a, tri_c - tri_a));
 }
 
