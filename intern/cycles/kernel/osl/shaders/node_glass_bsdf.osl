@@ -21,7 +21,6 @@ shader node_glass_bsdf(color Color = 0.8,
                        float DiffractionDepth = 150.0,
                        float DiffractionDutyCycle = 0.5,
                        int diffraction_two_sided_handle_plus_one = 0,
-                       vector Tangent = vector(0.0),
                        normal Normal = N,
                        normal Tangent = 0.0,
                        output closure color BSDF = 0)
@@ -58,7 +57,7 @@ shader node_glass_bsdf(color Color = 0.8,
 
   float grating_weight = clamp(DiffractionWeight, 0.0, 1.0);
   BSDF = (1.0 - grating_weight) * generalized_schlick_bsdf(Normal,
-                                  vector(0.0),
+                                  T,
                                   base_color,
                                   base_color,
                                   alpha_x,
@@ -72,9 +71,9 @@ shader node_glass_bsdf(color Color = 0.8,
                                   "thinfilm_thickness",
                                   ThinFilmThickness,
                                   "thinfilm_ior",
-                                  thinfilm_ior);
+                                  ThinFilmIOR);
   if (grating_weight > 0.0) {
-    vector tangent = Tangent == vector(0.0) ? dPdu : Tangent;
+    vector tangent = vector(Tangent) == vector(0.0) ? dPdu : vector(Tangent);
     BSDF += grating_weight * diffraction_glass(Normal, tangent, base_color, Roughness,
         IOR, DiffractionPitch, DiffractionDepth, DiffractionDutyCycle,
         ThinFilmIOR, ThinFilmThickness, distribution == "beckmann",

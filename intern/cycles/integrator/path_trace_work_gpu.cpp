@@ -33,6 +33,7 @@ static bool use_bidirectional_path_tracing(const DeviceScene *device_scene)
 }
 
 static size_t estimate_single_state_size(const uint64_t kernel_features,
+                                         const int volume_stack_size,
                                          const DeviceType device_type)
 {
   size_t state_size = 0;
@@ -72,12 +73,6 @@ static size_t estimate_single_state_size(const uint64_t kernel_features,
     break; \
   } \
   }
-/* TODO(sergey): Look into better estimation for fields which depend on scene features. Maybe
- * maximum state calculation should happen as `alloc_work_memory()`, so that we can react to an
- * updated scene state here.
- * For until then use common value. Currently this size is only used for logging, but is weak to
- * rely on this. */
-#define KERNEL_STRUCT_VOLUME_STACK_SIZE 4
 #define KERNEL_STRUCT_CPU_GUIDING_FEATURE 0
 #define KERNEL_STRUCT_GPU_GUIDING_FEATURE \
   (device_type == DEVICE_METAL ? KERNEL_FEATURE_PATH_GUIDING : 0)
@@ -179,8 +174,8 @@ void PathTraceWorkGPU::alloc_integrator_soa()
   /* Determine the number of path states. Deferring this for as long as possible allows the
    * back-end to make better decisions about memory availability. */
   if (max_num_paths_ == 0) {
-    const size_t single_state_size = estimate_single_state_size(kernel_features,
-                                                                device_->info.type);
+    const size_t single_state_size = estimate_single_state_size(
+        kernel_features, integrator_state_soa_volume_stack_size_, device_->info.type);
 
     max_num_paths_ = queue_->num_concurrent_states(single_state_size);
 
@@ -1311,7 +1306,14 @@ bool PathTraceWorkGPU::enqueue_path_iteration()
     compact_shadow_paths();
 
     /* Number of shadow paths that may be created for every scheduled path. */
-    const int shadow_paths_per_path = kernel_creates_ao_paths(kernel) ? 2 : 1;
+    int shadow_paths_per_path = kernel_creates_ao_paths(kernel) ? 2 : 1;
+    if (use_bidirectional_path_tracing(device_scene_) &&
+        (kernel_creates_ao_paths(kernel) || kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE))
+    {
+      /* Surface shading can also branch to a BDPT vertex connection. */
+      shadow_paths_per_path++;
+    }
 
     int available_shadow_paths = max_num_paths_ - integrator_next_shadow_path_index_.data()[0];
 
@@ -1336,20 +1338,17 @@ bool PathTraceWorkGPU::enqueue_path_iteration()
         available_shadow_paths = max_num_paths_ - integrator_next_shadow_path_index_.data()[0];
       }
     }
-    else if (kernel_creates_ao_paths(kernel) ||
-             (use_bidirectional_path_tracing(device_scene_) &&
-              (kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE ||
-               kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE)))
-    {
-      /* Surface shading can branch to direct light, AO, and a BDPT vertex connection. */
-      int shadow_paths_per_state = 1;
-      if (kernel_creates_ao_paths(kernel)) {
-        shadow_paths_per_state++;
-      }
-      if (use_bidirectional_path_tracing(device_scene_)) {
-        shadow_paths_per_state++;
-      }
-      num_paths_limit = available_shadow_paths / shadow_paths_per_state;
+
+    /* Limit number of scheduled paths to the available shadow path space. */
+    num_paths_limit = available_shadow_paths / shadow_paths_per_path;
+
+    if (kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE) {
+      /* MNEE should not fill in more than half the available shadow paths,
+       * so there is room to run integrator_shade_surface, which is the only
+       * kernel that can release MNEE shadow paths. */
+      const int num_mnee_paths =
+          queue_counter->num_queued[DEVICE_KERNEL_INTEGRATOR_SHADOW_PATH_MNEE_PENDING];
+      num_paths_limit = min(num_paths_limit, max(max_num_paths_ / 2 - num_mnee_paths, 1));
     }
   }
 

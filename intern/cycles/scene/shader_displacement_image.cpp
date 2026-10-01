@@ -63,6 +63,12 @@ class DisplacementImageProgram {
     return true;
   }
 
+  /* The kernel evaluates the image and attribute fallback values without a stack. */
+  static bool constant(const SVMInputFloat input)
+  {
+    return (input.bits >> 8) != (SVM_INPUT_STACK_OFFSET_MASK >> 8);
+  }
+
   Value input(const SVMInputFloat input) const
   {
     if ((input.bits >> 8) == (SVM_INPUT_STACK_OFFSET_MASK >> 8)) {
@@ -108,7 +114,8 @@ class DisplacementImageProgram {
           SVMNodeAttr node;
           if (attribute_ || !read(node) || node.output_type != NODE_ATTR_OUTPUT_FLOAT3 ||
               node.bump_offset != NODE_BUMP_OFFSET_CENTER ||
-              (type == NODE_ATTR_DERIVATIVE && !node.store_derivatives))
+              (type == NODE_ATTR_DERIVATIVE && !node.store_derivatives) ||
+              !constant(node.missing.x) || !constant(node.missing_alpha))
           {
             return false;
           }
@@ -141,6 +148,7 @@ class DisplacementImageProgram {
           SVMNodeTexImage node;
           const bool derivatives = type == NODE_TEX_IMAGE_DERIVATIVE;
           if (image_ || !read(node) || derivatives != bool(result.use_derivatives) ||
+              !constant(node.missing.x) || !constant(node.missing_alpha) ||
               !matches(node.co, result.use_mapping ? MAPPED : COORDINATE, derivatives ? 9 : 3))
           {
             return false;

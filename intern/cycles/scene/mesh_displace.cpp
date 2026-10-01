@@ -771,7 +771,7 @@ static bool pixel_displacement_normal_inputs(DeviceScene *dscene,
   bool tangential = false;
   for (int i = 0; i < 3; i++) {
     const int index = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 + i : indices[i];
-    float3 Q = dscene->attributes_normal[object.normal_offset + index].decode();
+    float3 Q = dscene->attributes_normal[object.mesh_volume.normal_offset + index].decode();
     if (flag & SD_OBJECT_TRANSFORM_APPLIED) {
       Q = transform_direction(&object.tfm, transform_direction_transposed(&object.tfm, Q));
     }
@@ -933,7 +933,7 @@ static int build_pixel_displacement_direct_bounds(DeviceScene *dscene,
     }
     p[i] = float3(mesh->get_position()[tri.v[i]]);
     const int ni = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 + i : indices[i];
-    n[i] = dscene->attributes_normal[object.normal_offset + ni].decode();
+    n[i] = dscene->attributes_normal[object.mesh_volume.normal_offset + ni].decode();
   }
   frame[2] = safe_normalize(n[0] + n[1] + n[2]);
   if (is_zero(frame[2])) {
@@ -1125,7 +1125,7 @@ static void build_pixel_displacement_patch_bvh(DeviceScene *dscene,
         const KernelObject &object = dscene->objects[object_index];
         const int normal_index = (flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 : indices.x;
         float3 N = safe_normalize(
-            dscene->attributes_normal[object.normal_offset + normal_index].decode());
+            dscene->attributes_normal[object.mesh_volume.normal_offset + normal_index].decode());
         if (is_zero(N)) {
           N = safe_normalize(cross(e0, e1));
           if ((flag & SD_OBJECT_NEGATIVE_SCALE) && (flag & SD_OBJECT_TRANSFORM_APPLIED)) {

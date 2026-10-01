@@ -182,24 +182,30 @@ KERNEL_STRUCT_MEMBER(guiding, bool, use_surface_guiding, KERNEL_STRUCT_CPU_GUIDI
 /* Random number used for additional guiding decisions (e.g., cache query, selection to use guiding
  * or BSDF sampling) */
 KERNEL_STRUCT_MEMBER(guiding,
-                     float,
+                     FloatCompressedOnGPU,
                      sample_surface_guiding_rand,
                      KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* The probability to use surface guiding (i.e., diffuse sampling prob * guiding prob). */
 KERNEL_STRUCT_MEMBER(guiding,
-                     float,
+                     FloatCompressedOnGPU,
                      surface_guiding_sampling_prob,
                      KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* Probability of sampling a BSSRDF closure instead of a BSDF closure. */
-KERNEL_STRUCT_MEMBER(guiding, float, bssrdf_sampling_prob, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(guiding,
+                     FloatCompressedOnGPU,
+                     bssrdf_sampling_prob,
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* If volume guiding is enabled */
 KERNEL_STRUCT_MEMBER(guiding, bool, use_volume_guiding, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* Random number used for additional guiding decisions (e.g., cache query, selection to use guiding
  * or BSDF sampling) */
-KERNEL_STRUCT_MEMBER(guiding, float, sample_volume_guiding_rand, KERNEL_STRUCT_CPU_GUIDING_FEATURE)
+KERNEL_STRUCT_MEMBER(guiding,
+                     FloatCompressedOnGPU,
+                     sample_volume_guiding_rand,
+                     KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 /* The probability to use surface guiding (i.e., diffuse sampling prob * guiding prob). */
 KERNEL_STRUCT_MEMBER(guiding,
-                     float,
+                     FloatCompressedOnGPU,
                      volume_guiding_sampling_prob,
                      KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 KERNEL_STRUCT_END(guiding)

@@ -63,7 +63,7 @@ KERNEL_STRUCT_MEMBER(shadow_path, uint8_t, lightgroup, KERNEL_FEATURE_PATH_TRACI
 #  define KERNEL_STRUCT_CPU_GUIDING_LOCAL
 #endif
 KERNEL_STRUCT_MEMBER(shadow_path,
-                     PackedSpectrum,
+                     SpectrumCompressedOnGPU,
                      unlit_throughput,
                      KERNEL_STRUCT_CPU_GUIDING_FEATURE)
 #if defined(__PATH_GUIDING__)

@@ -910,8 +910,17 @@ void BVHEmbree::refit(Progress &progress)
               user_geometry = true;
             }
           }
-          if (!user_geometry) {
+          if (user_geometry) {
+            /* Updated above. */
+          }
+          else if (pointcloud->primitive_type() & PRIMITIVE_POINT) {
             set_point_vertex_buffer(geom, pointcloud, true);
+          }
+          else {
+            assert(pointcloud->primitive_type() & PRIMITIVE_GSPLAT);
+            rtcSetGeometryUserData(geom, const_cast<PointCloud *>(pointcloud));
+            rtcSetGeometryUserPrimitiveCount(geom, pointcloud->num_points());
+            rtcSetGeometryBoundsFunction(geom, gsplat_bounds_func, nullptr);
           }
           rtcCommitGeometry(geom);
         }

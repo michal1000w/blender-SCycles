@@ -625,7 +625,6 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.itfm = itfm;
   kobject.displacement_transform_bound = displacement_transform_bound(tfm);
   kobject.displacement_inverse_bound = displacement_transform_bound(itfm);
-  kobject.volume_density = object_volume_density(tfm, geom);
   kobject.color[0] = color.x;
   kobject.color[1] = color.y;
   kobject.color[2] = color.z;

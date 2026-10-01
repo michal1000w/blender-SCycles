@@ -16,6 +16,11 @@ void node_bsdf_glossy(float4 color,
                       float3 N,
                       float3 /*T*/, /* Unsupported. */
                       float weight,
+                      float /*diffraction_weight*/,     /* Unsupported. */
+                      float /*diffraction_pitch*/,      /* Unsupported. */
+                      float /*diffraction_depth*/,      /* Unsupported. */
+                      float /*diffraction_duty*/,       /* Unsupported. */
+                      float /*diffraction_medium_ior*/, /* Unsupported. */
                       const float do_multiscatter,
                       [[resource_table]] KernelGlobals &kg,
                       ShadingData &sd,
