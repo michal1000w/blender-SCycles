@@ -13,11 +13,15 @@ namespace nodes::node_shader_bsdf_diffraction_cc {
 
 static void node_declare(NodeDeclarationBuilder &b)
 {
+  const bNodeTree *ntree = b.tree_or_null();
+  const bool is_gpu_internal = ntree && (ntree->flag & NTREE_IS_GPU_SHADER_INTERNAL);
+
   b.add_input<decl::Color>("Color"_ustr).default_value({1, 1, 1, 1});
   b.add_input<decl::Vector>("Normal"_ustr).hide_value();
   b.add_input<decl::Vector>("Tangent"_ustr)
       .hide_value()
       .description("Direction across the grooves in the surface tangent plane");
+  b.add_input<decl::Float>("Weight"_ustr).available(is_gpu_internal);
   b.add_output<decl::Shader>("BSDF"_ustr);
 }
 
@@ -46,6 +50,27 @@ static void node_buttons(ui::Layout &layout, bContext * /*context*/, PointerRNA 
   }
 }
 
+/* EEVEE has no spectral grating model, it previews the node as a mirror tinted by its color. */
+static int node_shader_gpu_bsdf_diffraction(GPUMaterial *mat,
+                                            bNode *node,
+                                            bNodeExecData * /*execdata*/,
+                                            GPUNodeStack *in,
+                                            GPUNodeStack *out)
+{
+  if (!in[1].link) {
+    GPU_link(mat, "world_normals_get", GPU_shading_data(), &in[1].link);
+  }
+
+  GPU_material_flag_set(mat, GPU_MATFLAG_GLOSSY);
+
+  if (in[0].might_be_tinted()) {
+    GPU_material_flag_set(mat, GPU_MATFLAG_REFLECTION_MAYBE_COLORED);
+  }
+
+  return GPU_stack_link(
+      mat, node, "node_bsdf_diffraction", in, out, GPU_kernel_globals(), GPU_shading_data());
+}
+
 }  // namespace nodes::node_shader_bsdf_diffraction_cc
 
 void register_node_type_sh_bsdf_diffraction()
@@ -61,6 +86,7 @@ void register_node_type_sh_bsdf_diffraction()
   ntype.declare = file_ns::node_declare;
   ntype.initfunc = file_ns::node_init;
   ntype.draw_buttons = file_ns::node_buttons;
+  ntype.gpu_fn = file_ns::node_shader_gpu_bsdf_diffraction;
   ntype.gather_link_search_ops = search_link_ops_for_shader_bsdf_node;
   bke::node_type_storage(
       ntype, "NodeShaderDiffraction", node_free_standard_storage, node_copy_standard_storage);
