@@ -276,8 +276,17 @@ ConcurrentStatesParams MetalDeviceQueue::concurrent_states_params() const
   }
 
   /* Keep 10% of the working set free, and only grow within half of the remaining memory.
-   * Limit to 4x the baseline, we see diminishing returns after that. */
-  params.max = params.baseline * 4;
+   * Limit to 4x the baseline, we see diminishing returns after that.
+   *
+   * The GPUs of the base chips gain nothing beyond 2x: on a 10 core M5 with 16 GB, 1280x1280
+   * renders with 96 samples are no faster with 4x than with 2x, and volume and guiding scenes
+   * are slower (guiding 12% to 12x, depending on the run). Every kernel that visits the whole
+   * state array gets slower with more states, so short renders and viewport updates took
+   * twice as long with 4x, light-cache transport 3x and guiding 10x.
+   * CYCLES_CONCURRENT_STATES_MAX overrides the limit. */
+  const int gpu_core_count = MetalInfo::get_apple_gpu_core_count(metal_device_->mtlDevice);
+  const bool base_chip_gpu = gpu_core_count > 0 && gpu_core_count < 16;
+  params.max = params.baseline * (base_chip_gpu ? 2 : 4);
   return params;
 }
 
