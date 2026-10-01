@@ -1121,6 +1121,10 @@ template<> int metal_visible_state<int>(int state)
 {
   return state;
 }
+template<> IntegratorShadowState metal_visible_state<IntegratorShadowState>(int state)
+{
+  return IntegratorShadowState(state);
+}
 template<> IntegratorBakeState metal_visible_state<IntegratorBakeState>(int /*state*/)
 {
   return IntegratorBakeState();
