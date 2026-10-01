@@ -118,15 +118,16 @@ ccl_device_inline bool pixel_displacement_shared_edge_shadow_hit(
   }
 
   const int position_offset = kernel_data_fetch(objects, object).position_offset;
+  /* Positions have their own array, `position_offset` does not index `attributes_float3`. */
   const float3 self_verts[3] = {
-      kernel_data_fetch(attributes_float3, position_offset + self_tri.x),
-      kernel_data_fetch(attributes_float3, position_offset + self_tri.y),
-      kernel_data_fetch(attributes_float3, position_offset + self_tri.z),
+      kernel_data_fetch(tri_verts, position_offset + self_tri.x),
+      kernel_data_fetch(tri_verts, position_offset + self_tri.y),
+      kernel_data_fetch(tri_verts, position_offset + self_tri.z),
   };
   const float3 hit_verts[3] = {
-      kernel_data_fetch(attributes_float3, position_offset + hit_tri.x),
-      kernel_data_fetch(attributes_float3, position_offset + hit_tri.y),
-      kernel_data_fetch(attributes_float3, position_offset + hit_tri.z),
+      kernel_data_fetch(tri_verts, position_offset + hit_tri.x),
+      kernel_data_fetch(tri_verts, position_offset + hit_tri.y),
+      kernel_data_fetch(tri_verts, position_offset + hit_tri.z),
   };
   const uint object_flag = kernel_data_fetch(object_flag, object);
   const float3 self_Ng = pixel_displacement_face_normal(self_verts, object_flag);
