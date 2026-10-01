@@ -517,11 +517,26 @@ using MetalDiffractionFunction = bool(constant void *launch_params,
                                       thread float *powers);
 #endif
 
+#ifdef __KERNEL_METAL_OSL_CAMERA__
+/* A custom camera shader, translated from OSL and compiled by the device for each scene, see
+ * `device/metal/osl_camera.h`. `input` and `output` are the arrays described there. */
+using MetalOSLCameraFunction = void(constant void *launch_params,
+                                    device const uint *params,
+                                    thread const float *input,
+                                    thread float *output);
+#endif
+
 /* Additional Metal-specific resources which aren't encoded in KernelData.
  * IMPORTANT: If this layout changes, ANCILLARY_SLOT_COUNT and the host-side encoding must change
  * to match. */
 struct MetalAncillaries {
   device TextureParamsMetal *textures;
+
+#ifdef __KERNEL_METAL_OSL_CAMERA__
+  /* Only the camera ray kernel calls this function, and only for custom cameras. The slot
+   * directly follows the textures, so its position is the same in every library variant. */
+  metal::visible_function_table<MetalOSLCameraFunction> vft_osl_camera;
+#endif
 
 #ifdef __KERNEL_METALRT__
   metalrt_as_type accel_struct;

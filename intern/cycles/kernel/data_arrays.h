@@ -30,6 +30,8 @@ KERNEL_DATA_ARRAY(uint, object_prim_offset)
 
 /* cameras */
 KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)
+/* Parameter values of a custom camera shader translated for the GPU, as 32 bit words. */
+KERNEL_DATA_ARRAY(uint, camera_script_params)
 
 /* triangles */
 KERNEL_DATA_ARRAY(uint, tri_shader)

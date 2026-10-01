@@ -15,6 +15,7 @@
 
 #  include "device/metal/device_impl.h"
 #  include "device/metal/kernel.h"
+#  include "device/metal/osl_camera.h"
 
 #  include "kernel/device/metal/function_constants.h"
 
@@ -181,6 +182,8 @@ struct ShaderCache {
   std::map<std::pair<const MetalVisibleFunctions *, int>,
            std::shared_ptr<MetalDisplacementFunctions>>
       displacement_functions;
+  /* Custom camera functions by the key of their source, the most recent last. */
+  std::vector<std::shared_ptr<MetalCameraFunction>> camera_functions;
   /* Requests that are queued or compiling, to avoid compiling the same pipeline twice. */
   std::set<std::pair<DeviceKernel, string>> in_flight;
   std::deque<unique_ptr<MetalKernelPipeline>> link_queue;
@@ -656,6 +659,8 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
     pipeline->visible_functions = device->visible_functions;
   }
   pipeline->device_kernel = device_kernel;
+  pipeline->camera_function_callable = device->use_osl_camera_function &&
+                                       metal_kernel_uses_camera_function(device_kernel);
   pipeline->threads_per_threadgroup = device->max_threads_per_threadgroup;
 
   if (occupancy_tuning[device_kernel].threads_per_threadgroup) {
@@ -1265,6 +1270,45 @@ MetalKernelPipeline::~MetalKernelPipeline()
   for (auto &it : displacement_pipelines_) {
     [it.second release];
   }
+  for (auto &it : camera_pipelines_) {
+    [it.second release];
+  }
+}
+
+MetalCameraFunction::~MetalCameraFunction()
+{
+  [function release];
+}
+
+id<MTLComputePipelineState> MetalKernelPipeline::camera_pipeline(
+    const MetalCameraFunction &camera) const
+{
+  thread_scoped_lock lock(displacement_mutex_);
+  for (const auto &it : camera_pipelines_) {
+    if (it.first == camera.function_id) {
+      return it.second;
+    }
+  }
+  id<MTLComputePipelineState> result = nil;
+  if (pipeline && camera.function) {
+    /* Linking a finished binary does not recompile the pipeline. */
+    NSError *error = nil;
+    result = [pipeline newComputePipelineStateWithAdditionalBinaryFunctions:@[ camera.function ]
+                                                                      error:&error];
+    if (!result) {
+      LOG_ERROR << "Failed to link the custom camera function into "
+                << device_kernel_as_string(device_kernel) << ": "
+                << (error ? [[error localizedDescription] UTF8String] : "nil");
+    }
+  }
+  /* Keep the pipelines of a few cameras, for switching between them. Dispatch pipelines retain
+   * the one they use. Failures are remembered as well. */
+  if (camera_pipelines_.size() >= 4) {
+    [camera_pipelines_.front().second release];
+    camera_pipelines_.erase(camera_pipelines_.begin());
+  }
+  camera_pipelines_.emplace_back(camera.function_id, result);
+  return result;
 }
 
 id<MTLComputePipelineState> MetalKernelPipeline::displacement_pipeline(
@@ -1390,10 +1434,19 @@ void MetalDispatchPipeline::free_visible_function_tables()
   use_visible_shading = false;
 }
 
+void MetalDispatchPipeline::free_camera_function_table()
+{
+  if (camera_func_table) {
+    metal_device->metal_mem_free(camera_func_table);
+    camera_func_table = nil;
+  }
+}
+
 MetalDispatchPipeline::~MetalDispatchPipeline()
 {
   free_intersection_function_tables();
   free_visible_function_tables();
+  free_camera_function_table();
   [pipeline release];
 }
 
@@ -1433,14 +1486,47 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
   }
   const int new_displacement_key = displacement ? displacement->key() : -1;
 
-  if (pipeline_id == best_pipeline->pipeline_id && displacement_key == new_displacement_key) {
+  /* The camera function of a custom camera. Camera ray kernels do not shade, so they never
+   * have displacement functions as well. */
+  std::shared_ptr<MetalCameraFunction> camera;
+  id<MTLComputePipelineState> camera_pso = nil;
+  if (best_pipeline->camera_function_callable) {
+    camera = metal_device->current_osl_camera_function();
+    if (!camera && metal_device->launch_params->data.cam.type == CAMERA_CUSTOM) {
+      /* A custom camera without a shader, or with one that could not be translated, renders
+       * black as on other devices. The kernel calls the function for every custom camera. */
+      string null_error;
+      camera = MetalDeviceKernels::compile_camera_function(metal_device, "", "", null_error);
+      if (!camera) {
+        metal_device->set_error("Failed to compile the Metal camera function: " + null_error);
+        return false;
+      }
+    }
+    if (camera) {
+      camera_pso = best_pipeline->camera_pipeline(*camera);
+      if (!camera_pso) {
+        metal_device->set_error(
+            "Failed to link the custom camera shader into the Metal kernel. See the Cycles log "
+            "for details.");
+        return false;
+      }
+    }
+  }
+  const int new_camera_function_id = camera ? camera->function_id : -1;
+
+  if (pipeline_id == best_pipeline->pipeline_id && displacement_key == new_displacement_key &&
+      camera_function_id == new_camera_function_id)
+  {
     /* The best pipeline is already active - nothing to do. */
     return true;
   }
   pipeline_id = best_pipeline->pipeline_id;
   displacement_key = new_displacement_key;
+  camera_function_id = new_camera_function_id;
   [pipeline release];
-  pipeline = [(displacement_pso ? displacement_pso : best_pipeline->pipeline) retain];
+  pipeline = [(camera_pso ? camera_pso :
+               displacement_pso ? displacement_pso :
+                                  best_pipeline->pipeline) retain];
   pso_type = best_pipeline->pso_type;
   num_threads_per_block = best_pipeline->num_threads_per_block;
   use_metalrt = best_pipeline->use_metalrt;
@@ -1449,6 +1535,24 @@ bool MetalDispatchPipeline::update(MetalDevice *metal_device, DeviceKernel kerne
    * A coherent surface pipeline has tables; an ordinary surface pipeline does not. */
   free_intersection_function_tables();
   free_visible_function_tables();
+  free_camera_function_table();
+
+  if (camera) {
+    @autoreleasepool {
+      MTLVisibleFunctionTableDescriptor *vft_desc =
+          [[[MTLVisibleFunctionTableDescriptor alloc] init] autorelease];
+      vft_desc.functionCount = 1;
+      camera_func_table = [pipeline newVisibleFunctionTableWithDescriptor:vft_desc];
+      id<MTLFunctionHandle> handle = [pipeline functionHandleWithFunction:camera->function];
+      if (!camera_func_table || !handle) {
+        metal_device->set_error(string_printf("Failed to create Metal camera function table for %s",
+                                              device_kernel_as_string(kernel)));
+        return false;
+      }
+      [camera_func_table setFunction:handle atIndex:0];
+      metal_device->metal_mem_alloc(camera_func_table);
+    }
+  }
 
   /* Function handles are specific to the pipeline that linked the shading functions. */
   if (best_pipeline->visible_functions) {
@@ -1732,6 +1836,11 @@ void MetalKernelPipeline::compile()
   computePipelineStateDescriptor.maxCallStackDepth = 1;
   if (use_metalrt && metal_kernel_has_intersection(device_kernel, kernel_features)) {
     computePipelineStateDescriptor.maxCallStackDepth = 2;
+  }
+  if (camera_function_callable) {
+    /* The camera function of a custom camera is compiled for the scene and added to the
+     * finished pipeline. It calls no other functions. */
+    computePipelineStateDescriptor.supportAddingBinaryFunctions = YES;
   }
   if (visible_functions) {
     /* The shading functions compile concurrently with this pipeline and are added afterwards.
@@ -2082,6 +2191,159 @@ void MetalDeviceKernels::prewarm_visible_functions(id<MTLDevice> mtlDevice,
           }
         }
       });
+}
+
+/* Offsets of kernel data read by translated camera shaders, in floats from the start of the
+ * kernel parameters. The buffer has the layout of the host structure. */
+static string camera_function_kernel_offsets(const MetalDevice *device)
+{
+  const KernelParamsMetal *params = device->launch_params;
+  const KernelData &data = params->data;
+  const auto define = [&](const char *name, const void *member) {
+    const size_t offset = (const char *)member - (const char *)params;
+    assert(offset % sizeof(float) == 0);
+    return string_printf("#define OSL_KD_%s %d\n", name, int(offset / sizeof(float)));
+  };
+  string defines;
+  defines += define("CAM_SENSORWIDTH", &data.cam.sensorwidth);
+  defines += define("CAM_SENSORHEIGHT", &data.cam.sensorheight);
+  defines += define("CAM_WIDTH", &data.cam.width);
+  defines += define("CAM_HEIGHT", &data.cam.height);
+  defines += define("CAM_INV_APERTURE_RATIO", &data.cam.inv_aperture_ratio);
+  defines += define("CAM_APERTURESIZE", &data.cam.aperturesize);
+  defines += define("CAM_FOCALDISTANCE", &data.cam.focaldistance);
+  defines += define("CAM_CAMERATOWORLD", &data.cam.cameratoworld);
+  defines += define("CAM_WORLDTOCAMERA", &data.cam.worldtocamera);
+  defines += define("CAM_SCREENTOWORLD", &data.cam.screentoworld);
+  defines += define("CAM_RASTERTOWORLD", &data.cam.rastertoworld);
+  defines += define("CAM_NDCTOWORLD", &data.cam.ndctoworld);
+  defines += define("CAM_WORLDTOSCREEN", &data.cam.worldtoscreen);
+  defines += define("CAM_WORLDTORASTER", &data.cam.worldtoraster);
+  defines += define("CAM_WORLDTONDC", &data.cam.worldtondc);
+  defines += define("SCENE_TIME", &data.scene_time.time);
+  defines += define("SCENE_FRAME", &data.scene_time.frame);
+  return defines;
+}
+
+/* Floating point optimizations of translated camera shaders: 0 is safe, 1 relaxed and 2 fast.
+ * Relaxed math reorders operations but keeps infinities and NaN meaningful, which shaders test
+ * for. It renders complex lens shaders about 30% faster than safe math, and its results differ
+ * from other devices no more than those of safe math do. */
+#  define METAL_CAMERA_FUNCTION_MATH_MODE 1
+
+/* Camera function of a custom camera without shader: no ray is generated. */
+static const char *null_camera_function_source =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "[[visible]] void " METAL_OSL_CAMERA_FUNCTION_NAME
+    "(constant void *lp, device const uint *prm, thread const float *in, thread float *out)\n"
+    "{\n"
+    "  for (int i = 0; i < 21; i++) {\n"
+    "    out[i] = 0.0f;\n"
+    "  }\n"
+    "}\n";
+
+std::shared_ptr<MetalCameraFunction> MetalDeviceKernels::compile_camera_function(
+    MetalDevice *device, const string &key, const string &source, string &error)
+{
+  static std::atomic_int next_camera_function_id = 0;
+  /* One compilation at a time, so that the same source never compiles twice. */
+  static thread_mutex compile_mutex;
+  thread_scoped_lock compile_lock(compile_mutex);
+
+  id<MTLDevice> mtlDevice = device->mtlDevice;
+  ShaderCache *shader_cache = get_shader_cache(mtlDevice);
+  {
+    thread_scoped_lock lock(shader_cache->cache_mutex);
+    auto &functions = shader_cache->camera_functions;
+    for (size_t i = 0; i < functions.size(); i++) {
+      if (functions[i]->key == key) {
+        /* Most recently used last. */
+        std::shared_ptr<MetalCameraFunction> function = functions[i];
+        functions.erase(functions.begin() + i);
+        functions.push_back(function);
+        return function;
+      }
+    }
+  }
+
+  id<MTLFunction> function = nil;
+  if (@available(macOS 13.0, *)) {
+    @autoreleasepool {
+      const double start_time = time_dt();
+      const string full_source = key.empty() ?
+                                     string(null_camera_function_source) :
+                                     camera_function_kernel_offsets(device) + source;
+
+      if (getenv("CYCLES_METAL_PROFILING") || getenv("CYCLES_METAL_DEBUG")) {
+        path_write_text(path_cache_get("osl_camera.metal"), full_source);
+      }
+
+      MTLCompileOptions *options = [[[MTLCompileOptions alloc] init] autorelease];
+      int math_mode = METAL_CAMERA_FUNCTION_MATH_MODE;
+      if (const char *str = getenv("CYCLES_METAL_OSL_CAMERA_MATH_MODE")) {
+        math_mode = atoi(str);
+      }
+      /* Before macOS 15 there is only safe and fast math. */
+      options.fastMathEnabled = (math_mode == 2);
+      options.languageVersion = MTLLanguageVersion3_0;
+#  if defined(MAC_OS_VERSION_14_0)
+      if (@available(macos 14.0, *)) {
+        options.languageVersion = MTLLanguageVersion3_1;
+      }
+#  endif
+#  if defined(MAC_OS_VERSION_15_0)
+      if (@available(macos 15.0, *)) {
+        options.languageVersion = MTLLanguageVersion3_2;
+        options.mathMode = (math_mode == 0) ? MTLMathModeSafe :
+                           (math_mode == 1) ? MTLMathModeRelaxed :
+                                              MTLMathModeFast;
+      }
+#  endif
+
+      NSError *compile_error = nil;
+      id<MTLLibrary> library = [[mtlDevice newLibraryWithSource:@(full_source.c_str())
+                                                        options:options
+                                                          error:&compile_error] autorelease];
+      if (library) {
+        MTLFunctionDescriptor *desc = [MTLFunctionDescriptor functionDescriptor];
+        desc.name = @METAL_OSL_CAMERA_FUNCTION_NAME;
+        desc.options = MTLFunctionOptionCompileToBinary;
+        compile_error = nil;
+        function = [library newFunctionWithDescriptor:desc error:&compile_error];
+      }
+      if (!function) {
+        error = compile_error ? [[compile_error localizedDescription] UTF8String] :
+                                "unknown error";
+      }
+      else {
+        function.label = @METAL_OSL_CAMERA_FUNCTION_NAME;
+        metal_printf("Custom camera function compiled in %.2f seconds (%d bytes of source)",
+                     time_dt() - start_time,
+                     int(full_source.size()));
+      }
+    }
+  }
+  else {
+    error = "unsupported macOS version";
+  }
+  if (!function) {
+    return nullptr;
+  }
+
+  std::shared_ptr<MetalCameraFunction> result = std::make_shared<MetalCameraFunction>();
+  result->function_id = next_camera_function_id.fetch_add(1);
+  result->key = key;
+  result->function = function;
+
+  thread_scoped_lock lock(shader_cache->cache_mutex);
+  auto &functions = shader_cache->camera_functions;
+  /* Keep the functions of a few cameras, for switching between them. */
+  if (functions.size() >= 8) {
+    functions.erase(functions.begin());
+  }
+  functions.push_back(result);
+  return result;
 }
 
 void MetalKernelPipeline::link_visible_functions()
