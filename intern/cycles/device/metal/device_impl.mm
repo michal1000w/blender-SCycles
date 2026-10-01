@@ -51,6 +51,20 @@ bool MetalDevice::is_device_cancelled(const int ID)
   return get_device_by_ID(ID, lock) == nullptr;
 }
 
+vector<string> MetalDevice::active_kernels_md5(const MetalPipelineType pso_type)
+{
+  vector<string> result;
+  thread_scoped_lock lock(existing_devices_mutex);
+  for (const auto &item : active_device_ids) {
+    MetalDevice *device = item.second;
+    thread_scoped_lock md5_lock(device->kernels_md5_mutex);
+    if (!device->kernels_md5[pso_type].empty()) {
+      result.push_back(device->kernels_md5[pso_type]);
+    }
+  }
+  return result;
+}
+
 bool MetalDevice::use_metalrt_for_current_scene() const
 {
   const bool use_pixel_displacement = scene_use_pixel_displacement &&
@@ -787,7 +801,9 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
     /* Include kernel_features since it's specialized but missed by the constant_values loop. */
     md5.append(string_printf("kernel_features=%llu", launch_params->data.kernel_features));
   }
-  kernels_md5[pso_type] = md5.get_hex();
+  const string md5_hex = md5.get_hex();
+  thread_scoped_lock md5_lock(kernels_md5_mutex);
+  kernels_md5[pso_type] = md5_hex;
 }
 
 /* Whether the kernel source is the one installed with Blender, which the precompiled libraries

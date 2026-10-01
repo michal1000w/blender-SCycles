@@ -41,6 +41,8 @@ class MetalDevice : public Device {
   id<MTLCounterSampleBuffer> mtlCounterSampleBuffer = nil;
   string source[PSO_NUM];
   string kernels_md5[PSO_NUM];
+  /* Guards kernels_md5 against active_kernels_md5(), which compilation threads call. */
+  thread_mutex kernels_md5_mutex;
   string global_defines_md5[PSO_NUM];
 
   bool capture_enabled = false;
@@ -138,6 +140,10 @@ class MetalDevice : public Device {
   static std::map<int, MetalDevice *> active_device_ids;
 
   static bool is_device_cancelled(const int device_id);
+
+  /* Pipeline checksums that the active devices render with. The shader cache keeps their
+   * pipelines when it purges old variants. */
+  static vector<string> active_kernels_md5(MetalPipelineType pso_type);
 
   static MetalDevice *get_device_by_ID(const int device_idID,
                                        thread_scoped_lock &existing_devices_mutex_lock);
