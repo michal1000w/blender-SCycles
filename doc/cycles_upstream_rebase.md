@@ -50,6 +50,14 @@ These existed in the fork before the rebase; the upstream tests and cold caches 
    previews as a tinted mirror.
 4. **Kernel unit tests of the fork** crashed (null kernel globals) and one had a tolerance below
    its table's rounding.
+5. **Bevel and subsurface with MetalRT on rotated or scaled objects.** Local hit normals and the
+   pixel displacement shared-edge test read triangle positions from `attributes_float3`;
+   positions live in `tri_verts`. The Bevel node returned inward normals (black surfaces).
+   Upstream's `bevel`, `principled_bsdf_specular` and `principled_bsdf_subsurface` tests now
+   match the CPU with MetalRT.
+
+One gap of the merge itself was found by the MetalRT tests: Gaussian splats were intersected but
+shaded black, because the fork's MetalRT hit conversion only knew point primitives.
 
 One regression came from upstream itself and is fixed for this class of machine: the state
 growth described in section 6.
@@ -78,7 +86,8 @@ Machine: Apple M5, 16 GB, macOS 27.0. "Before" is the installed build of `ea71a9
 
 **New tests** in `tests/python`:
 
-* `cycles_fork_node_scenes.py`: 14 scenes for the nodes the fork adds or extends (gratings on
+* `cycles_fork_node_scenes.py`: 16 scenes (two with local rays on a transformed object, which
+  catch bug 5 when CPU and Metal are compared) for the nodes the fork adds or extends (gratings on
   Glass, Glossy, Refraction, Principled; polarizer; thin film; Fast Volume; Diffraction BSDF),
   SVM and OSL. CPU: bit-identical to the old build with the old colour constants.
 * `eevee_fork_node_test.py`: creates each such node, checks sockets (one Tangent, no duplicates)
@@ -90,6 +99,7 @@ Machine: Apple M5, 16 GB, macOS 27.0. "Before" is the installed build of `ea71a9
 |---|---|---|---|
 | CPU | 747 | 35 | all 35 (the old build fails 43) |
 | Metal (software BVH) | 715 | the same 35 | — |
+| MetalRT (16 directories) | 376 | 14, all among the 35 | — |
 
 The 35 are deviations of the fork from upstream's references, identical before and after except
 for the colour constants: spectral noise in tinted and thin glass, and pixel displacement
@@ -111,6 +121,8 @@ pass on CPU and Metal.
 * **Pixel displacement is on by default** and applies to upstream scenes with true displacement:
   grid lines along quad edges, and `vector_displacement_object` loses most of its surface. Same
   in the old build. These scenes are also slow on Metal (up to minutes).
+* `transparent_spatial_splits` shows dark speckles with MetalRT that vary from run to run, in
+  the old build as well; it passes or fails by chance.
 * Upstream features that have not been combined with fork features: Gaussian splats with
   BDPT/photons, anisotropic Glass with gratings or MNEE.
 * Metal results differ slightly from the old build wherever the GPU state now stores half
@@ -130,6 +142,7 @@ suite: complete render, Metal 160×160 with 64 samples, CPU 128×128 with 32 sam
 | Feature, CPU | 25 | 44.43 s | 44.56 s | +0.3 % |
 | Parity, CPU | 39 | 35.76 s | 35.80 s | +0.1 % |
 
+Measured before the last MetalRT fix (kernel position lookups, no effect on speed expected).
 No scene changed by more than 8 %; the old build's own spread between rounds is up to 10 %.
 Pixel displacement on upstream's displacement test scenes renders at the same speed in both
 builds (for example `true_displacement` 77 s and 74 s on Metal).

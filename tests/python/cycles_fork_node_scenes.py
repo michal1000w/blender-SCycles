@@ -44,6 +44,28 @@ def node_scene(args, idname, values=None, tangent=False, volume=False, props=Non
         add_sphere(mat)
     return node
 
+def local_hit_scene(args, subsurface):
+    """Rotated and scaled object whose shading traces local rays (Bevel node or subsurface
+    scattering). Local hit normals come from the triangle positions, which only differ from the
+    generated coordinates when the object is transformed."""
+    new_scene(args)
+    add_floor()
+    mat, bsdf = principled("Local hits", (0.8, 0.5, 0.3, 1), 0.3)
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    if subsurface:
+        bsdf.inputs["Subsurface Weight"].default_value = 1.0
+        bsdf.inputs["Subsurface Radius"].default_value = (0.3, 0.2, 0.1)
+    else:
+        bevel = nodes.new("ShaderNodeBevel")
+        bevel.inputs["Radius"].default_value = 0.1
+        links.new(bevel.outputs["Normal"], bsdf.inputs["Normal"])
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0.9))
+    cube = bpy.context.object
+    cube.rotation_euler = (0.3, 0.42, -0.6)
+    cube.scale = (1.4, 0.9, 1.1)
+    cube.data.materials.append(mat)
+
+
 def main():
     args = parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -89,6 +111,12 @@ def main():
         node_scene(args, "ShaderNodeBsdfPrincipled", {"Transmission Weight": 0.7, "Roughness": 0.2, "Thin Film Thickness": 350.0, "Diffraction Weight": 0.5})
         bpy.context.scene.cycles.shading_system = True
         finish(args, "principled_osl")
+    if want("bevel_transformed"):
+        local_hit_scene(args, subsurface=False)
+        finish(args, "bevel_transformed")
+    if want("subsurface_transformed"):
+        local_hit_scene(args, subsurface=True)
+        finish(args, "subsurface_transformed")
     if want("glossy_grating_osl"):
         node_scene(args, "ShaderNodeBsdfAnisotropic", {"Roughness": 0.22, "Diffraction Weight": 1.0}, tangent=True)
         bpy.context.scene.cycles.shading_system = True
