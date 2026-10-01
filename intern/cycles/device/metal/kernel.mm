@@ -248,6 +248,9 @@ void ShaderCache::publish(unique_ptr<MetalKernelPipeline> pipeline)
 {
   const DeviceKernel device_kernel = pipeline->device_kernel;
   const MetalPipelineType pso_type = pipeline->pso_type;
+  /* Collected before taking cache_mutex: devices request kernels while holding their own
+   * registry mutex. */
+  const vector<string> active_md5 = MetalDevice::active_kernels_md5(pso_type);
   {
     thread_scoped_lock lock(cache_mutex);
     if (pso_type == PSO_GENERIC) {
@@ -258,12 +261,18 @@ void ShaderCache::publish(unique_ptr<MetalKernelPipeline> pipeline)
     }
     auto &collection = pipelines[device_kernel];
 
-    /* Cache up to 3 kernel variants with the same pso_type in memory, purging oldest first. */
+    /* Cache up to 3 kernel variants with the same pso_type in memory, purging oldest first.
+     * Never purge the variant of an active device: it has already requested its kernels and
+     * waits for exactly this pipeline, see get_best_pipeline() and MetalDevice::is_ready().
+     * Other variants are published at any time by prewarming and by other devices. */
     int max_entries_of_same_pso_type = 3;
     for (int i = (int)collection.size() - 1; i >= 0; i--) {
       if (collection[i]->pso_type == pso_type) {
         max_entries_of_same_pso_type -= 1;
-        if (max_entries_of_same_pso_type == 0) {
+        if (max_entries_of_same_pso_type <= 0 &&
+            std::find(active_md5.begin(), active_md5.end(), collection[i]->kernels_md5) ==
+                active_md5.end())
+        {
           metal_printf("Purging oldest %s:%s kernel from ShaderCache",
                        kernel_type_as_string(pso_type),
                        device_kernel_as_string(device_kernel));
