@@ -99,9 +99,6 @@ MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
     mtlDevice = usable_devices[mtlDevId];
     metal_printf("Creating new Cycles Metal device: %s", info.description.c_str());
 
-    /* Ensure that back-compatibility helpers for getting gpuAddress & gpuResourceID are set up. */
-    metal_gpu_address_helper_init(mtlDevice);
-
     /* Separately compiled shading functions need function pointers and binary functions. */
     if (@available(macOS 13.0, *)) {
       use_visible_shading = [mtlDevice supportsFunctionPointers];
@@ -541,10 +538,6 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
 
   if (use_adaptive_compilation() && !complete_generic) {
     global_defines += "#define __KERNEL_FEATURES__ " + to_string(kernel_features) + "\n";
-  }
-
-  if (use_local_atomic_sort()) {
-    global_defines += "#define __KERNEL_LOCAL_ATOMIC_SORT__\n";
   }
 
   if (pso_type == PSO_SPECIALIZED_INTERSECT && scene_use_pixel_displacement &&

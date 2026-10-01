@@ -7,12 +7,7 @@ enum {
 #define KERNEL_STRUCT_MEMBER(parent, type, name) KernelData_##parent##_##name,
 #include "kernel/data_template.h"
 
-  /* On macOS 12+ KernelData_kernel_features are stored in a single 64bit integer.
-   * On older macOS versions the value is split into two 32bit values as 64bit values are not
-   * available. The version check is done at runtime. */
-  KernelData_kernel_features_64bit,
-  KernelData_kernel_features_hi,
-  KernelData_kernel_features_lo,
+  KernelData_kernel_features,
 
   /* Whether the rays of the kernel intersect pixel displaced surfaces, see
    * pixel_displacement_intersects(). */
@@ -40,14 +35,6 @@ constant int kernel_pixel_displacement_evaluator_set
 constant int kernel_pixel_displacement_bvh_features
     [[function_constant(Kernel_PixelDisplacementBVHFeatures)]];
 
-#  if defined(__METAL_FUNCTION_CONSTANTS_64BIT__)
-constant ulong kernel_data_kernel_features [[function_constant(KernelData_kernel_features_64bit)]];
-#  else
-constant uint kernel_data_kernel_features_hi [[function_constant(KernelData_kernel_features_hi)]];
-constant uint kernel_data_kernel_features_lo [[function_constant(KernelData_kernel_features_lo)]];
-/* TODO(sergey): There might be a better way to combine lo and hi words. */
-#    define kernel_data_kernel_features \
-      ((uint64_t(kernel_data_kernel_features_hi) << 32) | uint64_t(kernel_data_kernel_features_lo))
-#  endif
+constant ulong kernel_data_kernel_features [[function_constant(KernelData_kernel_features)]];
 
 #endif

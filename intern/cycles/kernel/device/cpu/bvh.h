@@ -81,6 +81,9 @@ struct CCLKernelContext : public RTCRayQueryContext {
    * built-in geometry: rtcInvoke*FilterFromGeometry() only runs the geometry's own filter
    * unless the query sets RTC_RAY_QUERY_FLAG_INVOKE_ARGUMENT_FILTER. */
   RTCFilterFunctionN filter = nullptr;
+  /* Occlusion callback of the query for user geometry that is not handled by
+   * kernel_embree_user_geometry_occluded_func(), which is Gaussian splats. */
+  RTCOccludedFunctionN custom_occluded = nullptr;
 };
 #endif
 
@@ -855,6 +858,18 @@ ccl_device_inline bool kernel_embree_user_geometry_hit(const CCLKernelContext *c
   return true;
 }
 
+/* Gaussian splats are user geometry with their own callbacks. */
+ccl_device_inline bool kernel_embree_user_geometry_is_gsplat(const CCLKernelContext *ctx,
+                                                             const unsigned int inst_id,
+                                                             const unsigned int geom_id)
+{
+  const KernelGlobals kg = ctx->kg;
+  const int object = (ctx->local_object != OBJECT_NONE) ?
+                         ctx->local_object :
+                         int((inst_id != RTC_INVALID_GEOMETRY_ID ? inst_id : geom_id) / 2);
+  return (kernel_data_fetch(objects, object).primitive_type & PRIMITIVE_GSPLAT) != 0;
+}
+
 ccl_device void kernel_embree_user_geometry_intersect_func(
     const RTCIntersectFunctionNArguments *args)
 {
@@ -865,6 +880,10 @@ ccl_device void kernel_embree_user_geometry_intersect_func(
   const CCLKernelContext *ctx = static_cast<const CCLKernelContext *>(args->context);
   RTCRayHit *rayhit = reinterpret_cast<RTCRayHit *>(args->rayhit);
   const unsigned int inst_id = args->context->instID[0];
+  if (kernel_embree_user_geometry_is_gsplat(ctx, inst_id, args->geomID)) {
+    kernel_embree_custom_intersection_func_impl(args);
+    return;
+  }
   for (int candidate = 0; candidate < 2; candidate++) {
     float t;
     RTCHit hit;
@@ -904,6 +923,15 @@ ccl_device void kernel_embree_user_geometry_occluded_func(
   const CCLKernelContext *ctx = static_cast<const CCLKernelContext *>(args->context);
   RTCRay *ray = reinterpret_cast<RTCRay *>(args->ray);
   const unsigned int inst_id = args->context->instID[0];
+  if (kernel_embree_user_geometry_is_gsplat(ctx, inst_id, args->geomID)) {
+    if (ctx->custom_occluded) {
+      ctx->custom_occluded(args);
+    }
+    else {
+      args->valid[0] = 0;
+    }
+    return;
+  }
   for (int candidate = 0; candidate < 2; candidate++) {
     float t;
     RTCHit hit;
@@ -936,11 +964,13 @@ ccl_device void kernel_embree_user_geometry_occluded_func(
 
 #  define KERNEL_EMBREE_SET_USER_INTERSECT(args) \
     (args).intersect = kernel_embree_user_geometry_intersect_func
-#  define KERNEL_EMBREE_SET_USER_OCCLUDED(args) \
-    (args).occluded = kernel_embree_user_geometry_occluded_func
+/* Keeps the occlusion callback already set for the query, for Gaussian splats. */
+#  define KERNEL_EMBREE_SET_USER_OCCLUDED(args, ctx) \
+    ((ctx).custom_occluded = (args).occluded, \
+     (args).occluded = kernel_embree_user_geometry_occluded_func)
 #else
 #  define KERNEL_EMBREE_SET_USER_INTERSECT(args)
-#  define KERNEL_EMBREE_SET_USER_OCCLUDED(args)
+#  define KERNEL_EMBREE_SET_USER_OCCLUDED(args, ctx)
 #endif
 
 /* Scene intersection. */
@@ -1031,7 +1061,8 @@ ccl_device_intersect bool kernel_embree_intersect_local(KernelGlobals kg,
 
   RTCOccludedArguments args;
   rtcInitOccludedArguments(&args);
-  KERNEL_EMBREE_SET_USER_OCCLUDED(args);
+  args.occluded = reinterpret_cast<RTCOccludedFunctionN>(kernel_embree_custom_occluded_local_func);
+  KERNEL_EMBREE_SET_USER_OCCLUDED(args, ctx);
   args.filter = reinterpret_cast<RTCFilterFunctionN>(kernel_embree_filter_occluded_local_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
@@ -1096,10 +1127,10 @@ ccl_device_intersect void kernel_embree_intersect_shadow_all(KernelGlobals kg,
 
   RTCOccludedArguments args;
   rtcInitOccludedArguments(&args);
-  KERNEL_EMBREE_SET_USER_OCCLUDED(args);
   args.filter = reinterpret_cast<RTCFilterFunctionN>(
       kernel_embree_filter_occluded_shadow_all_func);
   args.occluded = reinterpret_cast<RTCOccludedFunctionN>(kernel_embree_custom_occluded_func);
+  KERNEL_EMBREE_SET_USER_OCCLUDED(args, ctx);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
 #  ifndef __KERNEL_ONEAPI__
@@ -1144,7 +1175,9 @@ ccl_device_intersect uint kernel_embree_intersect_volume(KernelGlobals kg,
   kernel_embree_setup_ray(*ray, rtc_ray, visibility);
   RTCOccludedArguments args;
   rtcInitOccludedArguments(&args);
-  KERNEL_EMBREE_SET_USER_OCCLUDED(args);
+  args.occluded = reinterpret_cast<RTCOccludedFunctionN>(
+      kernel_embree_custom_occluded_volume_func);
+  KERNEL_EMBREE_SET_USER_OCCLUDED(args, ctx);
   args.filter = reinterpret_cast<RTCFilterFunctionN>(
       kernel_embree_filter_occluded_volume_all_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;

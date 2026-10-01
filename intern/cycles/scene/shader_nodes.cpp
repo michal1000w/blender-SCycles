@@ -2822,9 +2822,20 @@ GlassBsdfNode::GlassBsdfNode() : BsdfNode(get_node_type())
   closure = CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID;
 }
 
+bool GlassBsdfNode::is_isotropic()
+{
+  /* Keep in sync with the thresholds in OSL's node_glass_bsdf and SVM's svm_node_closure_bsdf. */
+  return (!input("Anisotropy")->link && fabsf(anisotropy) <= 1e-4f);
+}
+
 void GlassBsdfNode::simplify_settings(Scene * /* scene */)
 {
   simplify_flat_diffraction(this);
+  /* If the anisotropy is close enough to zero, fall back to the isotropic case. The grating
+   * direction still needs the tangent. */
+  if (is_isotropic() && !has_dispersion()) {
+    disconnect_unused_input("Tangent");
+  }
 }
 
 bool GlassBsdfNode::has_dispersion()
@@ -2834,9 +2845,12 @@ bool GlassBsdfNode::has_dispersion()
 
 void GlassBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
 {
-  if (shader->has_surface_link() && has_dispersion() && !input("Tangent")->link) {
-    attributes->add(ATTR_STD_GENERATED);
+  if (shader->has_surface_link()) {
+    if (!input("Tangent")->link && (has_dispersion() || !is_isotropic())) {
+      attributes->add(ATTR_STD_GENERATED);
+    }
   }
+
   ShaderNode::attributes(shader, attributes);
 }
 

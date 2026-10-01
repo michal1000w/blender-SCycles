@@ -230,7 +230,19 @@ ccl_device_noinline Float3Type pixel_displacement_image_coordinate(
   else {
     desc = svm_node_attr_init(kg, sd, program.attribute, &type);
   }
-  return svm_node_attr_surface_eval<Float3Type>(kg, sd, program.attribute, type, desc);
+  /* The host only accepts programs with constant fallback values, which are not read from the
+   * stack. */
+  float stack[1] = {0.0f};
+  return svm_node_attr_surface_eval<Float3Type>(kg, sd, stack, program.attribute, type, desc);
+}
+
+/* Color of a missing image. The host only accepts programs with constant fallback values. */
+ccl_device_inline float4 pixel_displacement_image_missing(const ccl_global SVMNodeTexImage &image)
+{
+  return make_float4(__uint_as_float(image.missing.x.bits),
+                     __uint_as_float(image.missing.y.bits),
+                     __uint_as_float(image.missing.z.bits),
+                     __uint_as_float(image.missing_alpha.bits));
 }
 
 template<typename Float3Type>
@@ -333,7 +345,12 @@ ccl_device_noinline float4 pixel_displacement_image_sample(
     co = pixel_displacement_image_mapping(co, program);
   }
   const dual2 uv(svm_node_tex_image_mapping(co, program.image.projection));
-  return svm_image_texture(kg, sd, program.image.id, uv, program.image.flags);
+  return svm_image_texture(kg,
+                           sd,
+                           program.image.id,
+                           uv,
+                           program.image.flags,
+                           pixel_displacement_image_missing(program.image));
 }
 
 template<bool cached_inputs = true>
@@ -1078,7 +1095,7 @@ pixel_displacement_image_context(KernelGlobals kg,
   ctx.uv[0] = kernel_data_fetch(attributes_float2, offset + (corner ? prim * 3 : indices.x));
   ctx.uv[1] = kernel_data_fetch(attributes_float2, offset + (corner ? prim * 3 + 1 : indices.y));
   ctx.uv[2] = kernel_data_fetch(attributes_float2, offset + (corner ? prim * 3 + 2 : indices.z));
-  const int normal_offset = kernel_data_fetch(objects, object).normal_offset;
+  const int normal_offset = kernel_data_fetch(objects, object).mesh_volume.normal_offset;
   const int normal_index = (ctx.object_flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 : indices.x;
   ShaderDataTinyStorage storage;
   ccl_private ShaderData *sd = AS_SHADER_DATA(&storage);
@@ -1151,7 +1168,7 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
     return;
   }
   const uint3 indices = kernel_data_fetch(tri_vindex, prim);
-  const int normal_offset = kernel_data_fetch(objects, object).normal_offset;
+  const int normal_offset = kernel_data_fetch(objects, object).mesh_volume.normal_offset;
   const float3 e0 = verts[1] - verts[0], e1 = verts[2] - verts[0];
   const float d00 = dot(e0, e0), d01 = dot(e0, e1), d11 = dot(e1, e1);
   const float determinant = d00 * d11 - d01 * d01;
@@ -1350,7 +1367,12 @@ pixel_displacement_context_sample(KernelGlobals kg,
     co = pixel_displacement_image_mapping(co, program);
   }
   const dual2 mapped(svm_node_tex_image_mapping(co, program.image.projection));
-  return svm_image_texture(kg, sd, program.image.id, mapped, program.image.flags);
+  return svm_image_texture(kg,
+                           sd,
+                           program.image.id,
+                           mapped,
+                           program.image.flags,
+                           pixel_displacement_image_missing(program.image));
 }
 
 ccl_device_inline float pixel_displacement_context_scalar(

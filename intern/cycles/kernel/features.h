@@ -82,14 +82,17 @@ CCL_NAMESPACE_BEGIN
 /* Light tree. */
 #define KERNEL_FEATURE_LIGHT_TREE (1ULL << 31ULL)
 
+/* Gaussian splats. */
+#define KERNEL_FEATURE_GSPLATS (1ULL << 32ULL)
+
 /* Metal bidirectional path tracing state. */
-#define KERNEL_FEATURE_BDPT (1ULL << 32ULL)
-#define KERNEL_FEATURE_PHOTON_MAPPING (1ULL << 33ULL)
+#define KERNEL_FEATURE_BDPT (1ULL << 33ULL)
+#define KERNEL_FEATURE_PHOTON_MAPPING (1ULL << 34ULL)
 
 /* Joint direct-source field evaluation; absent for ordinary radiometric scenes. */
-#define KERNEL_FEATURE_COHERENT_DIRECT (1ULL << 34ULL)
-#define KERNEL_FEATURE_COHERENT_SPECULAR (1ULL << 35ULL)
-#define KERNEL_FEATURE_POLARIZATION (1ULL << 36ULL)
+#define KERNEL_FEATURE_COHERENT_DIRECT (1ULL << 35ULL)
+#define KERNEL_FEATURE_COHERENT_SPECULAR (1ULL << 36ULL)
+#define KERNEL_FEATURE_POLARIZATION (1ULL << 37ULL)
 
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
@@ -191,12 +194,6 @@ CCL_NAMESPACE_BEGIN
 #if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__) || \
     (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__))
 #  define __PIXEL_DISPLACEMENT_SHADE__
-#endif
-
-/* MNEE caused "Compute function exceeds available temporary registers" in macOS < 13 due to a bug
- * in spill buffer allocation sizing. */
-#if defined(__KERNEL_METAL__) && (__KERNEL_METAL_MACOS__ < 13)
-#  undef __MNEE__
 #endif
 
 /* Scene-based selective features compilation. */

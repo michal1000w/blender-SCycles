@@ -173,293 +173,10 @@ bool BVHMetal::build_BLAS_mesh(Progress &progress,
                                Geometry *const geom,
                                bool refit)
 {
-  if (@available(macos 12.0, *)) {
-    /* Build BLAS for triangle primitives */
-    Mesh *const mesh = static_cast<Mesh *const>(geom);
-    if (mesh->num_triangles() == 0) {
-      return false;
-    }
-
-    const bool use_fast_trace_bvh = (params.bvh_type == BVH_TYPE_STATIC) || !support_refit_blas();
-
-    const packed_float3 *verts = mesh->get_position();
-    const array<int> &tris = mesh->get_triangles();
-    const size_t num_verts = mesh->num_verts();
-    const size_t num_indices = tris.size();
-
-    size_t num_motion_steps = 1;
-    const Attribute *attr_P = mesh->attributes.find(ATTR_STD_POSITION);
-    if (motion_blur && mesh->get_use_motion_blur() && attr_P->has_motion()) {
-      num_motion_steps = mesh->get_motion_steps();
-    }
-
-    /* Upload the mesh data to the GPU */
-    id<MTLBuffer> posBuf = nil;
-    id<MTLBuffer> indexBuf = [mtl_device newBufferWithBytes:tris.data()
-                                                     length:num_indices * sizeof(tris.data()[0])
-                                                    options:MTLResourceStorageModeShared];
-
-    if (num_motion_steps == 1) {
-      posBuf = [mtl_device newBufferWithBytes:verts
-                                       length:num_verts * sizeof(verts[0])
-                                      options:MTLResourceStorageModeShared];
-    }
-    else {
-      posBuf = [mtl_device newBufferWithLength:num_verts * num_motion_steps * sizeof(verts[0])
-                                       options:MTLResourceStorageModeShared];
-      packed_float3 *dest_data = (packed_float3 *)[posBuf contents];
-      for (size_t step = 0; step < num_motion_steps; ++step) {
-        const packed_float3 *verts = attr_P->data_at_time_step<packed_float3>(step,
-                                                                              num_motion_steps);
-        std::copy_n(verts, num_verts, dest_data + num_verts * step);
-      }
-    }
-
-    /* MetalRT triangles only cover the undisplaced base surface. Add one conservative custom
-     * primitive per triangle so the intersection function can report the actual displaced hit
-     * without materializing the micromesh as geometry. Primitive indices intentionally match the
-     * triangle descriptor, preserving the existing mesh primitive offset used by the TLAS. */
-    id<MTLBuffer> displacementAabbBuf = nil;
-    MTLAccelerationStructureGeometryDescriptor *displacementGeomDesc = nil;
-    if (mesh->use_pixel_displacement && mesh->pixel_displacement_max_distance > 0.0f) {
-      const size_t num_triangles = mesh->num_triangles();
-      const size_t num_aabbs = num_motion_steps * num_triangles;
-      displacementAabbBuf = [mtl_device
-          newBufferWithLength:num_aabbs * sizeof(MTLAxisAlignedBoundingBox)
-                      options:MTLResourceStorageModeShared];
-      MTLAxisAlignedBoundingBox *aabb_data = (MTLAxisAlignedBoundingBox *)
-          [displacementAabbBuf contents];
-      const float3 pad = make_float3(mesh->pixel_displacement_max_distance);
-
-      for (size_t step = 0; step < num_motion_steps; ++step) {
-        const packed_float3 *step_verts = (num_motion_steps == 1) ?
-                                              verts :
-                                              attr_P->data_at_time_step<packed_float3>(
-                                                  step, num_motion_steps);
-        for (size_t triangle = 0; triangle < num_triangles; ++triangle) {
-          float3 bounds_min;
-          float3 bounds_max;
-          if (num_motion_steps == 1 && mesh->pixel_displacement_bounds.size() == num_triangles &&
-              mesh->pixel_displacement_bounds[triangle].valid()) {
-            bounds_min = mesh->pixel_displacement_bounds[triangle].min;
-            bounds_max = mesh->pixel_displacement_bounds[triangle].max;
-            const float3 bounds_epsilon = make_float3(1.0e-6f);
-            bounds_min -= bounds_epsilon;
-            bounds_max += bounds_epsilon;
-          }
-          else {
-            const float3 p0 = float3(step_verts[tris[triangle * 3 + 0]]);
-            const float3 p1 = float3(step_verts[tris[triangle * 3 + 1]]);
-            const float3 p2 = float3(step_verts[tris[triangle * 3 + 2]]);
-            bounds_min = min(min(p0, p1), p2) - pad;
-            bounds_max = max(max(p0, p1), p2) + pad;
-          }
-          const size_t index = step * num_triangles + triangle;
-          aabb_data[index].min = (MTLPackedFloat3 &)bounds_min;
-          aabb_data[index].max = (MTLPackedFloat3 &)bounds_max;
-        }
-      }
-
-      if (num_motion_steps > 1) {
-        std::vector<MTLMotionKeyframeData *> aabb_ptrs;
-        aabb_ptrs.reserve(num_motion_steps);
-        for (size_t step = 0; step < num_motion_steps; ++step) {
-          MTLMotionKeyframeData *keyframe = [MTLMotionKeyframeData data];
-          keyframe.buffer = displacementAabbBuf;
-          keyframe.offset = step * num_triangles * sizeof(MTLAxisAlignedBoundingBox);
-          aabb_ptrs.push_back(keyframe);
-        }
-
-        MTLAccelerationStructureMotionBoundingBoxGeometryDescriptor *desc =
-            [MTLAccelerationStructureMotionBoundingBoxGeometryDescriptor descriptor];
-        desc.boundingBoxBuffers = [NSArray arrayWithObjects:aabb_ptrs.data()
-                                                      count:aabb_ptrs.size()];
-        desc.boundingBoxCount = num_triangles;
-        desc.boundingBoxStride = sizeof(aabb_data[0]);
-        desc.intersectionFunctionTableOffset = 3;
-        desc.allowDuplicateIntersectionFunctionInvocation = false;
-        desc.opaque = true;
-        displacementGeomDesc = desc;
-      }
-      else {
-        MTLAccelerationStructureBoundingBoxGeometryDescriptor *desc =
-            [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
-        desc.boundingBoxBuffer = displacementAabbBuf;
-        desc.boundingBoxBufferOffset = 0;
-        desc.boundingBoxCount = num_triangles;
-        desc.boundingBoxStride = sizeof(aabb_data[0]);
-        desc.intersectionFunctionTableOffset = 3;
-        desc.allowDuplicateIntersectionFunctionInvocation = false;
-        desc.opaque = true;
-        displacementGeomDesc = desc;
-      }
-    }
-
-    /* Create an acceleration structure. */
-    MTLAccelerationStructureGeometryDescriptor *geomDesc;
-    if (num_motion_steps > 1) {
-      std::vector<MTLMotionKeyframeData *> vertex_ptrs;
-      vertex_ptrs.reserve(num_motion_steps);
-      for (size_t step = 0; step < num_motion_steps; ++step) {
-        MTLMotionKeyframeData *k = [MTLMotionKeyframeData data];
-        k.buffer = posBuf;
-        k.offset = num_verts * step * sizeof(packed_float3);
-        vertex_ptrs.push_back(k);
-      }
-
-      MTLAccelerationStructureMotionTriangleGeometryDescriptor *geomDescMotion =
-          [MTLAccelerationStructureMotionTriangleGeometryDescriptor descriptor];
-      geomDescMotion.vertexBuffers = [NSArray arrayWithObjects:vertex_ptrs.data()
-                                                         count:vertex_ptrs.size()];
-      geomDescMotion.vertexStride = sizeof(verts[0]);
-      geomDescMotion.indexBuffer = indexBuf;
-      geomDescMotion.indexBufferOffset = 0;
-      geomDescMotion.indexType = MTLIndexTypeUInt32;
-      geomDescMotion.triangleCount = num_indices / 3;
-      geomDescMotion.intersectionFunctionTableOffset = 0;
-      geomDescMotion.opaque = true;
-
-      geomDesc = geomDescMotion;
-
-      BVH_status("Building motion mesh BLAS | %7d tris | %s | %7d motion keyframes",
-                 (int)mesh->num_triangles(),
-                 geom->name.c_str(),
-                 (int)num_motion_steps);
-    }
-    else {
-      MTLAccelerationStructureTriangleGeometryDescriptor *geomDescNoMotion =
-          [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
-      geomDescNoMotion.vertexBuffer = posBuf;
-      geomDescNoMotion.vertexBufferOffset = 0;
-      geomDescNoMotion.vertexStride = sizeof(verts[0]);
-      geomDescNoMotion.indexBuffer = indexBuf;
-      geomDescNoMotion.indexBufferOffset = 0;
-      geomDescNoMotion.indexType = MTLIndexTypeUInt32;
-      geomDescNoMotion.triangleCount = num_indices / 3;
-      geomDescNoMotion.intersectionFunctionTableOffset = 0;
-      geomDescNoMotion.opaque = true;
-
-      geomDesc = geomDescNoMotion;
-
-      BVH_status(
-          "Building mesh BLAS | %7d tris | %s", (int)mesh->num_triangles(), geom->name.c_str());
-    }
-
-    /* Force a single any-hit call, so shadow record-all behavior works correctly */
-    /* (Match optix behavior: unsigned int build_flags =
-     * OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;) */
-    geomDesc.allowDuplicateIntersectionFunctionInvocation = false;
-
-    MTLPrimitiveAccelerationStructureDescriptor *accelDesc =
-        [MTLPrimitiveAccelerationStructureDescriptor descriptor];
-    /* Metal currently assumes all geometry descriptors in a primitive acceleration structure have
-     * the same primitive kind. Use the custom descriptor for the whole affected mesh; its
-     * intersection function falls back to the regular triangle test for non-displaced faces. */
-    accelDesc.geometryDescriptors = displacementGeomDesc ? @[ displacementGeomDesc ] :
-                                                           @[ geomDesc ];
-    if (num_motion_steps > 1) {
-      accelDesc.motionStartTime = 0.0f;
-      accelDesc.motionEndTime = 1.0f;
-      accelDesc.motionStartBorderMode = MTLMotionBorderModeClamp;
-      accelDesc.motionEndBorderMode = MTLMotionBorderModeClamp;
-      accelDesc.motionKeyframeCount = num_motion_steps;
-    }
-    if (extended_limits) {
-      accelDesc.usage |= MTLAccelerationStructureUsageExtendedLimits;
-    }
-
-    if (!use_fast_trace_bvh) {
-      accelDesc.usage |= (MTLAccelerationStructureUsageRefit |
-                          MTLAccelerationStructureUsagePreferFastBuild);
-    }
-    else if (@available(macos 26.0, *)) {
-      accelDesc.usage |= MTLAccelerationStructureUsagePreferFastIntersection;
-    }
-
-    MTLAccelerationStructureSizes accelSizes = [mtl_device
-        accelerationStructureSizesWithDescriptor:accelDesc];
-    id<MTLAccelerationStructure> accel_uncompressed = [mtl_device
-        newAccelerationStructureWithSize:accelSizes.accelerationStructureSize];
-    id<MTLBuffer> scratchBuf = [mtl_device newBufferWithLength:accelSizes.buildScratchBufferSize
-                                                       options:MTLResourceStorageModePrivate];
-    id<MTLBuffer> sizeBuf = [mtl_device newBufferWithLength:8
-                                                    options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> accelCommands = [queue commandBuffer];
-    id<MTLAccelerationStructureCommandEncoder> accelEnc =
-        [accelCommands accelerationStructureCommandEncoder];
-    if (refit) {
-      [accelEnc refitAccelerationStructure:accel_struct
-                                descriptor:accelDesc
-                               destination:accel_uncompressed
-                             scratchBuffer:scratchBuf
-                       scratchBufferOffset:0];
-    }
-    else {
-      [accelEnc buildAccelerationStructure:accel_uncompressed
-                                descriptor:accelDesc
-                             scratchBuffer:scratchBuf
-                       scratchBufferOffset:0];
-    }
-    if (use_fast_trace_bvh) {
-      [accelEnc writeCompactedAccelerationStructureSize:accel_uncompressed
-                                               toBuffer:sizeBuf
-                                                 offset:0
-                                           sizeDataType:MTLDataTypeULong];
-    }
-    [accelEnc endEncoding];
-
-    /* Estimated size of resources that will be wired for the GPU accelerated build.
-     * Acceleration-struct size is doubled to account for possible compaction step. */
-    size_t wired_size = posBuf.allocatedSize + indexBuf.allocatedSize +
-                        displacementAabbBuf.allocatedSize + scratchBuf.allocatedSize +
-                        accel_uncompressed.allocatedSize * 2;
-
-    [accelCommands addCompletedHandler:^(id<MTLCommandBuffer> /*command_buffer*/) {
-      /* free temp resources */
-      [scratchBuf release];
-      [indexBuf release];
-      [posBuf release];
-      [displacementAabbBuf release];
-
-      if (use_fast_trace_bvh) {
-        /* Compact the accel structure */
-        uint64_t compressed_size = *(uint64_t *)sizeBuf.contents;
-
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-          id<MTLCommandBuffer> accelCommands = [queue commandBuffer];
-          id<MTLAccelerationStructureCommandEncoder> accelEnc =
-              [accelCommands accelerationStructureCommandEncoder];
-          id<MTLAccelerationStructure> accel = [mtl_device
-              newAccelerationStructureWithSize:compressed_size];
-          [accelEnc copyAndCompactAccelerationStructure:accel_uncompressed
-                                toAccelerationStructure:accel];
-          [accelEnc endEncoding];
-          [accelCommands addCompletedHandler:^(id<MTLCommandBuffer> /*command_buffer*/) {
-            set_accel_struct(accel);
-            [accel_uncompressed release];
-
-            /* Signal that we've finished doing GPU acceleration struct build. */
-            g_bvh_build_throttler.release(wired_size);
-          }];
-          [accelCommands commit];
-        });
-      }
-      else {
-        /* set our acceleration structure to the uncompressed structure */
-        set_accel_struct(accel_uncompressed);
-
-        /* Signal that we've finished doing GPU acceleration struct build. */
-        g_bvh_build_throttler.release(wired_size);
-      }
-
-      [sizeBuf release];
-    }];
-
-    /* Wait until it's safe to proceed with GPU acceleration struct build. */
-    g_bvh_build_throttler.acquire(wired_size);
-    [accelCommands commit];
-
-    return true;
+  /* Build BLAS for triangle primitives */
+  Mesh *const mesh = static_cast<Mesh *const>(geom);
+  if (mesh->num_triangles() == 0) {
+    return false;
   }
 
   const bool use_fast_trace_bvh = (params.bvh_type == BVH_TYPE_STATIC) || !support_refit_blas();
@@ -494,6 +211,86 @@ bool BVHMetal::build_BLAS_mesh(Progress &progress,
       const packed_float3 *verts = attr_P->data_at_time_step<packed_float3>(step,
                                                                             num_motion_steps);
       std::copy_n(verts, num_verts, dest_data + num_verts * step);
+    }
+  }
+
+  /* MetalRT triangles only cover the undisplaced base surface. Add one conservative custom
+   * primitive per triangle so the intersection function can report the actual displaced hit
+   * without materializing the micromesh as geometry. Primitive indices intentionally match the
+   * triangle descriptor, preserving the existing mesh primitive offset used by the TLAS. */
+  id<MTLBuffer> displacementAabbBuf = nil;
+  MTLAccelerationStructureGeometryDescriptor *displacementGeomDesc = nil;
+  if (mesh->use_pixel_displacement && mesh->pixel_displacement_max_distance > 0.0f) {
+    const size_t num_triangles = mesh->num_triangles();
+    const size_t num_aabbs = num_motion_steps * num_triangles;
+    displacementAabbBuf = [mtl_device
+        newBufferWithLength:num_aabbs * sizeof(MTLAxisAlignedBoundingBox)
+                    options:MTLResourceStorageModeShared];
+    MTLAxisAlignedBoundingBox *aabb_data = (MTLAxisAlignedBoundingBox *)
+        [displacementAabbBuf contents];
+    const float3 pad = make_float3(mesh->pixel_displacement_max_distance);
+
+    for (size_t step = 0; step < num_motion_steps; ++step) {
+      const packed_float3 *step_verts = (num_motion_steps == 1) ?
+                                            verts :
+                                            attr_P->data_at_time_step<packed_float3>(
+                                                step, num_motion_steps);
+      for (size_t triangle = 0; triangle < num_triangles; ++triangle) {
+        float3 bounds_min;
+        float3 bounds_max;
+        if (num_motion_steps == 1 && mesh->pixel_displacement_bounds.size() == num_triangles &&
+            mesh->pixel_displacement_bounds[triangle].valid()) {
+          bounds_min = mesh->pixel_displacement_bounds[triangle].min;
+          bounds_max = mesh->pixel_displacement_bounds[triangle].max;
+          const float3 bounds_epsilon = make_float3(1.0e-6f);
+          bounds_min -= bounds_epsilon;
+          bounds_max += bounds_epsilon;
+        }
+        else {
+          const float3 p0 = float3(step_verts[tris[triangle * 3 + 0]]);
+          const float3 p1 = float3(step_verts[tris[triangle * 3 + 1]]);
+          const float3 p2 = float3(step_verts[tris[triangle * 3 + 2]]);
+          bounds_min = min(min(p0, p1), p2) - pad;
+          bounds_max = max(max(p0, p1), p2) + pad;
+        }
+        const size_t index = step * num_triangles + triangle;
+        aabb_data[index].min = (MTLPackedFloat3 &)bounds_min;
+        aabb_data[index].max = (MTLPackedFloat3 &)bounds_max;
+      }
+    }
+
+    if (num_motion_steps > 1) {
+      std::vector<MTLMotionKeyframeData *> aabb_ptrs;
+      aabb_ptrs.reserve(num_motion_steps);
+      for (size_t step = 0; step < num_motion_steps; ++step) {
+        MTLMotionKeyframeData *keyframe = [MTLMotionKeyframeData data];
+        keyframe.buffer = displacementAabbBuf;
+        keyframe.offset = step * num_triangles * sizeof(MTLAxisAlignedBoundingBox);
+        aabb_ptrs.push_back(keyframe);
+      }
+
+      MTLAccelerationStructureMotionBoundingBoxGeometryDescriptor *desc =
+          [MTLAccelerationStructureMotionBoundingBoxGeometryDescriptor descriptor];
+      desc.boundingBoxBuffers = [NSArray arrayWithObjects:aabb_ptrs.data()
+                                                    count:aabb_ptrs.size()];
+      desc.boundingBoxCount = num_triangles;
+      desc.boundingBoxStride = sizeof(aabb_data[0]);
+      desc.intersectionFunctionTableOffset = 3;
+      desc.allowDuplicateIntersectionFunctionInvocation = false;
+      desc.opaque = true;
+      displacementGeomDesc = desc;
+    }
+    else {
+      MTLAccelerationStructureBoundingBoxGeometryDescriptor *desc =
+          [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+      desc.boundingBoxBuffer = displacementAabbBuf;
+      desc.boundingBoxBufferOffset = 0;
+      desc.boundingBoxCount = num_triangles;
+      desc.boundingBoxStride = sizeof(aabb_data[0]);
+      desc.intersectionFunctionTableOffset = 3;
+      desc.allowDuplicateIntersectionFunctionInvocation = false;
+      desc.opaque = true;
+      displacementGeomDesc = desc;
     }
   }
 
@@ -554,7 +351,11 @@ bool BVHMetal::build_BLAS_mesh(Progress &progress,
 
   MTLPrimitiveAccelerationStructureDescriptor *accelDesc =
       [MTLPrimitiveAccelerationStructureDescriptor descriptor];
-  accelDesc.geometryDescriptors = @[ geomDesc ];
+  /* Metal currently assumes all geometry descriptors in a primitive acceleration structure have
+   * the same primitive kind. Use the custom descriptor for the whole affected mesh; its
+   * intersection function falls back to the regular triangle test for non-displaced faces. */
+  accelDesc.geometryDescriptors = displacementGeomDesc ? @[ displacementGeomDesc ] :
+                                                         @[ geomDesc ];
   if (num_motion_steps > 1) {
     accelDesc.motionStartTime = 0.0f;
     accelDesc.motionEndTime = 1.0f;
@@ -607,7 +408,8 @@ bool BVHMetal::build_BLAS_mesh(Progress &progress,
 
   /* Estimated size of resources that will be wired for the GPU accelerated build.
    * Acceleration-struct size is doubled to account for possible compaction step. */
-  size_t wired_size = posBuf.allocatedSize + indexBuf.allocatedSize + scratchBuf.allocatedSize +
+  size_t wired_size = posBuf.allocatedSize + indexBuf.allocatedSize +
+                      displacementAabbBuf.allocatedSize + scratchBuf.allocatedSize +
                       accel_uncompressed.allocatedSize * 2;
 
   [accelCommands addCompletedHandler:^(id<MTLCommandBuffer> /*command_buffer*/) {
@@ -615,6 +417,7 @@ bool BVHMetal::build_BLAS_mesh(Progress &progress,
     [scratchBuf release];
     [indexBuf release];
     [posBuf release];
+    [displacementAabbBuf release];
 
     if (use_fast_trace_bvh) {
       /* Compact the accel structure */

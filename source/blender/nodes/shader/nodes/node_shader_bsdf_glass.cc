@@ -82,8 +82,6 @@ static void node_declare(NodeDeclarationBuilder &b)
       .default_value(150.0f).min(0.0f).max(100000.0f).subtype(PROP_WAVELENGTH);
   grating.add_input<decl::Float>("Diffraction Duty Cycle"_ustr)
       .default_value(0.5f).min(0.0f).max(1.0f).subtype(PROP_FACTOR);
-  grating.add_input<decl::Vector>("Tangent"_ustr).hide_value()
-      .description("Direction across the grating grooves");
 }
 
 static void node_shader_buts_glass(ui::Layout &layout, bContext * /*C*/, PointerRNA *ptr)

@@ -347,6 +347,9 @@ ccl_device void osl_closure_dielectric_bsdf_setup(KernelGlobals kg,
   fresnel->thin_film = {closure->thinfilm_thickness, closure->thinfilm_ior};
   fresnel->tint = {rgb_to_spectrum(closure->reflection_tint),
                    bsdf_spectral_transmission_color(kg, sd, closure->transmission_tint)};
+  if (backfacing) {
+    adjust_thin_film_ior_at_backface(fresnel->thin_film.ior, bsdf->ior);
+  }
   bsdf_dielectric_tint_setup(kg, bsdf, sd, fresnel, beckmann, multiggx);
 
   if (layer_albedo != nullptr) {
@@ -521,6 +524,9 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
   fresnel->exponent = closure->exponent;
   fresnel->thin_film.thickness = closure->thinfilm_thickness;
   fresnel->thin_film.ior = closure->thinfilm_ior;
+  if (backfacing) {
+    adjust_thin_film_ior_at_backface(fresnel->thin_film.ior, bsdf->ior);
+  }
   const bool multiggx_diffraction = preserve_energy && closure->diffraction_weight > 0.0f &&
                                     !has_transmission;
   bsdf_microfacet_setup_fresnel_generalized_schlick(
