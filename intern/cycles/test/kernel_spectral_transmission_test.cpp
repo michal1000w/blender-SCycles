@@ -21,7 +21,8 @@ TEST(KernelSpectralTransmission, PrimariesAreBoundedAndNeutralPreserving)
     EXPECT_LE(basis[0], 1.0f);
     EXPECT_LE(basis[1], 1.0f);
     EXPECT_LE(basis[2], 1.0f);
-    EXPECT_NEAR(basis[0] + basis[1] + basis[2], 1.0f, 1e-5f);
+    /* Every entry is rounded to five decimals. */
+    EXPECT_NEAR(basis[0] + basis[1] + basis[2], 1.0f, 1.5e-5f);
   }
 }
 
@@ -29,9 +30,9 @@ TEST(KernelSpectralTransmission, PrimariesRoundTripUnderD65)
 {
   /* XYZ to linear BT.709, matching ColorSpaceManager::get_xyz_to_rec709(). */
   const float3 xyz_to_rec709[3] = {
-      make_float3(3.2404542f, -1.5371385f, -0.4985314f),
-      make_float3(-0.9692660f, 1.8760108f, 0.0415560f),
-      make_float3(0.0556434f, -0.2040259f, 1.0572252f),
+      make_float3(3.2409699f, -1.5373832f, -0.4986108f),
+      make_float3(-0.9692436f, 1.8759675f, 0.0415551f),
+      make_float3(0.0556301f, -0.2039770f, 1.0569715f),
   };
 
   for (int primary = 0; primary < 3; primary++) {
