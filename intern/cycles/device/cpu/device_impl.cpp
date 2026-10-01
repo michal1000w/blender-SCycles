@@ -306,6 +306,13 @@ void CPUDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
   else
 #endif
   {
+#ifdef WITH_EMBREE
+    /* The kernel intersects with Embree whenever it has a scene handle. A previous Embree
+     * scene is released when the layout changes, for example with the debug layout option. */
+    if (bvh->params.top_level) {
+      embree_traversable = nullptr;
+    }
+#endif
     Device::build_bvh(bvh, progress, refit);
   }
 }

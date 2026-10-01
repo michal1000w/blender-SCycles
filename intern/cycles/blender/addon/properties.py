@@ -703,7 +703,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     use_bidirectional_path_tracing: BoolProperty(
         name="Bidirectional Path Tracing",
-        description="Trace light and camera subpaths and connect them with multiple importance sampling (Metal GPU only)",
+        description="Trace light and camera subpaths and connect them with multiple importance sampling (CPU and Metal GPU)",
         default=False,
     )
 
@@ -787,7 +787,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     use_photon_mapping: BoolProperty(
         name="Photon Mapping",
-        description="Use progressive photon density estimates for difficult surface and volume caustics (Metal GPU only)",
+        description="Use progressive photon density estimates for difficult surface and volume caustics (CPU and Metal GPU)",
         default=False,
     )
 

@@ -468,6 +468,14 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
         geom->tag_update(scene, true);
       }
     }
+    /* Mesh displacement moves the vertices of the synced mesh in place, while pixel level
+     * displacement starts from the undisplaced surface. Export such meshes from Blender again,
+     * otherwise switching between the two methods would displace already displaced vertices. */
+    for (const auto &item : geometry_map.key_to_scene_data()) {
+      if (item.second && item.second->has_true_displacement()) {
+        geometry_map.set_recalc(item.first.id);
+      }
+    }
     scene->geometry_manager->tag_update(scene, GeometryManager::UPDATE_ALL);
   }
 

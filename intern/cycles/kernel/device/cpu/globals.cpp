@@ -3,12 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include "kernel/device/cpu/globals.h"
+#include "kernel/integrator/state.h"
 #include "kernel/osl/globals.h"
 
 #include "util/guiding.h"  // IWYU pragma: keep
 #include "util/profiling.h"
 
 CCL_NAMESPACE_BEGIN
+
+/* Used whenever no render work provides light-cache transport memory, for example while
+ * evaluating shaders for baking or displacement. All features are disabled in it. The CPU loads
+ * image tiles synchronously, so its queue counter never records a cache miss. */
+static IntegratorQueueCounter default_transport_queue_counter = {};
+static const KernelTransportStateCPU default_transport_state = [] {
+  KernelTransportStateCPU state;
+  state.queue_counter = &default_transport_queue_counter;
+  return state;
+}();
 
 ThreadKernelGlobalsCPU::ThreadKernelGlobalsCPU(const KernelGlobalsCPU &kernel_globals,
                                                OSLGlobals *osl_globals,
@@ -18,6 +29,7 @@ ThreadKernelGlobalsCPU::ThreadKernelGlobalsCPU(const KernelGlobalsCPU &kernel_gl
 #ifdef WITH_OSL
       osl(osl_globals, thread_index),
 #endif
+      transport_state(&default_transport_state),
       cpu_profiler_(cpu_profiler)
 {
 #ifndef WITH_OSL

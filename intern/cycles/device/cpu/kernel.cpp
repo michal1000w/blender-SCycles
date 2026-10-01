@@ -20,6 +20,11 @@ CPUKernels::CPUKernels()
       REGISTER_KERNEL(integrator_init_from_camera),
       REGISTER_KERNEL(integrator_init_from_bake),
       REGISTER_KERNEL(integrator_megakernel),
+      REGISTER_KERNEL(integrator_photon_emit),
+      REGISTER_KERNEL(integrator_photon_map_build),
+      REGISTER_KERNEL(integrator_bdpt_light_generate),
+      REGISTER_KERNEL(integrator_bdpt_cache_order),
+      REGISTER_KERNEL(integrator_bdpt_sensor_connect),
       /* Shader evaluation. */
       REGISTER_KERNEL(shader_eval_displace),
       REGISTER_KERNEL(shader_eval_background),

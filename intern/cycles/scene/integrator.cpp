@@ -31,33 +31,40 @@
 
 CCL_NAMESPACE_BEGIN
 
-static bool device_supports_metal_features(const Device *device)
+/* Light-cache transport and pixel-level displacement are scheduled by the Metal and CPU path
+ * tracers. A multi-device render uses them only when every device supports them. */
+static bool device_supports_transport_features(const DeviceInfo &info)
 {
-  if (device->info.type == DEVICE_METAL) {
+  if (info.type == DEVICE_METAL || info.type == DEVICE_CPU) {
     return true;
   }
 
-  if (device->info.type == DEVICE_MULTI) {
-    for (const DeviceInfo &subdevice : device->info.multi_devices) {
-      if (subdevice.type != DEVICE_METAL) {
+  if (info.type == DEVICE_MULTI) {
+    for (const DeviceInfo &subdevice : info.multi_devices) {
+      if (!device_supports_transport_features(subdevice)) {
         return false;
       }
     }
-    return !device->info.multi_devices.empty();
+    return !info.multi_devices.empty();
   }
 
   return false;
 }
 
+static bool device_supports_transport_features(const Device *device)
+{
+  return device_supports_transport_features(device->info);
+}
+
 bool Integrator::use_photon_mapping_on_device(const Device *device) const
 {
   return get_use_photon_mapping() && !get_use_bidirectional_path_tracing() &&
-         device_supports_metal_features(device);
+         device_supports_transport_features(device);
 }
 
 bool Integrator::use_bidirectional_path_tracing_on_device(const Device *device) const
 {
-  return get_use_bidirectional_path_tracing() && device_supports_metal_features(device);
+  return get_use_bidirectional_path_tracing() && device_supports_transport_features(device);
 }
 
 static bool photon_input_is_varying(ShaderNode *node, const char *name)
@@ -427,14 +434,17 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->filter_glossy = (filter_glossy == 0.0f) ? FLT_MAX : 1.0f / filter_glossy;
   kintegrator->differential_widen_scale = min(1.0f, filter_glossy);
 
-  /* Photon mapping is currently scheduled by the GPU path tracer and enabled only on Metal.
+  /* Photon mapping and BDPT light caches are scheduled by the Metal and CPU path tracers.
    * Keeping the complete configuration in KernelData makes all regular shading kernels see an
    * immutable map description while a render batch is in flight. */
   /* Sensor splats do not carry the split foreground/background state required by shadow catcher
    * compositing. Keep the complete regular estimator for such scenes instead of leaking light
    * tracing into the combined or catcher passes. */
+  /* Baking starts paths at surface points and writes texels: light-tracing splats through the
+   * camera have no place in that buffer, so bakes use the regular estimator as well. */
   kintegrator->use_bidirectional_path_tracing = use_bidirectional_path_tracing_on_device(device) &&
-                                                !scene->has_shadow_catcher();
+                                                !scene->has_shadow_catcher() &&
+                                                !scene->bake_manager->get_baking();
   kintegrator->bdpt_light_paths = clamp(bdpt_light_paths, 1024, 4 * 1024 * 1024);
   kintegrator->bdpt_reference_pixels = max(bdpt_reference_pixels, 1);
   kintegrator->bdpt_max_bounces = clamp(bdpt_max_bounces, 1, 64);
@@ -548,10 +558,9 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   const float pixel_displacement_safe_max_distance = max(0.0f, pixel_displacement_max_distance);
   const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
       scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
-  const bool pixel_displacement_layout = bvh_layout == BVH_LAYOUT_BVH2 ||
-                                         bvh_layout == BVH_LAYOUT_METAL;
+  const bool pixel_displacement_layout = bvh_layout_supports_pixel_displacement(bvh_layout);
   kintegrator->use_pixel_displacement = use_pixel_displacement && pixel_displacement_layout &&
-                                        device_supports_metal_features(device) &&
+                                        device_supports_transport_features(device) &&
                                         pixel_displacement_scale != 0.0f &&
                                         pixel_displacement_safe_max_distance > 0.0f;
   kintegrator->pixel_displacement_scale = pixel_displacement_scale;

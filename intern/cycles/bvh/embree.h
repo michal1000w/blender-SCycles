@@ -12,6 +12,7 @@
 #  include "bvh/bvh.h"
 #  include "bvh/params.h"
 
+#  include "util/set.h"
 #  include "util/types.h"
 #  include "util/unique_ptr.h"
 #  include "util/vector.h"
@@ -62,6 +63,10 @@ class BVHEmbree : public BVH {
   /* Host copies of static coherent Glass sphere centers and radii, used by the
    * Embree bounds callback of their user geometries. Keyed by geometry ID. */
   vector<std::pair<unsigned int, unique_ptr<vector<float4>>>> coherent_point_data;
+
+  /* Geometry IDs of pixel displaced meshes, which are user geometry: their bounds enclose the
+   * displaced surface and the kernel intersects them, see add_triangles(). */
+  set<unsigned int> pixel_displacement_geometry;
 
   RTCDevice rtc_device;
   bool rtc_device_is_sycl;

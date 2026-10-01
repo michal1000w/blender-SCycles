@@ -8,6 +8,11 @@
 
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/state_flow.h"
+#if defined(__BDPT__) && !defined(__KERNEL_METAL__)
+/* Light-cache transport. The Metal kernels include it once, ahead of all shading kernels. */
+#  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
+#endif
 #include "kernel/light/light.h"
 #include "kernel/light/sample.h"
 
@@ -65,13 +70,14 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
 
   /* MIS weighting. */
   float mis_weight;
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
   const bool bdpt_emitter_supported = !(
       (klight->type == LIGHT_POINT || klight->type == LIGHT_SPOT) && !klight->spot.is_sphere &&
       klight->spot.radius > 0.0f);
-  mis_weight = (bdpt_enabled_for_emission(state) && bdpt_emitter_supported) ?
-                   bdpt_emission_mis_weight_lamp(kg, state, klight, ray_P, ray_D, isect.t, light_eval.pdf) :
+  mis_weight = (bdpt_enabled_for_emission(kg, state) && bdpt_emitter_supported) ?
+                   bdpt_emission_mis_weight_lamp(
+                       kg, state, klight, ray_P, ray_D, isect.t, light_eval.pdf) :
                    light_sample_mis_weight_forward_lamp(
                        kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
 #else
@@ -79,15 +85,17 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
       kg, state, path_visibility, path_flag, isect.object, light_eval.pdf, ray_P);
 #endif
 
-#ifdef __KERNEL_METAL__
-  if (bdpt_emitter_supported && bdpt_volume_sensor_owns_camera_path(state, 0, klight->max_bounces)) {
+#ifdef __BDPT__
+  if (bdpt_emitter_supported &&
+      bdpt_volume_sensor_owns_camera_path(kg, state, 0, klight->max_bounces))
+  {
     mis_weight = 0.0f;
   }
 #endif
 
   /* Write to render buffer. */
   guiding_record_surface_emission(kg, state, eval, mis_weight);
-#ifndef __KERNEL_METAL__
+#ifndef __BDPT__
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
 #endif
   film_write_surface_emission(kg,

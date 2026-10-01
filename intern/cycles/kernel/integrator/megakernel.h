@@ -10,6 +10,10 @@
 #include "kernel/integrator/intersect_shadow.h"
 #include "kernel/integrator/intersect_subsurface.h"
 #include "kernel/integrator/intersect_volume_stack.h"
+/* Light-cache transport, shared with the GPU kernels. Surface and volume shading refer to it. */
+#include "kernel/integrator/bidirectional.h"
+#include "kernel/integrator/guiding_gpu.h"
+#include "kernel/integrator/photon_mapping.h"
 #include "kernel/integrator/shade_background.h"
 #include "kernel/integrator/shade_dedicated_light.h"
 #include "kernel/integrator/shade_light.h"
@@ -18,6 +22,16 @@
 #include "kernel/integrator/shade_volume.h"
 
 CCL_NAMESPACE_BEGIN
+
+/* Rays of the intersection kernels intersect pixel displaced surfaces, as with the Metal
+ * `pixel_displacement_rays` specialization. Rays traced while shading use the base triangles. */
+template<typename Func>
+ccl_device_forceinline void integrator_megakernel_intersect(KernelGlobals kg, const Func &func)
+{
+  kg->pixel_displacement_intersect_rays = true;
+  func();
+  kg->pixel_displacement_intersect_rays = false;
+}
 
 ccl_device void integrator_megakernel(KernelGlobals kg,
                                       IntegratorState state,
@@ -32,7 +46,8 @@ ccl_device void integrator_megakernel(KernelGlobals kg,
     if (shadow_queued_kernel) {
       switch (shadow_queued_kernel) {
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW:
-          integrator_intersect_shadow(kg, &state->shadow);
+          integrator_megakernel_intersect(
+              kg, [&] { integrator_intersect_shadow(kg, &state->shadow); });
           continue;
         case DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW:
           integrator_shade_shadow(kg, &state->shadow, render_buffer);
@@ -55,10 +70,29 @@ ccl_device void integrator_megakernel(KernelGlobals kg,
     if (ao_queued_kernel) {
       switch (ao_queued_kernel) {
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW:
-          integrator_intersect_shadow(kg, &state->ao);
+          integrator_megakernel_intersect(kg,
+                                          [&] { integrator_intersect_shadow(kg, &state->ao); });
           break;
         case DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW:
           integrator_shade_shadow(kg, &state->ao, render_buffer);
+          break;
+        default:
+          kernel_assert(0);
+          break;
+      }
+      continue;
+    }
+
+    /* Handle a bidirectional connection before the path can create another one. */
+    const uint32_t bdpt_queued_kernel = INTEGRATOR_STATE(&state->bdpt, shadow_path, queued_kernel);
+    if (bdpt_queued_kernel) {
+      switch (bdpt_queued_kernel) {
+        case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW:
+          integrator_megakernel_intersect(kg,
+                                          [&] { integrator_intersect_shadow(kg, &state->bdpt); });
+          break;
+        case DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW:
+          integrator_shade_shadow(kg, &state->bdpt, render_buffer);
           break;
         default:
           kernel_assert(0);
@@ -72,7 +106,8 @@ ccl_device void integrator_megakernel(KernelGlobals kg,
     if (queued_kernel) {
       switch (queued_kernel) {
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST:
-          integrator_intersect_closest(kg, state, render_buffer);
+          integrator_megakernel_intersect(
+              kg, [&] { integrator_intersect_closest(kg, state, render_buffer); });
           break;
         case DEVICE_KERNEL_INTEGRATOR_SHADE_BACKGROUND:
           integrator_shade_background(kg, state, render_buffer);
@@ -96,16 +131,18 @@ ccl_device void integrator_megakernel(KernelGlobals kg,
           integrator_shade_dedicated_light(kg, state, render_buffer);
           break;
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE:
-          integrator_intersect_subsurface(kg, state);
+          integrator_megakernel_intersect(kg, [&] { integrator_intersect_subsurface(kg, state); });
           break;
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK:
-          integrator_intersect_volume_stack(kg, state);
+          integrator_megakernel_intersect(kg,
+                                          [&] { integrator_intersect_volume_stack(kg, state); });
           break;
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_DEDICATED_LIGHT:
-          integrator_intersect_dedicated_light(kg, state);
+          integrator_megakernel_intersect(
+              kg, [&] { integrator_intersect_dedicated_light(kg, state); });
           break;
         case DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE:
-          integrator_intersect_mnee(kg, state);
+          integrator_megakernel_intersect(kg, [&] { integrator_intersect_mnee(kg, state); });
           break;
         default:
           kernel_assert(0);
