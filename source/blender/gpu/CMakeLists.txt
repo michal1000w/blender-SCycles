@@ -638,6 +638,7 @@ set(GLSL_SRC
   shaders/material/gpu_shader_material_combine_transform.bsl.hh
   shaders/material/gpu_shader_material_combine_xyz.bsl.hh
   shaders/material/gpu_shader_material_compare.bsl.hh
+  shaders/material/gpu_shader_material_diffraction.bsl.hh
   shaders/material/gpu_shader_material_diffuse.bsl.hh
   shaders/material/gpu_shader_material_displacement.bsl.hh
   shaders/material/gpu_shader_material_eevee_specular.bsl.hh
