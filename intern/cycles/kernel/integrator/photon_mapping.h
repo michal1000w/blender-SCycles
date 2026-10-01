@@ -4,10 +4,11 @@
 
 #pragma once
 
-/* Progressive caustic photon mapping for the GPU integrator. Photon paths use the same scene
- * intersection, shader evaluation and closure sampling code as camera paths. The map stores only
- * the first non-specular surface following a sufficiently sharp glossy/transmission chain, so it
- * replaces the transport class which unidirectional path tracing samples particularly poorly. */
+/* Progressive caustic photon mapping for the Metal and CPU integrators. Photon paths use the
+ * same scene intersection, shader evaluation and closure sampling code as camera paths. The map
+ * stores only the first non-specular surface following a sufficiently sharp glossy/transmission
+ * chain, so it replaces the transport class which unidirectional path tracing samples
+ * particularly poorly. */
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/geom/shader_data.h"
@@ -21,6 +22,23 @@
 #include "util/atomic.h"
 
 CCL_NAMESPACE_BEGIN
+
+#ifndef __KERNEL_METAL__
+/* Defined in `shade_background.h` and `shade_volume.h`, which in turn use the photon map below.
+ * Metal kernels are members of one context class, where no prior declaration is needed. */
+ccl_device Spectrum integrator_eval_background_shader(KernelGlobals kg,
+                                                      IntegratorState state,
+                                                      ccl_global float *ccl_restrict render_buffer,
+                                                      ccl_private ShaderEvalResult &result);
+#endif
+#if defined(__VOLUME__) && !defined(__KERNEL_METAL__)
+ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg,
+                                                                IntegratorState state,
+                                                                const ccl_private Ray *ray,
+                                                                ccl_private Spectrum *power,
+                                                                ccl_private float3 *scatter_P,
+                                                                ccl_private int *receiver_object);
+#endif
 
 /* Tag volume receivers without growing the compact photon record. Cycles object indices are
  * non-negative, leaving the sign bit available to distinguish the 3D volume estimator from the
@@ -81,7 +99,7 @@ ccl_device_inline uint photon_hash_cell(const int3 cell, const int time_bin, con
   return hash_uint(x ^ y ^ z ^ t) & (hash_size - 1u);
 }
 
-ccl_device_inline int photon_time_bin(const float time)
+ccl_device_inline int photon_time_bin(KernelGlobals kg, const float time)
 {
   return min(float_to_int(time * float(kernel_data.integrator.photon_time_bins)),
              kernel_data.integrator.photon_time_bins - 1);
@@ -94,7 +112,10 @@ ccl_device_inline int3 photon_cell(const float3 P, const float radius)
                    float_to_int(floorf(P.z / radius)));
 }
 
-ccl_device_inline void photon_state_init(IntegratorState state, const uint seed, const uint sample)
+ccl_device_inline void photon_state_init(KernelGlobals kg,
+                                         IntegratorState state,
+                                         const uint seed,
+                                         const uint sample)
 {
   INTEGRATOR_STATE_WRITE(state, path, sample) = sample;
   INTEGRATOR_STATE_WRITE(state, path, bounce) = 0;
@@ -113,6 +134,30 @@ ccl_device_inline void photon_state_init(IntegratorState state, const uint seed,
   INTEGRATOR_STATE_WRITE(state, path, rng_offset) = 0;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = one_spectrum();
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
+  /* Every other field read while tracing, as path_state_init_integrator(). A state carries its
+   * previous path's values otherwise, and the CPU traces many light paths with one state: a
+   * growing volume boundary count, for example, would eventually stop crossing into media. */
+  INTEGRATOR_STATE_WRITE(state, path, volume_bounds_bounce) = 0;
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL) {
+    INTEGRATOR_STATE_WRITE(state, path, portal_bounce) = 0;
+  }
+  INTEGRATOR_STATE_WRITE(state, path, mis_ray_pdf) = 0.0f;
+  INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;
+  INTEGRATOR_STATE_WRITE(state, path, optical_depth) = 0.0f;
+  if (polarization_enabled(kg)) {
+    polarization_path_write(state, polarization_unpolarized());
+  }
+#ifdef __MNEE__
+  INTEGRATOR_STATE_WRITE(state, path, mnee) = 0;
+#endif
+  INTEGRATOR_STATE_WRITE(state, isect, object) = OBJECT_NONE;
+  INTEGRATOR_STATE_WRITE(state, isect, prim) = PRIM_NONE;
+  INTEGRATOR_STATE_WRITE(state, isect, type) = PRIMITIVE_NONE;
+#ifdef __LIGHT_LINKING__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_LINKING) {
+    INTEGRATOR_STATE_WRITE(state, path, mis_ray_object) = kernel_data.background.object_index;
+  }
+#endif
 #ifdef __KERNEL_METAL__
   if (kernel_data.integrator.use_guiding) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
@@ -124,7 +169,9 @@ ccl_device_inline void photon_state_init(IntegratorState state, const uint seed,
 #endif
 #ifdef __PATH_GUIDING__
   if (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) {
+    INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
     INTEGRATOR_STATE_WRITE(state, guiding, use_surface_guiding) = false;
+    INTEGRATOR_STATE_WRITE(state, guiding, use_volume_guiding) = false;
     INTEGRATOR_STATE_WRITE(state, guiding, path_segment) = nullptr;
   }
 #endif
@@ -617,7 +664,13 @@ ccl_device_inline void photon_store(KernelGlobals kg,
                                     const bool spectral,
                                     const bool volume)
 {
+#ifdef __KERNEL_GPU__
   const uint slot = atomic_fetch_and_add_uint32(kernel_integrator_state.photon_stored, 1);
+#else
+  /* A photon path stores at most one photon. The CPU gives every path its own slot and links the
+   * hash chains on the host in path order, so the map does not depend on thread scheduling. */
+  const uint slot = kg->photon_emit_index;
+#endif
   if (slot >= kernel_integrator_state.photon_capacity) {
     return;
   }
@@ -632,11 +685,39 @@ ccl_device_inline void photon_store(KernelGlobals kg,
   photon->receiver_object = volume ? photon_volume_receiver_object(receiver_object) :
                                      receiver_object;
 
+#ifdef __KERNEL_GPU__
   const int3 cell = photon_cell(P, kernel_integrator_state.photon_radius);
   const uint bucket = photon_hash_cell(
-      cell, photon_time_bin(time), kernel_integrator_state.photon_hash_size);
+      cell, photon_time_bin(kg, time), kernel_integrator_state.photon_hash_size);
   photon->next = atomic_exchange_uint32(&kernel_integrator_state.photon_hash[bucket], slot + 1u);
+#else
+  photon->next = 0u;
+  kernel_integrator_state.photon_valid[slot] = 1;
+#endif
 }
+
+#ifndef __KERNEL_GPU__
+/* Link the photons stored by all emitted paths into the hash chains, in path order, and return
+ * their number. The hash heads must be zero. */
+ccl_device uint integrator_photon_map_build(KernelGlobals kg)
+{
+  uint stored = 0;
+  for (uint slot = 0; slot < kernel_integrator_state.photon_capacity; slot++) {
+    if (!kernel_integrator_state.photon_valid[slot]) {
+      continue;
+    }
+    ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[slot];
+    const uint bucket = photon_hash_cell(
+        photon_cell(photon->P, kernel_integrator_state.photon_radius),
+        photon_time_bin(kg, photon_unpack_time(photon->time_wavelength)),
+        kernel_integrator_state.photon_hash_size);
+    photon->next = kernel_integrator_state.photon_hash[bucket];
+    kernel_integrator_state.photon_hash[bucket] = slot + 1u;
+    stored++;
+  }
+  return stored;
+}
+#endif
 
 ccl_device void integrator_photon_emit(KernelGlobals kg,
                                        IntegratorState state,
@@ -645,7 +726,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
 {
   uint rng = lcg_init(
       hash_uint3(photon_index, iteration, uint(kernel_data.integrator.seed) ^ 0x70686f74u));
-  photon_state_init(state, rng, iteration);
+  photon_state_init(kg, state, rng, iteration);
 
 #ifdef __SPECTRAL__
   /* shader_setup_wavelength() derives this same sample from the immutable photon path state.
@@ -769,7 +850,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
 
     bool has_receiver = false;
     for (int i = 0; i < sd.num_closure; i++) {
-      has_receiver |= surface_shader_photon_mapping_receiver(&sd.closure[i], sd.wi);
+      has_receiver |= surface_shader_photon_mapping_receiver(kg, &sd.closure[i], sd.wi);
     }
     const bool coherent_owned = kernel_data.integrator.coherent_specular_enabled &&
                                 (sd.object_flag & SD_OBJECT_COHERENT_DETECTOR) &&
@@ -903,7 +984,7 @@ ccl_device_inline bool photon_mapping_matches(KernelGlobals kg,
                                               const bool camera_spectral,
                                               const float camera_wavelength)
 {
-  if (photon_time_bin(photon_unpack_time(photon->time_wavelength)) != time_bin ||
+  if (photon_time_bin(kg, photon_unpack_time(photon->time_wavelength)) != time_bin ||
       photon->receiver_object != sd->object)
   {
     return false;
@@ -946,10 +1027,11 @@ ccl_device_inline bool photon_mapping_matches(KernelGlobals kg,
 }
 
 /* Return the photon density estimate already multiplied by the receiver BSDF. */
-ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
-                                                 IntegratorState state,
-                                                 ccl_private ShaderData *sd,
-                                                 ccl_global float *ccl_restrict render_buffer)
+ccl_device_inline_transport Spectrum
+photon_mapping_gather(KernelGlobals kg,
+                      IntegratorState state,
+                      ccl_private ShaderData *sd,
+                      ccl_global float *ccl_restrict render_buffer)
 {
   if (!kernel_data.integrator.use_photon_mapping || !kernel_integrator_state.photons ||
       kernel_integrator_state.photon_hash_size == 0)
@@ -959,7 +1041,7 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
 
   bool has_receiver = false;
   for (int i = 0; i < sd->num_closure; i++) {
-    has_receiver |= surface_shader_photon_mapping_receiver(&sd->closure[i], sd->wi);
+    has_receiver |= surface_shader_photon_mapping_receiver(kg, &sd->closure[i], sd->wi);
   }
   if (!has_receiver) {
     return zero_spectrum();
@@ -968,7 +1050,7 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
   const float radius = kernel_integrator_state.photon_radius;
   const float radius2 = sqr(radius);
   const int3 base = photon_cell(sd->P, radius);
-  const int time_bin = photon_time_bin(INTEGRATOR_STATE(state, ray, time));
+  const int time_bin = photon_time_bin(kg, INTEGRATOR_STATE(state, ray, time));
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const bool camera_spectral = (path_flag & PATH_RAY_SPECTRAL) != 0u;
 #ifdef __SPECTRAL__
@@ -1067,7 +1149,7 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
           const float3 light_direction = -photon_direction.decode();
           for (int i = 0; i < sd->num_closure; i++) {
             const ccl_private ShaderClosure *sc = &sd->closure[i];
-            if (surface_shader_photon_mapping_receiver(sc, sd->wi)) {
+            if (surface_shader_photon_mapping_receiver(kg, sc, sd->wi)) {
               float unused_pdf;
               receiver_eval += bsdf_eval(kg, sd, sc, light_direction, &unused_pdf) * sc->weight;
             }
@@ -1116,10 +1198,10 @@ ccl_device_inline Spectrum photon_mapping_gather(KernelGlobals kg,
   return sum;
 }
 
-ccl_device_inline void photon_mapping_write(KernelGlobals kg,
-                                            ConstIntegratorState state,
-                                            const Spectrum L,
-                                            ccl_global float *ccl_restrict render_buffer)
+ccl_device_inline_transport void photon_mapping_write(KernelGlobals kg,
+                                                      ConstIntegratorState state,
+                                                      const Spectrum L,
+                                                      ccl_global float *ccl_restrict render_buffer)
 {
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L;
   film_clamp_light(kg, &contribution, max(int(INTEGRATOR_STATE(state, path, bounce)), 1));

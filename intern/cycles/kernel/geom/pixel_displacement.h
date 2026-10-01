@@ -14,7 +14,7 @@
 
 CCL_NAMESPACE_BEGIN
 
-#ifdef __KERNEL_METAL__
+#ifdef __PIXEL_DISPLACEMENT__
 
 ccl_device_inline bool pixel_displacement_active(KernelGlobals kg, const int prim)
 {
@@ -36,6 +36,33 @@ ccl_device_inline bool pixel_displacement_intersects(KernelGlobals kg, const int
 {
   return pixel_displacement_rays && pixel_displacement_active(kg, prim);
 }
+
+#  if !defined(__KERNEL_METAL__) && \
+      (defined(__PIXEL_DISPLACEMENT_INTERSECT__) || defined(__PIXEL_DISPLACEMENT_SHADE__))
+/* Implemented in `pixel_displacement_shader.h`, which evaluates shaders and therefore depends on
+ * the ray intersection code that calls these. Metal kernels are members of one context class,
+ * where these calls need no prior declaration. */
+ccl_device_inline bool pixel_displacement_intersect_displaced_surface(KernelGlobals kg,
+                                                                      const float3 P,
+                                                                      const float3 dir,
+                                                                      const float tmin,
+                                                                      const float tmax,
+                                                                      const float time,
+                                                                      const int object,
+                                                                      const int prim,
+                                                                      const bool motion,
+                                                                      ccl_private const float3
+                                                                          verts[3],
+                                                                      ccl_private float *r_u,
+                                                                      ccl_private float *r_v,
+                                                                      ccl_private float *r_t);
+ccl_device_noinline void pixel_displacement_shader_setup(KernelGlobals kg,
+                                                         ccl_private ShaderData *sd,
+                                                         const float time,
+                                                         const bool motion,
+                                                         ccl_private const float3 verts[3]);
+ccl_device_inline bool pixel_displacement_cache_is_open_surface(KernelGlobals kg, const int prim);
+#  endif
 
 ccl_device_inline float3 pixel_displacement_base_position(ccl_private const float3 verts[3],
                                                           const float u,

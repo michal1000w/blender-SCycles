@@ -34,29 +34,42 @@
 
 CCL_NAMESPACE_BEGIN
 
-static bool device_supports_pixel_displacement(const Device *device)
+/* Pixel-level displacement is implemented by the Metal and CPU kernels. A multi-device render
+ * uses it only when every device supports it. */
+static bool device_supports_pixel_displacement(const DeviceInfo &info)
 {
-  if (device->info.type == DEVICE_METAL) {
+  if (info.type == DEVICE_METAL || info.type == DEVICE_CPU) {
     return true;
   }
 
-  if (device->info.type == DEVICE_MULTI) {
-    for (const DeviceInfo &subdevice : device->info.multi_devices) {
-      if (subdevice.type != DEVICE_METAL) {
+  if (info.type == DEVICE_MULTI) {
+    for (const DeviceInfo &subdevice : info.multi_devices) {
+      if (!device_supports_pixel_displacement(subdevice)) {
         return false;
       }
     }
-    return !device->info.multi_devices.empty();
+    return !info.multi_devices.empty();
   }
 
   return false;
+}
+
+static bool device_supports_pixel_displacement(const Device *device)
+{
+  return device_supports_pixel_displacement(device->info);
+}
+
+bool bvh_layout_supports_pixel_displacement(const BVHLayout bvh_layout)
+{
+  return bvh_layout == BVH_LAYOUT_BVH2 || bvh_layout == BVH_LAYOUT_METAL ||
+         bvh_layout == BVH_LAYOUT_EMBREE || bvh_layout == BVH_LAYOUT_MULTI_METAL_EMBREE;
 }
 
 static bool scene_uses_pixel_displacement(const Scene *scene,
                                           const Device *device,
                                           const BVHLayout bvh_layout)
 {
-  const bool supported_layout = bvh_layout == BVH_LAYOUT_BVH2 || bvh_layout == BVH_LAYOUT_METAL;
+  const bool supported_layout = bvh_layout_supports_pixel_displacement(bvh_layout);
   return scene->integrator->get_use_pixel_displacement() && supported_layout &&
          device_supports_pixel_displacement(device) &&
          scene->integrator->get_pixel_displacement_scale() != 0.0f &&
@@ -884,6 +897,18 @@ void GeometryManager::device_update(Device *device,
   const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
       scene->params.bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
   const bool use_pixel_displacement = scene_uses_pixel_displacement(scene, device, bvh_layout);
+
+  /* Acceleration structures of another layout cannot be refitted or reused: rebuild all. */
+  if (last_bvh_layout_ != BVH_LAYOUT_NONE && last_bvh_layout_ != bvh_layout) {
+    LOG_INFO << "BVH layout changed from " << bvh_layout_name(last_bvh_layout_) << " to "
+             << bvh_layout_name(bvh_layout) << ", rebuilding all acceleration structures.";
+    for (Geometry *geom : scene->geometry) {
+      geom->need_update_rebuild = true;
+      geom->need_update_bvh_for_offset = true;
+    }
+    scene->bvh.reset();
+  }
+  last_bvh_layout_ = bvh_layout;
 
   bool true_displacement_used = false;
   bool curve_need_update_shadow_transparency = false;

@@ -29,6 +29,32 @@ KERNEL_INTEGRATOR_INIT_FUNCTION(init_from_camera);
 KERNEL_INTEGRATOR_INIT_FUNCTION(init_from_bake);
 KERNEL_INTEGRATOR_SHADE_FUNCTION(megakernel);
 
+/* Light-cache transport: photon mapping and bidirectional path tracing. */
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_emit)(const ThreadKernelGlobalsCPU *ccl_restrict
+                                                           kg,
+                                                       IntegratorStateCPU *state,
+                                                       const int photon_index,
+                                                       const int iteration);
+int KERNEL_FUNCTION_FULL_NAME(integrator_photon_map_build)(
+    const ThreadKernelGlobalsCPU *ccl_restrict kg);
+void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_light_generate)(
+    const ThreadKernelGlobalsCPU *ccl_restrict kg,
+    IntegratorStateCPU *state,
+    const int light_path_index,
+    const int iteration,
+    const int batch_samples);
+void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_cache_order)(
+    const ThreadKernelGlobalsCPU *ccl_restrict kg);
+void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_sensor_connect)(
+    const ThreadKernelGlobalsCPU *ccl_restrict kg,
+    IntegratorStateCPU *state,
+    const int vertex_index,
+    const int iteration,
+    const int batch_samples,
+    ccl_global float *render_buffer,
+    uint *film_locks,
+    const int film_locks_num);
+
 #undef KERNEL_INTEGRATOR_FUNCTION
 #undef KERNEL_INTEGRATOR_INIT_FUNCTION
 #undef KERNEL_INTEGRATOR_SHADE_FUNCTION

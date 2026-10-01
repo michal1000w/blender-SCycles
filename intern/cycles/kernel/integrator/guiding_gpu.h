@@ -6,18 +6,53 @@
 
 #include "kernel/globals.h"
 #include "kernel/integrator/state.h"
-#include "kernel/sample/guiding_field.h"
-#include "kernel/sample/guiding_history.h"
-#include "kernel/sample/guiding_mixture_conditional.h"
-#include "kernel/sample/guiding_mixture_fit_metal.h"
-#include "kernel/sample/guiding_observation_range.h"
-#include "kernel/util/colorspace.h"
-#include "util/hash.h"
-#include "util/types_normal.h"
+#ifdef __KERNEL_METAL__
+#  include "kernel/sample/guiding_field.h"
+#  include "kernel/sample/guiding_history.h"
+#  include "kernel/sample/guiding_mixture_conditional.h"
+#  include "kernel/sample/guiding_mixture_fit_metal.h"
+#  include "kernel/sample/guiding_observation_range.h"
+#  include "kernel/util/colorspace.h"
+#  include "util/hash.h"
+#  include "util/types_normal.h"
+#endif
 
 CCL_NAMESPACE_BEGIN
 
-#ifdef __KERNEL_METAL__
+#ifndef __KERNEL_METAL__
+
+/* The Metal guiding field is trained by the Metal path tracer only. Other devices guide with
+ * OpenPGL, see `guiding.h`. Light-cache transport code shared with Metal records its training
+ * observations through these functions, which do nothing here. */
+
+ccl_device_inline float3 guiding_gpu_surface_orientation(const ccl_private ShaderData *sd)
+{
+  return (sd->runtime_flag & SR_BACKFACING) ? -sd->Ng : sd->Ng;
+}
+
+ccl_device_inline bool guiding_gpu_training()
+{
+  return false;
+}
+
+ccl_device_inline void guiding_gpu_shadow_endpoint(IntegratorShadowState /*state*/,
+                                                   const float3 /*P*/)
+{
+}
+
+ccl_device_inline void guiding_gpu_record_direct(IntegratorShadowState /*shadow_state*/,
+                                                 ConstIntegratorState /*state*/,
+                                                 const float3 /*P*/,
+                                                 const float3 /*direction*/,
+                                                 const Spectrum /*scattering_throughput*/,
+                                                 const bool /*volume*/,
+                                                 const float3 /*normal*/ = zero_float3(),
+                                                 const bool /*indirect_connection*/ = false,
+                                                 const float /*distance*/ = FLT_MAX)
+{
+}
+
+#else /* __KERNEL_METAL__ */
 
 ccl_device_inline float3 guiding_gpu_surface_orientation(const ccl_private ShaderData *sd)
 {

@@ -224,6 +224,8 @@ class Mesh : public Geometry {
   bool triangle_normal_displacement_bounds_pad(const size_t i,
                                                const float max_distance,
                                                float3 *r_pad) const;
+  /* Grow the bounds of triangle `i` to enclose its pixel displaced surface. */
+  void grow_pixel_displacement_bounds(const size_t triangle_index, BoundBox &bounds) const;
 
   void tessellate(SubdParams &params);
 
