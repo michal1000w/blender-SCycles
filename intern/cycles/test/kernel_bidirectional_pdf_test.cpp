@@ -14,10 +14,27 @@
 #include "kernel/sample/manifold.h"
 #include "kernel/sample/sobol_burley.h"
 
+#include "util/profiling.h"
+
 #include <random>
 #include <vector>
 
 CCL_NAMESPACE_BEGIN
+
+/* Kernel globals of a scene without optional kernel features, for closures that read them. */
+struct TestKernelGlobals {
+  KernelGlobalsCPU global;
+  Profiler profiler;
+  ThreadKernelGlobalsCPU thread;
+
+  TestKernelGlobals() : thread(init(global), nullptr, profiler, 0) {}
+
+  static KernelGlobalsCPU &init(KernelGlobalsCPU &global)
+  {
+    global.data.kernel_features = 0;
+    return global;
+  }
+};
 
 TEST(BidirectionalPDF, PrimaryVolumeEmissionSharesThreeStrategyPartition)
 {
@@ -769,6 +786,8 @@ TEST(BidirectionalPDF, CameraClippingPreservesDirectStrategyPartition)
 
 TEST(BidirectionalPDF, IndexMatchedTransmissionIsDiscrete)
 {
+  TestKernelGlobals globals;
+  const KernelGlobals kg = &globals.thread;
   MicrofacetBsdf bsdf{};
   bsdf.N = make_float3(0, 0, 1);
   bsdf.ior = 1.0f + 1e-5f;
@@ -780,7 +799,7 @@ TEST(BidirectionalPDF, IndexMatchedTransmissionIsDiscrete)
   float3 wo;
   float pdf, eta;
   float2 roughness;
-  const int label = bsdf_microfacet_sample<GGX>(nullptr,
+  const int label = bsdf_microfacet_sample<GGX>(kg,
                                                 (const ShaderClosure *)&bsdf,
                                                 bsdf.N,
                                                 bsdf.N,
@@ -797,6 +816,8 @@ TEST(BidirectionalPDF, IndexMatchedTransmissionIsDiscrete)
 
 TEST(BidirectionalPDF, MicrofacetTransmissionReciprocity)
 {
+  TestKernelGlobals globals;
+  const KernelGlobals kg = &globals.thread;
   std::mt19937 rng(73921);
   const auto random = [&]() { return (float(rng() >> 9) + 0.5f) * 0x1p-23f; };
   int checked = 0;
@@ -816,7 +837,7 @@ TEST(BidirectionalPDF, MicrofacetTransmissionReciprocity)
           float3 wo;
           float pdf, eta;
           float2 sampled_roughness;
-          const int label = bsdf_microfacet_sample<GGX>(nullptr,
+          const int label = bsdf_microfacet_sample<GGX>(kg,
                                                         (const ShaderClosure *)&forward,
                                                         geometric_normal,
                                                         wi,
@@ -834,7 +855,7 @@ TEST(BidirectionalPDF, MicrofacetTransmissionReciprocity)
           reverse.ior = 1.0f / ior;
           float reverse_pdf = 0.0f;
           const Spectrum reverse_eval = bsdf_microfacet_eval<GGX>(
-              nullptr, (const ShaderClosure *)&reverse, wo, wi, &reverse_pdf);
+              kg, (const ShaderClosure *)&reverse, wo, wi, &reverse_pdf);
           ASSERT_GT(reverse_pdf, 0.0f);
           const float camera_f = average(eval) / fabsf(dot(forward.N, wo));
           const float adjoint_f = average(reverse_eval) / fabsf(dot(reverse.N, wi));
@@ -888,6 +909,8 @@ TEST(BidirectionalPDF, ManifoldNormalsMatchGlassAndRefractionDistributions)
 
 TEST(BidirectionalPDF, ManifoldTransmissionMatchesCameraBsdfInHalfVectorMeasure)
 {
+  TestKernelGlobals globals;
+  const KernelGlobals kg = &globals.thread;
   for (const ClosureType type : {CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID,
                                 CLOSURE_BSDF_MICROFACET_GGX_GLASS_ID,
                                 CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID,
@@ -911,8 +934,8 @@ TEST(BidirectionalPDF, ManifoldTransmissionMatchesCameraBsdfInHalfVectorMeasure)
         ASSERT_LT(wo.z, 0);
         float pdf = 0;
         const Spectrum camera = beckmann ?
-            bsdf_microfacet_beckmann_eval(nullptr, closure, wi, wo, &pdf) :
-            bsdf_microfacet_ggx_eval(nullptr, closure, wi, wo, &pdf);
+            bsdf_microfacet_beckmann_eval(kg, closure, wi, wo, &pdf) :
+            bsdf_microfacet_ggx_eval(kg, closure, wi, wo, &pdf);
         ASSERT_GT(pdf, 0);
         const float D = beckmann ? bsdf_D<MicrofacetType::BECKMANN>(sqr(.35f), h.z) :
                                    bsdf_D<MicrofacetType::GGX>(sqr(.35f), h.z);
@@ -921,7 +944,7 @@ TEST(BidirectionalPDF, ManifoldTransmissionMatchesCameraBsdfInHalfVectorMeasure)
                                          (sqr(bsdf.ior) * fabsf(dot(wo, h)));
         const Spectrum expected = bsdf.weight * camera * direction_jacobian /
                                   (half_vector_pdf * h.z);
-        const Spectrum actual = mnee_eval_bsdf_contribution(nullptr, closure, wi, wo);
+        const Spectrum actual = mnee_eval_bsdf_contribution(kg, closure, wi, wo);
         for (int c = 0; c < 3; ++c) {
           EXPECT_NEAR(actual[c], expected[c], 2e-5f * fabsf(expected[c]))
               << int(type) << " energy=" << energy_scale << " cosine=" << cosine;
