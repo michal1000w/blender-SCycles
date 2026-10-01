@@ -172,6 +172,26 @@ CCL_NAMESPACE_BEGIN
 #  define __VOLUME_RECORD_ALL__
 #endif /* !__KERNEL_GPU__ */
 
+/* Light-cache transport (bidirectional path tracing and photon mapping) and pixel-level
+ * displacement. The host schedules their light-cache passes for Metal and CPU devices only. */
+#if defined(__KERNEL_METAL__) || !defined(__KERNEL_GPU__)
+#  define __BDPT__
+#  define __PHOTON_MAPPING__
+#  define __PIXEL_DISPLACEMENT__
+#endif
+/* Metal compiles displaced-surface intersection and shading into scene specialized variants
+ * only. CPU translation units that render (the kernels and OSL services) always contain them and
+ * test the scene settings at runtime; they define __KERNEL_CPU_PIXEL_DISPLACEMENT__ and include
+ * `kernel/geom/pixel_displacement_shader.h`. Other host code using kernel headers does not. */
+#if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT__) || \
+    (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__))
+#  define __PIXEL_DISPLACEMENT_INTERSECT__
+#endif
+#if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__) || \
+    (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__))
+#  define __PIXEL_DISPLACEMENT_SHADE__
+#endif
+
 /* MNEE caused "Compute function exceeds available temporary registers" in macOS < 13 due to a bug
  * in spill buffer allocation sizing. */
 #if defined(__KERNEL_METAL__) && (__KERNEL_METAL_MACOS__ < 13)

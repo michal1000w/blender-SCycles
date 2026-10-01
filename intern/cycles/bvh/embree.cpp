@@ -124,6 +124,7 @@ void BVHEmbree::build(Progress &progress,
   }
   /* Only bounds callbacks read these copies, and only while committing. */
   coherent_point_data.clear();
+  pixel_displacement_geometry.clear();
 
   const bool dynamic = params.bvh_type == BVH_TYPE_DYNAMIC;
   const bool compact = params.use_compact_structure;
@@ -313,6 +314,33 @@ void BVHEmbree::add_instance(Object *ob, const int i)
   rtcReleaseGeometry(geom_id);
 }
 
+/* Bounds of a pixel displaced triangle at one motion time step, the same as those of the BVH2
+ * build. Embree interpolates the bounds of neighboring time steps linearly, as Cycles does with
+ * the triangle vertices; the displacement pad is isotropic for moving meshes. */
+static void rtc_pixel_displacement_bounds_func(const RTCBoundsFunctionArguments *args)
+{
+  const Mesh *mesh = static_cast<const Mesh *>(args->geometryUserPtr);
+  const size_t triangle_index = args->primID;
+  const Attribute *attr_P = mesh->attributes.find(ATTR_STD_POSITION);
+  size_t num_motion_steps = 1;
+  if (mesh->has_motion_blur() && attr_P->has_motion()) {
+    num_motion_steps = min(size_t(mesh->get_motion_steps()), size_t(RTC_MAX_TIME_STEP_COUNT));
+  }
+  const packed_float3 *verts = attr_P->data_at_time_step<packed_float3>(args->timeStep,
+                                                                        num_motion_steps);
+
+  BoundBox bounds = BoundBox::empty;
+  mesh->get_triangle(triangle_index).bounds_grow(verts, bounds);
+  mesh->grow_pixel_displacement_bounds(triangle_index, bounds);
+
+  args->bounds_o->lower_x = bounds.min.x;
+  args->bounds_o->lower_y = bounds.min.y;
+  args->bounds_o->lower_z = bounds.min.z;
+  args->bounds_o->upper_x = bounds.max.x;
+  args->bounds_o->upper_y = bounds.max.y;
+  args->bounds_o->upper_z = bounds.max.z;
+}
+
 void BVHEmbree::add_triangles(const Object *ob, const Mesh *mesh, const int i)
 {
   const Attribute *attr_P = nullptr;
@@ -328,6 +356,22 @@ void BVHEmbree::add_triangles(const Object *ob, const Mesh *mesh, const int i)
   num_motion_steps = min(num_motion_steps, (size_t)RTC_MAX_TIME_STEP_COUNT);
 
   const size_t num_triangles = mesh->num_triangles();
+
+  if (mesh->use_pixel_displacement && !rtc_device_is_sycl) {
+    RTCGeometry geom_id = rtcNewGeometry(rtc_device, RTC_GEOMETRY_TYPE_USER);
+    rtcSetGeometryBuildQuality(geom_id, build_quality);
+    rtcSetGeometryTimeStepCount(geom_id, num_motion_steps);
+    rtcSetGeometryUserPrimitiveCount(geom_id, unsigned(num_triangles));
+    rtcSetGeometryUserData(geom_id, const_cast<Mesh *>(mesh));
+    rtcSetGeometryBoundsFunction(geom_id, rtc_pixel_displacement_bounds_func, nullptr);
+    rtcSetGeometryMask(geom_id, ob->visibility_for_tracing());
+    rtcSetGeometryEnableFilterFunctionFromArguments(geom_id, true);
+    rtcCommitGeometry(geom_id);
+    rtcAttachGeometryByID(scene, geom_id, i * 2);
+    rtcReleaseGeometry(geom_id);
+    pixel_displacement_geometry.insert(unsigned(i * 2));
+    return;
+  }
 
   RTCGeometry geom_id = rtcNewGeometry(rtc_device, RTC_GEOMETRY_TYPE_TRIANGLE);
   rtcSetGeometryBuildQuality(geom_id, build_quality);
@@ -775,7 +819,10 @@ void BVHEmbree::refit(Progress &progress)
         Mesh *mesh = static_cast<Mesh *>(geom);
         if (mesh->num_triangles() > 0) {
           RTCGeometry geom = rtcGetGeometry(scene, geom_id);
-          set_tri_vertex_buffer(geom, mesh, true);
+          /* User geometry bounds are recomputed from the mesh when committing. */
+          if (!pixel_displacement_geometry.count(geom_id)) {
+            set_tri_vertex_buffer(geom, mesh, true);
+          }
           rtcCommitGeometry(geom);
         }
       }

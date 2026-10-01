@@ -715,6 +715,50 @@ ccl_device_inline void volume_shader_eval(KernelGlobals kg,
   }
 }
 
+/* Volume shader properties
+ *
+ * extinction coefficient = absorption coefficient + scattering coefficient
+ * sigma_t = sigma_a + sigma_s */
+
+struct VolumeShaderCoefficients {
+  Spectrum sigma_t;
+  Spectrum sigma_s;
+  Spectrum emission;
+};
+
+/* Evaluate shader to get absorption, scattering and emission at P. */
+ccl_device_inline bool volume_shader_sample(KernelGlobals kg,
+                                            IntegratorState state,
+                                            ccl_private ShaderData *ccl_restrict sd,
+                                            ccl_private VolumeShaderCoefficients *coeff)
+{
+  const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+  volume_shader_eval<false>(kg, state, sd, path_visibility, path_flag);
+
+  if (!(sd->runtime_flag & (SR_EXTINCTION | SR_SCATTER | SR_EMISSION))) {
+    return false;
+  }
+
+  coeff->sigma_s = zero_spectrum();
+  coeff->sigma_t = (sd->runtime_flag & SR_EXTINCTION) ? sd->closure_transparent_extinction :
+                                                        zero_spectrum();
+  coeff->emission = (sd->runtime_flag & SR_EMISSION) ? sd->closure_emission_background :
+                                                       zero_spectrum();
+
+  if (sd->runtime_flag & SR_SCATTER) {
+    for (int i = 0; i < sd->num_closure; i++) {
+      const ccl_private ShaderClosure *sc = &sd->closure[i];
+
+      if (CLOSURE_IS_VOLUME(sc->type)) {
+        coeff->sigma_s += sc->weight;
+      }
+    }
+  }
+
+  return true;
+}
+
 #endif /* __VOLUME__ */
 
 CCL_NAMESPACE_END

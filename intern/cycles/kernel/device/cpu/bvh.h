@@ -68,6 +68,18 @@ using CCLKernelContext = RTCRayQueryContext;
  * only the base context and read the kernel globals through it. */
 struct CCLKernelContext : public RTCRayQueryContext {
   KernelGlobals kg;
+  /* Primitives the ray starts from, for the pixel displacement shadow edge rule. */
+  const RaySelfPrimitives *ray_self = nullptr;
+  /* Local queries intersect the base triangles of pixel displaced meshes, as the BVH2
+   * traversal of triangle_intersect_local() does. */
+  bool local_query = false;
+  /* Object of a local query that traverses the object's own acceleration structure, where hit
+   * geometry IDs do not identify the object. */
+  int local_object = OBJECT_NONE;
+  /* Filter of the query. User geometry callbacks run it for their hits, as Embree does for
+   * built-in geometry: rtcInvoke*FilterFromGeometry() only runs the geometry's own filter
+   * unless the query sets RTC_RAY_QUERY_FLAG_INVOKE_ARGUMENT_FILTER. */
+  RTCFilterFunctionN filter = nullptr;
 };
 #endif
 
@@ -472,14 +484,12 @@ kernel_embree_filter_occluded_volume_all_func_static(const RTCFilterFunctionNArg
  * as a native hit, nearest first, so self and shadow rules are unchanged. */
 ccl_device_inline bool kernel_embree_coherent_point_root(const RTCRay &ray,
                                                          const KernelGlobals kg,
-                                                         const unsigned int inst_id,
-                                                         const unsigned int geom_id,
+                                                         const int object,
                                                          const unsigned int prim_id,
                                                          const int root,
                                                          ccl_private float *t,
                                                          ccl_private float3 *Ng)
 {
-  const int object = int((inst_id != RTC_INVALID_GEOMETRY_ID ? inst_id : geom_id) / 2);
   const int prim = int(prim_id) + kernel_data_fetch(object_prim_offset, object);
   const int type = kernel_data_fetch(objects, object).primitive_type;
   const float4 point = kernel_data_fetch(points,
@@ -535,7 +545,104 @@ ccl_device_inline void kernel_embree_coherent_point_hit(RTCHit &hit,
 #  endif
 }
 
-ccl_device void kernel_embree_coherent_point_intersect_func(
+/* Pixel displaced meshes are Embree user geometry (see BVHEmbree::add_triangles), with
+ * triangle bounds that enclose the displaced surface. A hit is resolved as the BVH2 traversal
+ * does in triangle_intersect() and motion_triangle_intersect(): rays of the intersection kernels
+ * solve for the displaced surface, other rays and local queries hit the base triangle. Shadow
+ * rays skip the displaced surface across the shared edge of the triangle they start from. */
+ccl_device_inline bool kernel_embree_displaced_triangle_hit(const CCLKernelContext *ctx,
+                                                            const RTCRay &ray,
+                                                            const int object,
+                                                            const int prim,
+                                                            ccl_private float *t,
+                                                            ccl_private float *u,
+                                                            ccl_private float *v,
+                                                            ccl_private float3 *Ng)
+{
+  const KernelGlobals kg = ctx->kg;
+  const bool motion = kernel_data_fetch(objects, object).primitive_type ==
+                      PRIMITIVE_MOTION_TRIANGLE;
+  float3 verts[3];
+  if (motion) {
+    motion_triangle_vertices(kg, object, prim, ray.time, verts);
+  }
+  else {
+    triangle_vertices(kg, object, prim, verts);
+  }
+  const float3 P = make_float3(ray.org_x, ray.org_y, ray.org_z);
+  const float3 D = make_float3(ray.dir_x, ray.dir_y, ray.dir_z);
+  *Ng = cross(verts[1] - verts[0], verts[2] - verts[0]);
+
+  bool hit;
+#  ifdef __PIXEL_DISPLACEMENT_INTERSECT__
+  if (!ctx->local_query && pixel_displacement_intersects(kg, prim)) {
+    hit = pixel_displacement_intersect_displaced_surface(kg,
+                                                         P,
+                                                         D,
+                                                         ray.tnear,
+                                                         ray.tfar,
+                                                         motion ? ray.time : 0.5f,
+                                                         object,
+                                                         prim,
+                                                         motion,
+                                                         verts,
+                                                         u,
+                                                         v,
+                                                         t);
+  }
+  else
+#  endif
+  {
+    hit = ray_triangle_intersect(P, D, ray.tnear, ray.tfar, verts[0], verts[1], verts[2], u, v, t);
+  }
+#  ifdef __PIXEL_DISPLACEMENT_INTERSECT__
+  if (hit && !ctx->local_query && (ray.mask & PATH_RAY_VISIBILITY_SHADOW) && ctx->ray_self &&
+      pixel_displacement_shared_edge_shadow_hit(kg, *ctx->ray_self, object, prim, *u, *v))
+  {
+    hit = false;
+  }
+#  endif
+  return hit;
+}
+
+/* One candidate hit of a user geometry primitive, nearest first. */
+ccl_device_inline bool kernel_embree_user_geometry_hit(const CCLKernelContext *ctx,
+                                                       const RTCRay &ray,
+                                                       const unsigned int inst_id,
+                                                       const unsigned int geom_id,
+                                                       const unsigned int prim_id,
+                                                       const int candidate,
+                                                       RTCHit &hit,
+                                                       ccl_private float *t)
+{
+  const KernelGlobals kg = ctx->kg;
+  const int object = (ctx->local_object != OBJECT_NONE) ?
+                         ctx->local_object :
+                         int((inst_id != RTC_INVALID_GEOMETRY_ID ? inst_id : geom_id) / 2);
+  const int type = kernel_data_fetch(objects, object).primitive_type;
+  float3 Ng;
+  float u = 0.0f;
+  float v = 0.0f;
+  if (type & PRIMITIVE_TRIANGLE) {
+    /* A displaced surface is solved for its nearest root. */
+    if (candidate != 0) {
+      return false;
+    }
+    const int prim = int(prim_id) + kernel_data_fetch(object_prim_offset, object);
+    if (!kernel_embree_displaced_triangle_hit(ctx, ray, object, prim, t, &u, &v, &Ng)) {
+      return false;
+    }
+  }
+  else if (!kernel_embree_coherent_point_root(ray, kg, object, prim_id, candidate, t, &Ng)) {
+    return false;
+  }
+  kernel_embree_coherent_point_hit(hit, Ng, inst_id, geom_id, prim_id);
+  hit.u = u;
+  hit.v = v;
+  return true;
+}
+
+ccl_device void kernel_embree_user_geometry_intersect_func(
     const RTCIntersectFunctionNArguments *args)
 {
   assert(args->N == 1);
@@ -545,16 +652,14 @@ ccl_device void kernel_embree_coherent_point_intersect_func(
   const CCLKernelContext *ctx = static_cast<const CCLKernelContext *>(args->context);
   RTCRayHit *rayhit = reinterpret_cast<RTCRayHit *>(args->rayhit);
   const unsigned int inst_id = args->context->instID[0];
-  for (int root = 0; root < 2; root++) {
+  for (int candidate = 0; candidate < 2; candidate++) {
     float t;
-    float3 Ng;
-    if (!kernel_embree_coherent_point_root(
-            rayhit->ray, ctx->kg, inst_id, args->geomID, args->primID, root, &t, &Ng))
+    RTCHit hit;
+    if (!kernel_embree_user_geometry_hit(
+            ctx, rayhit->ray, inst_id, args->geomID, args->primID, candidate, hit, &t))
     {
       continue;
     }
-    RTCHit hit;
-    kernel_embree_coherent_point_hit(hit, Ng, inst_id, args->geomID, args->primID);
     const float previous_tfar = rayhit->ray.tfar;
     rayhit->ray.tfar = t;
     int valid = -1;
@@ -565,7 +670,9 @@ ccl_device void kernel_embree_coherent_point_intersect_func(
     filter_args.ray = reinterpret_cast<RTCRayN *>(&rayhit->ray);
     filter_args.hit = reinterpret_cast<RTCHitN *>(&hit);
     filter_args.N = 1;
-    rtcInvokeIntersectFilterFromGeometry(args, &filter_args);
+    if (ctx->filter) {
+      ctx->filter(&filter_args);
+    }
     if (valid != 0) {
       rayhit->hit = hit;
       return;
@@ -574,7 +681,7 @@ ccl_device void kernel_embree_coherent_point_intersect_func(
   }
 }
 
-ccl_device void kernel_embree_coherent_point_occluded_func(
+ccl_device void kernel_embree_user_geometry_occluded_func(
     const RTCOccludedFunctionNArguments *args)
 {
   assert(args->N == 1);
@@ -584,16 +691,14 @@ ccl_device void kernel_embree_coherent_point_occluded_func(
   const CCLKernelContext *ctx = static_cast<const CCLKernelContext *>(args->context);
   RTCRay *ray = reinterpret_cast<RTCRay *>(args->ray);
   const unsigned int inst_id = args->context->instID[0];
-  for (int root = 0; root < 2; root++) {
+  for (int candidate = 0; candidate < 2; candidate++) {
     float t;
-    float3 Ng;
-    if (!kernel_embree_coherent_point_root(
-            *ray, ctx->kg, inst_id, args->geomID, args->primID, root, &t, &Ng))
+    RTCHit hit;
+    if (!kernel_embree_user_geometry_hit(
+            ctx, *ray, inst_id, args->geomID, args->primID, candidate, hit, &t))
     {
       continue;
     }
-    RTCHit hit;
-    kernel_embree_coherent_point_hit(hit, Ng, inst_id, args->geomID, args->primID);
     const float previous_tfar = ray->tfar;
     ray->tfar = t;
     int valid = -1;
@@ -604,7 +709,9 @@ ccl_device void kernel_embree_coherent_point_occluded_func(
     filter_args.ray = reinterpret_cast<RTCRayN *>(ray);
     filter_args.hit = reinterpret_cast<RTCHitN *>(&hit);
     filter_args.N = 1;
-    rtcInvokeOccludedFilterFromGeometry(args, &filter_args);
+    if (ctx->filter) {
+      ctx->filter(&filter_args);
+    }
     if (valid != 0) {
       /* Embree convention for an occluded ray. */
       ray->tfar = -FLT_MAX;
@@ -615,9 +722,9 @@ ccl_device void kernel_embree_coherent_point_occluded_func(
 }
 
 #  define KERNEL_EMBREE_SET_USER_INTERSECT(args) \
-    (args).intersect = kernel_embree_coherent_point_intersect_func
+    (args).intersect = kernel_embree_user_geometry_intersect_func
 #  define KERNEL_EMBREE_SET_USER_OCCLUDED(args) \
-    (args).occluded = kernel_embree_coherent_point_occluded_func
+    (args).occluded = kernel_embree_user_geometry_occluded_func
 #else
 #  define KERNEL_EMBREE_SET_USER_INTERSECT(args)
 #  define KERNEL_EMBREE_SET_USER_OCCLUDED(args)
@@ -645,6 +752,9 @@ ccl_device_intersect bool kernel_embree_intersect(KernelGlobals kg,
 
   RTCRayHit ray_hit;
   ctx.ray = ray;
+#ifndef __KERNEL_ONEAPI__
+  ctx.ray_self = &ray->self;
+#endif
   kernel_embree_setup_rayhit(*ray, ray_hit, visibility);
 
   RTCIntersectArguments args;
@@ -652,6 +762,9 @@ ccl_device_intersect bool kernel_embree_intersect(KernelGlobals kg,
   args.filter = reinterpret_cast<RTCFilterFunctionN>(kernel_embree_filter_intersection_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
+#ifndef __KERNEL_ONEAPI__
+  ctx.filter = args.filter;
+#endif
   KERNEL_EMBREE_SET_USER_INTERSECT(args);
   rtcTraversableIntersect1(kernel_data.device_bvh, &ray_hit, &args);
   if (ray_hit.hit.geomID == RTC_INVALID_GEOMETRY_ID ||
@@ -694,6 +807,11 @@ ccl_device_intersect bool kernel_embree_intersect_local(KernelGlobals kg,
     local_isect->num_hits = 0;
   }
   ctx.local_object_id = local_object;
+#  ifndef __KERNEL_ONEAPI__
+  ctx.ray_self = &ray->self;
+  ctx.local_query = true;
+  ctx.local_object = has_bvh ? local_object : OBJECT_NONE;
+#  endif
   RTCRay rtc_ray;
   kernel_embree_setup_ray(*ray, rtc_ray, PATH_RAY_VISIBILITY_ALL);
 
@@ -703,6 +821,9 @@ ccl_device_intersect bool kernel_embree_intersect_local(KernelGlobals kg,
   args.filter = reinterpret_cast<RTCFilterFunctionN>(kernel_embree_filter_occluded_local_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
+#  ifndef __KERNEL_ONEAPI__
+  ctx.filter = args.filter;
+#  endif
 
   /* If this object has its own BVH, use it. */
   if (has_bvh) {
@@ -752,6 +873,9 @@ ccl_device_intersect void kernel_embree_intersect_shadow_all(KernelGlobals kg,
   ctx.kg = kg;
 #  endif
   ctx.payload = &payload;
+#  ifndef __KERNEL_ONEAPI__
+  ctx.ray_self = &payload.base.ray_self;
+#  endif
 
   RTCRay rtc_ray;
   kernel_embree_setup_ray(*ray, rtc_ray, payload.base.ray_visibility);
@@ -763,6 +887,9 @@ ccl_device_intersect void kernel_embree_intersect_shadow_all(KernelGlobals kg,
       kernel_embree_filter_occluded_shadow_all_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
+#  ifndef __KERNEL_ONEAPI__
+  ctx.filter = args.filter;
+#  endif
 
   rtcTraversableOccluded1(kernel_data.device_bvh, &rtc_ray, &args);
 }
@@ -794,6 +921,9 @@ ccl_device_intersect uint kernel_embree_intersect_volume(KernelGlobals kg,
 #  endif
   ctx.num_hits = numhit_t(0);
   ctx.ray = ray;
+#  ifndef __KERNEL_ONEAPI__
+  ctx.ray_self = &ray->self;
+#  endif
   RTCRay rtc_ray;
   kernel_embree_setup_ray(*ray, rtc_ray, visibility);
   RTCOccludedArguments args;
@@ -803,6 +933,9 @@ ccl_device_intersect uint kernel_embree_intersect_volume(KernelGlobals kg,
       kernel_embree_filter_occluded_volume_all_func);
   args.feature_mask = CYCLES_EMBREE_USED_FEATURES;
   args.context = &ctx;
+#  ifndef __KERNEL_ONEAPI__
+  ctx.filter = args.filter;
+#  endif
   rtcTraversableOccluded1(kernel_data.device_bvh, &rtc_ray, &args);
   return ctx.num_hits;
 }

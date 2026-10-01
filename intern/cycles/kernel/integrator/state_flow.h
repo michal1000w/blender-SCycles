@@ -140,6 +140,14 @@ ccl_device_forceinline IntegratorShadowState integrator_shadow_path_init(
   return shadow_state;
 }
 
+/* Shadow path of a bidirectional connection from a camera vertex to a cached light vertex. GPU
+ * shadow paths are allocated from a shared pool, so this is an ordinary shadow path. */
+ccl_device_forceinline IntegratorShadowState integrator_bdpt_shadow_path_init(
+    KernelGlobals kg, IntegratorState state, const DeviceKernel next_kernel)
+{
+  return integrator_shadow_path_init(kg, state, next_kernel, false);
+}
+
 ccl_device_forceinline void integrator_shadow_path_next(IntegratorShadowState state,
                                                         const DeviceKernel current_kernel,
                                                         const DeviceKernel next_kernel)
@@ -276,6 +284,24 @@ integrator_shadow_path_init(ccl_attr_maybe_unused KernelGlobals kg,
                             const bool is_ao)
 {
   IntegratorShadowState shadow_state = (is_ao) ? &state->ao : &state->shadow;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, queued_kernel) = next_kernel;
+#  if defined(__PATH_GUIDING__)
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
+    INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, path_segment) = nullptr;
+  }
+#  else
+  (void)kg;
+#  endif
+  return shadow_state;
+}
+
+/* A CPU path owns one direct light and one ambient occlusion shadow path. A bidirectional
+ * connection is queued by the same surface shading step as the direct light shadow path, so it
+ * uses a third slot of its own. */
+ccl_device_forceinline IntegratorShadowState integrator_bdpt_shadow_path_init(
+    ccl_attr_maybe_unused KernelGlobals kg, IntegratorState state, const DeviceKernel next_kernel)
+{
+  IntegratorShadowState shadow_state = &state->bdpt;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, queued_kernel) = next_kernel;
 #  if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {

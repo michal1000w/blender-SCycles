@@ -13,6 +13,11 @@
 #include "kernel/integrator/intersect_closest.h"
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/surface_shader.h"
+#if defined(__BDPT__) && !defined(__KERNEL_METAL__)
+/* Light-cache transport. The Metal kernels include it once, ahead of all shading kernels. */
+#  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
+#endif
 
 #include "kernel/light/light.h"
 #include "kernel/light/sample.h"
@@ -150,15 +155,20 @@ ccl_device_inline ShaderEvalResult integrate_background(
 
     /* Background MIS weights. */
     float mis_weight;
-#ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_emission(state) && kernel_data.background.use_mis) {
+#ifdef __BDPT__
+    if (bdpt_enabled_for_emission(kg, state) && kernel_data.background.use_mis) {
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float3 ray_D = INTEGRATOR_STATE(state, ray, D);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights *
                                  background_light_pdf(kg, ray_P, ray_D);
       mis_weight = bdpt_emission_mis_weight_infinite(
-          state, direct_pdf_w, bdpt_infinite_position_pdf(ray_P, -ray_D),
-          bdpt_forward_selection_pdf(kg, state, kernel_data.background.object_index, -1,
+          state,
+          direct_pdf_w,
+          bdpt_infinite_position_pdf(kg, ray_P, -ray_D),
+          bdpt_forward_selection_pdf(kg,
+                                     state,
+                                     kernel_data.background.object_index,
+                                     -1,
                                      kernel_data.integrator.distribution_pdf_lights) /
               bdpt_safe_pdf(kernel_data.integrator.distribution_pdf_lights));
     }
@@ -170,8 +180,8 @@ ccl_device_inline ShaderEvalResult integrate_background(
     mis_weight = light_sample_mis_weight_forward_background(kg, state, path_visibility, path_flag);
 #endif
 
-#ifdef __KERNEL_METAL__
-    if (kernel_data.background.use_mis && bdpt_volume_sensor_owns_camera_path(state)) {
+#ifdef __BDPT__
+    if (kernel_data.background.use_mis && bdpt_volume_sensor_owns_camera_path(kg, state)) {
       mis_weight = 0.0f;
     }
 #endif
@@ -260,14 +270,16 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
 
     /* MIS weighting. */
     float mis_weight;
-#ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_emission(state)) {
+#ifdef __BDPT__
+    if (bdpt_enabled_for_emission(kg, state)) {
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights * light_eval.pdf;
       mis_weight = bdpt_emission_mis_weight_infinite(
-          state, direct_pdf_w, bdpt_infinite_position_pdf(ray_P, ray_D),
-          bdpt_forward_selection_pdf(kg, state, klight->object_id, -1,
-                                     kernel_data.integrator.distribution_pdf_lights) /
+          state,
+          direct_pdf_w,
+          bdpt_infinite_position_pdf(kg, ray_P, ray_D),
+          bdpt_forward_selection_pdf(
+              kg, state, klight->object_id, -1, kernel_data.integrator.distribution_pdf_lights) /
               bdpt_safe_pdf(kernel_data.integrator.distribution_pdf_lights));
     }
     else {
@@ -279,8 +291,8 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
         kg, state, path_visibility, path_flag, klight->object_id, light_eval.pdf);
 #endif
 
-#ifdef __KERNEL_METAL__
-    if (bdpt_volume_sensor_owns_camera_path(state, 0, klight->max_bounces)) {
+#ifdef __BDPT__
+    if (bdpt_volume_sensor_owns_camera_path(kg, state, 0, klight->max_bounces)) {
       mis_weight = 0.0f;
     }
 #endif

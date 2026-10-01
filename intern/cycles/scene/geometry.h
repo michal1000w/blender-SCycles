@@ -232,6 +232,10 @@ class GeometryManager {
    * on the stack, that becomes a dangling pointer. See #143662 for details. */
   TaskPool bvh_task_pool_;
 
+  /* Layout of the acceleration structures built by the last update. A CPU device changes it when
+   * a scene starts or stops using pixel-level displacement. */
+  BVHLayout last_bvh_layout_ = BVH_LAYOUT_NONE;
+
  public:
   enum : uint32_t {
     UV_PASS_NEEDED = (1 << 0),
@@ -323,5 +327,8 @@ class GeometryManager {
 };
 
 bool scene_allows_pixel_displacement_metalrt(const Scene *scene);
+/* Acceleration structures that can intersect pixel displaced surfaces: the BVH2 and MetalRT
+ * traversals, and Embree with user geometry for displaced meshes. */
+bool bvh_layout_supports_pixel_displacement(BVHLayout bvh_layout);
 
 CCL_NAMESPACE_END

@@ -117,6 +117,11 @@ def use_metal(context):
     return (get_device_type(context) == 'METAL' and use_gpu(context))
 
 
+def use_light_cache_transport(context):
+    # Bidirectional path tracing and photon mapping run on the CPU and on Metal GPUs.
+    return use_cpu(context) or use_metal(context)
+
+
 def use_cuda(context):
     return (get_device_type(context) == 'CUDA' and use_gpu(context))
 
@@ -732,7 +737,12 @@ class CYCLES_RENDER_PT_light_paths_photon_mapping(CyclesButtonsPanel, Panel):
         layout.use_property_decorate = False
 
         cscene = context.scene.cycles
-        layout.active = cscene.use_photon_mapping
+        device_supported = use_light_cache_transport(context)
+        layout.active = cscene.use_photon_mapping and device_supported
+
+        if not device_supported:
+            box = layout.box()
+            box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
 
         col = layout.column(align=True)
         col.prop(cscene, "photon_count")
@@ -765,12 +775,12 @@ class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
         layout.use_property_decorate = False
 
         cscene = context.scene.cycles
-        metal_enabled = use_metal(context)
-        layout.active = cscene.use_bidirectional_path_tracing and metal_enabled
+        device_supported = use_light_cache_transport(context)
+        layout.active = cscene.use_bidirectional_path_tracing and device_supported
 
-        if not metal_enabled:
+        if not device_supported:
             box = layout.box()
-            box.label(text="Requires an active Metal GPU device", icon='INFO')
+            box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
 
         col = layout.column(align=True)
         col.prop(cscene, "bdpt_light_paths")

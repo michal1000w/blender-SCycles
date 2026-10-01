@@ -29,18 +29,7 @@ CCL_NAMESPACE_BEGIN
 
 static bool use_bidirectional_path_tracing(const DeviceScene *device_scene)
 {
-  if (!device_scene->data.integrator.use_bidirectional_path_tracing) {
-    return false;
-  }
-
-  const KernelCamera &camera = device_scene->data.cam;
-  const CameraType camera_type = CameraType(camera.type);
-  if (camera.interocular_offset != 0.0f || camera_type == CAMERA_CUSTOM) {
-    return false;
-  }
-  return camera_type == CAMERA_PERSPECTIVE ||
-         ((camera_type == CAMERA_PANORAMA || camera_type == CAMERA_ORTHOGRAPHIC) &&
-          camera.aperturesize == 0.0f && camera.num_motion_steps == 0);
+  return path_trace_use_bidirectional(device_scene);
 }
 
 static size_t estimate_single_state_size(const uint64_t kernel_features,

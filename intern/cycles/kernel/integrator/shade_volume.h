@@ -17,6 +17,11 @@
 #include "kernel/integrator/state_flow.h"
 #include "kernel/integrator/volume_shader.h"
 #include "kernel/integrator/volume_stack.h"
+#if defined(__BDPT__) && !defined(__KERNEL_METAL__)
+/* Light-cache transport. The Metal kernels include it once, ahead of all shading kernels. */
+#  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
+#endif
 
 #include "kernel/light/light.h"
 #include "kernel/light/sample.h"
@@ -65,17 +70,6 @@ struct VolumeIntegrateResult {
 /* Number of mantissa bits of floating-point numbers. */
 #  define MANTISSA_BITS 23
 
-/* Volume shader properties
- *
- * extinction coefficient = absorption coefficient + scattering coefficient
- * sigma_t = sigma_a + sigma_s */
-
-struct VolumeShaderCoefficients {
-  Spectrum sigma_t;
-  Spectrum sigma_s;
-  Spectrum emission;
-};
-
 struct EquiangularCoefficients {
   float3 P;
   Interval<float> t_range;
@@ -97,38 +91,7 @@ ccl_device_inline Spectrum volume_shader_eval_extinction(KernelGlobals kg,
   return (sd->runtime_flag & SR_EXTINCTION) ? sd->closure_transparent_extinction : zero_spectrum();
 }
 
-/* Evaluate shader to get absorption, scattering and emission at P. */
-ccl_device_inline bool volume_shader_sample(KernelGlobals kg,
-                                            IntegratorState state,
-                                            ccl_private ShaderData *ccl_restrict sd,
-                                            ccl_private VolumeShaderCoefficients *coeff)
-{
-  const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
-  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-  volume_shader_eval<false>(kg, state, sd, path_visibility, path_flag);
-
-  if (!(sd->runtime_flag & (SR_EXTINCTION | SR_SCATTER | SR_EMISSION))) {
-    return false;
-  }
-
-  coeff->sigma_s = zero_spectrum();
-  coeff->sigma_t = (sd->runtime_flag & SR_EXTINCTION) ? sd->closure_transparent_extinction :
-                                                        zero_spectrum();
-  coeff->emission = (sd->runtime_flag & SR_EMISSION) ? sd->closure_emission_background :
-                                                       zero_spectrum();
-
-  if (sd->runtime_flag & SR_SCATTER) {
-    for (int i = 0; i < sd->num_closure; i++) {
-      const ccl_private ShaderClosure *sc = &sd->closure[i];
-
-      if (CLOSURE_IS_VOLUME(sc->type)) {
-        coeff->sigma_s += sc->weight;
-      }
-    }
-  }
-
-  return true;
-}
+/* volume_shader_sample() is defined in `volume_shader.h`. */
 
 /* -------------------------------------------------------------------- */
 /** \name Hierarchical DDA for ray tracing the volume octree
@@ -737,7 +700,7 @@ ccl_device void volume_shadow_null_scattering(KernelGlobals kg,
   }
 }
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __BDPT__
 /* Attenuate one finite segment of a refracted sensor connection. The sensor task owns
  * this state, so rebuilding its stack cannot disturb a live camera/light path. */
 ccl_device bool bdpt_volume_connection_transmittance(KernelGlobals kg,
@@ -2007,7 +1970,7 @@ ccl_device_forceinline void volume_integrate_heterogeneous(
   volume_equiangular_direct_scatter(kg, state, ray, sd, vstate, result);
 }
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __PHOTON_MAPPING__
 /* Sample a photon ray segment with the same weighted/null tracking implementation as camera paths,
  * but without NEE, film writes, denoising features, or volume scattering-probability guiding. */
 ccl_device PhotonVolumeSampleEvent photon_volume_sample_segment(KernelGlobals kg,
@@ -2655,7 +2618,7 @@ ccl_device_forceinline void integrate_volume_direct_light(
     return;
   }
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __BDPT__
   if (bdpt_volume_sensor_supports_light(kg, ls.type, ls.prim) &&
       bdpt_volume_sensor_prefix(kg, state, sd, P))
   {
@@ -2676,8 +2639,8 @@ ccl_device_forceinline void integrate_volume_direct_light(
   const Spectrum guiding_scattering_throughput = throughput * bsdf_eval_sum(&phase_eval);
 #  endif
   float mis_weight;
-#  ifdef __KERNEL_METAL__
-  mis_weight = bdpt_enabled_for_surface_path(state) ?
+#  ifdef __BDPT__
+  mis_weight = bdpt_enabled_for_surface_path(kg, state) ?
                    bdpt_volume_nee_mis_weight(kg, state, sd, phases, P, &ls, phase_pdf) :
                    light_sample_mis_weight_nee(kg, ls.pdf, phase_pdf);
 #  else
@@ -2799,7 +2762,7 @@ ccl_device_forceinline void integrate_volume_direct_light(
   integrator_state_copy_volume_stack_to_shadow(kg, shadow_state, state);
 }
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __PHOTON_MAPPING__
 ccl_device_inline bool photon_mapping_volume_matches(KernelGlobals kg,
                                                      const ccl_global KernelPhoton *photon,
                                                      const int receiver_object,
@@ -2810,7 +2773,7 @@ ccl_device_inline bool photon_mapping_volume_matches(KernelGlobals kg,
                                                      const float camera_wavelength)
 {
   if (photon->receiver_object != photon_volume_receiver_object(receiver_object) ||
-      photon_time_bin(photon_unpack_time(photon->time_wavelength)) != time_bin ||
+      photon_time_bin(kg, photon_unpack_time(photon->time_wavelength)) != time_bin ||
       len_squared(photon->P - P) > radius2)
   {
     return false;
@@ -2842,7 +2805,7 @@ ccl_device_inline bool photon_mapping_volume_matches(KernelGlobals kg,
 /* Return the photon estimate of incident radiance integrated against the receiver phase function.
  * Collision-photon density contains one factor of sigma_s; divide it out because the camera's
  * sampled volume throughput already contains the receiver sigma_s. */
-ccl_device_inline Spectrum
+ccl_device_inline_transport Spectrum
 photon_mapping_volume_gather(KernelGlobals kg,
                              IntegratorState state,
                              ccl_private ShaderData *sd,
@@ -2860,7 +2823,7 @@ photon_mapping_volume_gather(KernelGlobals kg,
   const float cell_size = kernel_integrator_state.photon_radius;
   const int cell_radius = max(float_to_int(ceilf(radius / cell_size)), 1);
   const int3 base = photon_cell(sd->P, cell_size);
-  const int time_bin = photon_time_bin(INTEGRATOR_STATE(state, ray, time));
+  const int time_bin = photon_time_bin(kg, INTEGRATOR_STATE(state, ray, time));
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const bool camera_spectral = (path_flag & PATH_RAY_SPECTRAL) != 0u;
 #    ifdef __SPECTRAL__
@@ -3014,10 +2977,11 @@ photon_mapping_volume_gather(KernelGlobals kg,
   return sum;
 }
 
-ccl_device_inline void photon_mapping_volume_write(KernelGlobals kg,
-                                                   ConstIntegratorState state,
-                                                   const Spectrum L,
-                                                   ccl_global float *ccl_restrict render_buffer)
+ccl_device_inline_transport void photon_mapping_volume_write(KernelGlobals kg,
+                                                             ConstIntegratorState state,
+                                                             const Spectrum L,
+                                                             ccl_global float *ccl_restrict
+                                                                 render_buffer)
 {
   Spectrum contribution = INTEGRATOR_STATE(state, path, throughput) * L;
   film_clamp_light(kg, &contribution, max(int(INTEGRATOR_STATE(state, path, bounce)), 1));
@@ -3131,8 +3095,8 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
    * The emitter-hit continuation is a third strategy alongside volume NEE and
    * light tracing. Its recursive terms must use the actual scattering point,
    * not the end of the integrated volume segment. */
-#  ifdef __KERNEL_METAL__
-  if (bdpt_enabled_for_surface_path(state) && INTEGRATOR_STATE(state, path, bounce) == 0) {
+#  ifdef __BDPT__
+  if (bdpt_enabled_for_surface_path(kg, state) && INTEGRATOR_STATE(state, path, bounce) == 0) {
     const float previous_length = sd->ray_length;
     sd->ray_length = len(sd->P - ray->P);
     BDPTMISWeight d_vcm;
@@ -3208,8 +3172,8 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   }
 #  endif
 
-#  ifdef __KERNEL_METAL__
-  if (bdpt_enabled_for_surface_path(state)) {
+#  ifdef __BDPT__
+  if (bdpt_enabled_for_surface_path(kg, state)) {
     /* Repeated medium vertices need free-flight strategy densities that are intentionally not
      * approximated by the compact surface recursion. Keep the complete camera estimator after
      * the first scatter; only its direct volume NEE competes with a cached medium vertex. */
@@ -3231,7 +3195,7 @@ volume_integrate_event(KernelGlobals kg,
                        ccl_private VolumeIntegrateResult &result,
                        ccl_global float *ccl_restrict render_buffer)
 {
-#  ifndef __KERNEL_METAL__
+#  ifndef __PHOTON_MAPPING__
   (void)render_buffer;
 #  endif
 #  if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 1
@@ -3297,6 +3261,12 @@ volume_integrate_event(KernelGlobals kg,
       if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
         volume_shader_prepare_guiding(
             kg, state, rand_phase_guiding, direct_P, ray->D, &result.direct_phases);
+#      ifdef __BDPT__
+        /* Unguided at bidirectional MIS vertices, see integrator_shade_surface(). */
+        if (bdpt_enabled_for_surface_path(kg, state)) {
+          INTEGRATOR_STATE_WRITE(state, guiding, use_volume_guiding) = false;
+        }
+#      endif
       }
 #    endif
     }
@@ -3335,7 +3305,7 @@ volume_integrate_event(KernelGlobals kg,
   if (result.indirect_scatter) {
     sd->P = ray->P + result.indirect_t * ray->D;
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __PHOTON_MAPPING__
     if (kernel_data.integrator.use_photon_mapping) {
       const Spectrum photon_L = photon_mapping_volume_gather(
           kg, state, sd, &result.indirect_phases, render_buffer);
@@ -3357,12 +3327,17 @@ volume_integrate_event(KernelGlobals kg,
         rand_phase_guiding = path_state_rng_1D(kg, rng_state, PRNG_VOLUME_PHASE_GUIDING_DISTANCE);
         volume_shader_prepare_guiding(
             kg, state, rand_phase_guiding, sd->P, ray->D, &result.indirect_phases);
+#      ifdef __BDPT__
+        if (bdpt_enabled_for_surface_path(kg, state)) {
+          INTEGRATOR_STATE_WRITE(state, guiding, use_volume_guiding) = false;
+        }
+#      endif
       }
 #    endif
     }
 #  endif
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __BDPT__
     if (kernel_data.integrator.use_bidirectional_path_tracing &&
         INTEGRATOR_STATE(state, path, volume_bounce) == 0)
     {
@@ -3377,7 +3352,7 @@ volume_integrate_event(KernelGlobals kg,
 #  endif
 
     if (integrate_volume_phase_scatter(kg, state, sd, ray, rng_state, &result.indirect_phases)) {
-#  ifdef __KERNEL_METAL__
+#  ifdef __PHOTON_MAPPING__
       if (kernel_data.integrator.use_photon_mapping) {
         INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_RECEIVER;
         INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;

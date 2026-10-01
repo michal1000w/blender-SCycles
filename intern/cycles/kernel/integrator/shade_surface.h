@@ -20,6 +20,11 @@
 #include "kernel/integrator/shadow_linking.h"
 #include "kernel/integrator/subsurface.h"
 #include "kernel/integrator/volume_stack.h"
+#if defined(__BDPT__) && !defined(__KERNEL_METAL__)
+/* Light-cache transport. The Metal kernels include it once, ahead of all shading kernels. */
+#  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
+#endif
 
 #include "kernel/types.h"
 #include "util/math_intersect.h"
@@ -158,8 +163,8 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
   const Spectrum L = surface_shader_emission(sd) * polarization_emission_weight(kg, state);
 
   float mis_weight;
-#ifdef __KERNEL_METAL__
-  mis_weight = bdpt_enabled_for_emission(state) ?
+#ifdef __BDPT__
+  mis_weight = bdpt_enabled_for_emission(kg, state) ?
                    bdpt_emission_mis_weight_surface(kg, state, sd) :
                    light_sample_mis_weight_forward_surface(
                        kg, state, path_visibility, path_flag, sd);
@@ -167,9 +172,9 @@ ccl_device_forceinline void integrate_surface_emission(KernelGlobals kg,
   mis_weight = light_sample_mis_weight_forward_surface(kg, state, path_visibility, path_flag, sd);
 #endif
 
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
   if ((sd->shader_flag & (SD_MIS_FRONT | SD_MIS_BACK)) &&
-      bdpt_volume_sensor_owns_camera_path(state))
+      bdpt_volume_sensor_owns_camera_path(kg, state))
   {
     mis_weight = 0.0f;
   }
@@ -234,7 +239,8 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
                                           const Spectrum bsdf_spectrum,
                                           const int light_group,
                                           const int mnee_vertex_count,
-                                          const bool constant_light_shader)
+                                          const bool constant_light_shader,
+                                          const bool bdpt_connection = false)
 {
   const DeviceKernel next_kernel = (constant_light_shader) ?
                                        DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW :
@@ -251,7 +257,11 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
   }
   else
 #endif
+      if (bdpt_connection)
   {
+    shadow_state = integrator_bdpt_shadow_path_init(kg, state, next_kernel);
+  }
+  else {
     shadow_state = integrator_shadow_path_init(kg, state, next_kernel, false);
   }
 
@@ -469,8 +479,8 @@ ccl_device
 #endif /* __MNEE__ */
   {
     float mis_weight;
-#ifdef __KERNEL_METAL__
-    mis_weight = bdpt_enabled_for_surface_path(state) ?
+#ifdef __BDPT__
+    mis_weight = bdpt_enabled_for_surface_path(kg, state) ?
                      bdpt_nee_mis_weight(kg, state, sd, &ls, bsdf_pdf) :
                      light_sample_mis_weight_nee(kg, ls.pdf, bsdf_pdf);
     if (sd->runtime_flag & SR_CACHE_MISS) {
@@ -517,8 +527,8 @@ ccl_device
     ray.P = integrate_surface_ray_offset(kg, sd, ray.P, ray.D);
   }
 
-#ifdef __KERNEL_METAL__
-  if (bdpt_volume_sensor_owns_camera_path(state, 1) &&
+#ifdef __BDPT__
+  if (bdpt_volume_sensor_owns_camera_path(kg, state, 1) &&
       bdpt_volume_sensor_supports_light(kg, ls.type, ls.prim))
   {
     return SHADER_EVAL_EMPTY;
@@ -546,7 +556,7 @@ ccl_device
                               guiding_gpu_surface_orientation(sd),
                               false,
                               ls.t);
-    if (coherent_source && bdpt_enabled_for_surface_path(state) && guiding_gpu_training()) {
+    if (coherent_source && bdpt_enabled_for_surface_path(kg, state) && guiding_gpu_training()) {
       /* The combined NEE baseline and cross-term estimator can be signed.
        * Do not train a positive radiance proposal with this signed observation.
        * Ordinary light-subpath observations continue to train the baseline. */
@@ -591,17 +601,18 @@ ccl_device
   return SHADER_EVAL_OK;
 }
 
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
 /* Connect the current camera vertex to one uniformly selected entry of the global light-vertex
  * cache. Every entry is a per-path reservoir sample over the connectible vertices that path
  * actually reached. Uniform cache sampling plus the stored reservoir support converts the
  * selected vertex into an unbiased estimate of the sum over light-subpath lengths. */
-ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
-                                                            IntegratorState state,
-                                                            ccl_private ShaderData *sd,
-                                                            const ccl_private RNGState *rng_state)
+ccl_device_forceinline_transport bool integrate_surface_bidirectional(
+    KernelGlobals kg,
+    IntegratorState state,
+    ccl_private ShaderData *sd,
+    ccl_attr_maybe_unused const ccl_private RNGState *rng_state)
 {
-  if (!bdpt_enabled_for_surface_path(state) || !(sd->runtime_flag & SR_BSDF_HAS_EVAL) ||
+  if (!bdpt_enabled_for_surface_path(kg, state) || !(sd->runtime_flag & SR_BSDF_HAS_EVAL) ||
       !kernel_integrator_state.bdpt_vertices || !kernel_integrator_state.bdpt_vertex_count)
   {
     return false;
@@ -843,7 +854,7 @@ ccl_device_forceinline bool integrate_surface_bidirectional(KernelGlobals kg,
 #  endif
 
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
-      kg, state, &ray, connection, light_vertex->light_group, 0, true);
+      kg, state, &ray, connection, light_vertex->light_group, 0, true, true);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = transparent_bounce;
   guiding_gpu_record_direct(shadow_state,
                             state,
@@ -897,7 +908,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #ifdef __SUBSURFACE__
   /* BSSRDF closure, we schedule subsurface intersection kernel. */
   if (CLOSURE_IS_BSSRDF(sc->type)) {
-#  ifdef __KERNEL_METAL__
+#  if defined(__BDPT__) || defined(__PHOTON_MAPPING__)
     if (kernel_data.integrator.use_bidirectional_path_tracing) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_UNSUPPORTED;
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_BDPT_VOLUME_SENSOR;
@@ -914,7 +925,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   }
 #endif
   if (CLOSURE_IS_RAY_PORTAL(sc->type)) {
-#ifdef __KERNEL_METAL__
+#ifdef __PHOTON_MAPPING__
     if (kernel_data.integrator.use_photon_mapping) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_RECEIVER;
@@ -1009,11 +1020,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     unguided_bsdf_pdf = bsdf_pdf;
   }
 
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
   /* Resolve reciprocal texture reads before changing the ray, throughput or training record.
    * A miss replays this scattering stage with the same random sample after tiles are loaded. */
   float reverse_pdf = 0.0f;
-  const bool update_bdpt_mis = bdpt_enabled_for_surface_path(state) &&
+  const bool update_bdpt_mis = bdpt_enabled_for_surface_path(kg, state) &&
                                !(label & LABEL_TRANSPARENT);
   if (update_bdpt_mis) {
     const bool grating_delta = (label & LABEL_SINGULAR) &&
@@ -1030,14 +1041,16 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       return LABEL_CACHE_MISS;
     }
   }
+#endif
+#ifdef __KERNEL_METAL__
   if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) *= bsdf_pdf / unguided_bsdf_pdf;
   }
 #endif
 
   if (label & LABEL_TRANSPARENT) {
-#ifdef __KERNEL_METAL__
-    if (bdpt_enabled_for_emission(state)) {
+#ifdef __BDPT__
+    if (bdpt_enabled_for_emission(kg, state)) {
       bdpt_recursive_mis_undo_transparent_hit(state, sd);
     }
 #endif
@@ -1090,7 +1103,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
           dot(sd->N, normalize(bsdf_wo))));
 #endif
 
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
   if (update_bdpt_mis) {
     const float cos_out = max(fabsf(dot(sd->Ng, normalize(bsdf_wo))), 1.0e-8f);
     bdpt_recursive_mis_after_scatter(state, label, cos_out, mis_pdf, reverse_pdf);
@@ -1122,9 +1135,9 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   path_state_next(kg, state, label, sd->runtime_flag);
 
-#ifdef __KERNEL_METAL__
+#ifdef __PHOTON_MAPPING__
   if (kernel_data.integrator.use_photon_mapping && !(label & LABEL_TRANSPARENT)) {
-    if (surface_shader_photon_mapping_receiver(sc, sd->wi)) {
+    if (surface_shader_photon_mapping_receiver(kg, sc, sd->wi)) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_RECEIVER;
       INTEGRATOR_STATE_WRITE(state, path, flag) &= ~PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;
     }
@@ -1339,14 +1352,16 @@ ccl_device int integrate_surface(KernelGlobals kg,
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
-#ifdef __KERNEL_METAL__
+#if defined(__BDPT__) && defined(__KERNEL_GPU__)
   /* Primary-volume emitter MIS also mutates the recurrence at a surface hit.
    * Include that continuation in the retry stages so a later shader cache miss
    * cannot repeat its measure conversion or film writes. */
-  const bool staged_bdpt = bdpt_enabled_for_emission(state);
+  const bool staged_bdpt = bdpt_enabled_for_emission(kg, state);
   const uint surface_stage = staged_bdpt ? INTEGRATOR_STATE(state, path, bdpt_surface_stage) : 0;
 #else
-  const uint surface_stage = 0;
+  /* The CPU loads image tiles synchronously: shading never resumes from a later stage. */
+  ccl_attr_maybe_unused constexpr bool staged_bdpt = false;
+  constexpr uint surface_stage = 0;
 #endif
   /* 0: initial shading, 1: direct light pending, 2: connection pending, 3: scatter pending.
    * Texture retries reconstruct closures but never repeat completed film or shadow writes. */
@@ -1409,10 +1424,10 @@ ccl_device int integrate_surface(KernelGlobals kg,
       surface_shader_prepare_closures(kg, state, &sd, path_visibility);
 
       if (surface_stage == 0) {
-#ifdef __KERNEL_METAL__
-      if (bdpt_enabled_for_emission(state)) {
-        bdpt_recursive_mis_after_hit(kg, state, &sd);
-      }
+#ifdef __BDPT__
+        if (bdpt_enabled_for_emission(kg, state)) {
+          bdpt_recursive_mis_after_hit(kg, state, &sd);
+        }
 #endif
 
       /* Evaluate holdout. */
@@ -1420,7 +1435,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
         return LABEL_NONE;
       }
 
-#ifdef __KERNEL_METAL__
+#ifdef __PHOTON_MAPPING__
       if (kernel_data.integrator.use_photon_mapping) {
 #  ifdef __KERNEL_METAL_VISIBLE_SHADING__
         Spectrum photon_L = zero_spectrum();
@@ -1481,7 +1496,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
       }
     }
 
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
     if (staged_bdpt && surface_stage == 0) {
       INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 1;
     }
@@ -1494,6 +1509,15 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #if defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4
     if (kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING) {
       surface_shader_prepare_guiding(kg, state, &sd, &rng_state);
+#  ifdef __BDPT__
+      /* OpenPGL initializes a vertex's guiding distribution stochastically, so a light subpath
+       * cannot evaluate the density with which a camera path would have sampled it. The
+       * bidirectional MIS recursion requires that density, so its vertices sample unguided.
+       * The field is still trained, and vertices the recursion does not cover remain guided. */
+      if (bdpt_enabled_for_surface_path(kg, state)) {
+        INTEGRATOR_STATE_WRITE(state, guiding, use_surface_guiding) = false;
+      }
+#  endif
       guiding_write_debug_passes(kg, state, &sd, render_buffer);
     }
 #endif
@@ -1546,7 +1570,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
       if (result == SHADER_EVAL_CACHE_MISS) {
         return LABEL_CACHE_MISS;
       }
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
       if (staged_bdpt) {
         INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 2;
       }
@@ -1554,11 +1578,15 @@ ccl_device int integrate_surface(KernelGlobals kg,
     }
 
     if (surface_stage < 3) {
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
 #  ifdef __KERNEL_METAL_VISIBLE_SHADING__
       integrate_surface_stage(METAL_SURFACE_STAGE_BIDIRECTIONAL, state, &sd, &rng_state);
-#  else
+#  elif defined(__KERNEL_GPU__)
       integrate_surface_bidirectional(kg, state, &sd, &rng_state);
+#  else
+      if (kernel_data.integrator.use_bidirectional_path_tracing) {
+        integrate_surface_bidirectional(kg, state, &sd, &rng_state);
+      }
 #  endif
       if (sd.runtime_flag & SR_CACHE_MISS) {
         return LABEL_CACHE_MISS;
@@ -1572,7 +1600,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
         integrate_surface_ao(kg, state, &sd, &rng_state);
       }
 #endif
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
       if (staged_bdpt) {
         INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 3;
       }
@@ -1590,7 +1618,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
       return LABEL_CACHE_MISS;
     }
 
-#ifdef __KERNEL_METAL__
+#ifdef __PHOTON_MAPPING__
     /* The synthetic diffuse bounce at a BSSRDF exit is not a local photon-map receiver. */
     if (kernel_data.integrator.use_photon_mapping && (path_flag & PATH_RAY_SUBSURFACE)) {
       INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_PHOTON_MAPPING_UNSUPPORTED;

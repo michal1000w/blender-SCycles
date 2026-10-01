@@ -929,6 +929,38 @@ bool Mesh::has_motion_blur() const
                                    subd_attr_P && subd_attr_P->has_motion()));
 }
 
+void Mesh::grow_pixel_displacement_bounds(const size_t triangle_index, BoundBox &bounds) const
+{
+  if (!bounds.valid() || !use_pixel_displacement ||
+      !triangle_has_true_displacement(triangle_index))
+  {
+    return;
+  }
+
+  if (pixel_displacement_bounds_are_direct && !has_motion_blur() &&
+      triangle_index < pixel_displacement_bounds.size() &&
+      pixel_displacement_bounds[triangle_index].valid())
+  {
+    bounds.grow(pixel_displacement_bounds[triangle_index]);
+    return;
+  }
+
+  const float pad = pixel_displacement_max_distance;
+  if (pad <= 0.0f) {
+    return;
+  }
+
+  float3 normal_pad;
+  if (triangle_normal_displacement_bounds_pad(triangle_index, pad, &normal_pad)) {
+    bounds.min -= normal_pad;
+    bounds.max += normal_pad;
+    return;
+  }
+
+  bounds.grow(bounds.min, pad);
+  bounds.grow(bounds.max, pad);
+}
+
 bool Mesh::triangle_has_true_displacement(const size_t i) const
 {
   const int shader_index = (i < shader.size()) ? shader[i] : -1;

@@ -20,6 +20,57 @@
 CCL_NAMESPACE_BEGIN
 
 struct OSLGlobals;
+struct IntegratorQueueCounter;
+struct KernelPhoton;
+struct KernelBDPTVertex;
+struct KernelPolarizationState;
+struct CoherentPathHistory;
+
+/* Working memory of the light-cache transport passes (photon mapping and bidirectional path
+ * tracing), owned by PathTraceWorkCPU for the duration of a render batch. The members mirror the
+ * corresponding fields of IntegratorStateGPU, so that kernel code accesses both through
+ * `kernel_integrator_state`. Pointers are null and capacities zero while a feature is disabled.
+ * Guiding members exist only for the Metal guiding field, which the CPU does not use: it guides
+ * with OpenPGL instead. */
+struct KernelTransportStateCPU {
+  IntegratorQueueCounter *queue_counter = nullptr;
+
+  KernelPhoton *photons = nullptr;
+  uint *photon_hash = nullptr;
+  uint *photon_stored = nullptr;
+  /* CPU only: one flag per emitted photon path. A photon path stores at most one photon, so the
+   * record of path `i` lives in slot `i` and the host links hash chains in path order. This keeps
+   * the photon map, and therefore the render, independent of thread scheduling. */
+  uint8_t *photon_valid = nullptr;
+
+  KernelBDPTVertex *bdpt_vertices = nullptr;
+  CoherentPathHistory *bdpt_coherent_history = nullptr;
+  KernelPolarizationState *bdpt_polarization = nullptr;
+  uint *bdpt_vertex_indices = nullptr;
+  uint *bdpt_vertex_count = nullptr;
+
+  uint guiding_capacity = 0;
+  uint guiding_training = 0;
+
+  uint photon_hash_size = 0;
+  uint photon_capacity = 0;
+  uint photon_iteration = 0;
+  float photon_radius = 0.0f;
+  float photon_volume_radius = 0.0f;
+
+  uint bdpt_vertex_capacity = 0;
+  uint bdpt_light_path_count = 0;
+  uint bdpt_cache_capacity = 0;
+  uint bdpt_cache_count = 0;
+  uint bdpt_cache_start_sample = 0;
+  float bdpt_light_path_sample_ratio = 0.0f;
+  int bdpt_buffer_full_x = 0;
+  int bdpt_buffer_full_y = 0;
+  int bdpt_buffer_width = 0;
+  int bdpt_buffer_height = 0;
+  int bdpt_buffer_offset = 0;
+  int bdpt_buffer_stride = 0;
+};
 
 /* On the CPU, we pass along the struct KernelGlobals to nearly everywhere in
  * the kernel, to access constant data. These are all stored as flat arrays.
@@ -87,6 +138,18 @@ struct ThreadKernelGlobalsCPU : public KernelGlobalsCPU {
    * Per thread, so no atomics are needed; read after each sample batch. */
   mutable uint coherent_error = 0;
 
+  /* Light-cache transport memory of the render work that currently uses these globals. Kernel
+   * code only writes through the contained pointers. Never null. */
+  const KernelTransportStateCPU *transport_state;
+
+  /* Photon path being emitted by this thread, the slot of its photon record. */
+  mutable uint photon_emit_index = 0;
+
+  /* Matches the Metal `pixel_displacement_rays` function constant: only rays of the
+   * intersection kernels intersect pixel displaced surfaces. Rays traced while shading
+   * (ambient occlusion, bevel, light-cache transport connections) use the base triangles. */
+  mutable bool pixel_displacement_intersect_rays = false;
+
 #if defined(__PATH_GUIDING__)
   /* Pointers to shared global data structures. */
   openpgl::cpp::SampleStorage *opgl_sample_data_storage = nullptr;
@@ -109,6 +172,8 @@ using KernelGlobals = const ThreadKernelGlobalsCPU *;
 #define kernel_data_write(name, index, value) (kg->name.write(index, value))
 #define kernel_data_array(name) (kg->name.data)
 #define kernel_data (kg->data)
+#define kernel_integrator_state (*kg->transport_state)
+#define pixel_displacement_rays (kg->pixel_displacement_intersect_rays)
 #if defined(WITH_PATH_GUIDING)
 #  define guiding_guiding_field kg->opgl_guiding_field
 #  define guiding_ssd kg->opgl_surface_sampling_distribution

@@ -27,6 +27,10 @@ class Film;
 class PathTraceDisplay;
 class RenderBuffers;
 
+/* Whether bidirectional path tracing is active for the scene's camera. Other cameras render with
+ * the regular path tracer, matching bdpt_camera_supported() in the kernel. */
+bool path_trace_use_bidirectional(const DeviceScene *device_scene);
+
 class PathTraceWork {
  public:
   struct RenderStatistics {
