@@ -39,7 +39,7 @@ ccl_device_inline bool triangle_intersect(KernelGlobals kg,
   const float3 tri_b = kernel_data_fetch(tri_verts, position_offset + tri_vindex.y);
   const float3 tri_c = kernel_data_fetch(tri_verts, position_offset + tri_vindex.z);
 
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+#ifdef __PIXEL_DISPLACEMENT_INTERSECT__
   if (pixel_displacement_intersects(kg, prim)) {
 #ifdef __VISIBILITY_FLAG__
     if (!(kernel_data_fetch(prim_visibility, prim_addr) & visibility)) {

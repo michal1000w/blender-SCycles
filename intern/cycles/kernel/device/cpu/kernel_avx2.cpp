@@ -23,6 +23,9 @@
 #  endif
 #endif /* WITH_CYCLES_OPTIMIZED_KERNEL_AVX2 */
 
+/* Intersect and shade pixel displaced surfaces, see `kernel/features.h`. */
+#define __KERNEL_CPU_PIXEL_DISPLACEMENT__
+
 #include "kernel/device/cpu/globals.h"
 #include "kernel/device/cpu/kernel.h"
 #define KERNEL_ARCH cpu_avx2

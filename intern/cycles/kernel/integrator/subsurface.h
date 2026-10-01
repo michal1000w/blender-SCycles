@@ -101,8 +101,7 @@ ccl_device int subsurface_bounce(KernelGlobals kg,
                                              ~PATH_RAY_VISIBILITY_CAMERA);
   uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   bool use_disk = (sc->type == CLOSURE_BSSRDF_BURLEY_ID);
-#  if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT__) || \
-      defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)
+#  if defined(__PIXEL_DISPLACEMENT_INTERSECT__) || defined(__PIXEL_DISPLACEMENT_SHADE__)
   /* A per-pixel displaced triangle is an open heightfield, not a closed volume. Random Walk
    * cannot robustly define or efficiently trace an interior there: every volume bounce would
    * need another virtual-micromesh intersection, and same-base-triangle exits conflict with the

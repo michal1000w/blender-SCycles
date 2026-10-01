@@ -92,6 +92,17 @@
 #  define ccl_device_outline_metal ccl_device
 #endif
 
+/* Light-cache transport (bidirectional path tracing and photon mapping) is only reached when a
+ * scene enables it. The CPU keeps it out of the regular shading functions that call it, where
+ * forced inlining would enlarge them for every scene. GPUs retain their inlining policy. */
+#ifdef __KERNEL_GPU__
+#  define ccl_device_inline_transport ccl_device_inline
+#  define ccl_device_forceinline_transport ccl_device_forceinline
+#else
+#  define ccl_device_inline_transport ccl_device ccl_never_inline
+#  define ccl_device_forceinline_transport ccl_device ccl_never_inline
+#endif
+
 /* Address sanitizer suppression. */
 
 #ifdef __KERNEL_GPU__

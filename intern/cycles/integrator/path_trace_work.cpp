@@ -18,6 +18,22 @@
 
 CCL_NAMESPACE_BEGIN
 
+bool path_trace_use_bidirectional(const DeviceScene *device_scene)
+{
+  if (!device_scene->data.integrator.use_bidirectional_path_tracing) {
+    return false;
+  }
+
+  const KernelCamera &camera = device_scene->data.cam;
+  const CameraType camera_type = CameraType(camera.type);
+  if (camera.interocular_offset != 0.0f || camera_type == CAMERA_CUSTOM) {
+    return false;
+  }
+  return camera_type == CAMERA_PERSPECTIVE ||
+         ((camera_type == CAMERA_PANORAMA || camera_type == CAMERA_ORTHOGRAPHIC) &&
+          camera.aperturesize == 0.0f && camera.num_motion_steps == 0);
+}
+
 unique_ptr<PathTraceWork> PathTraceWork::create(Device *device,
                                                 Film *film,
                                                 DeviceScene *device_scene,

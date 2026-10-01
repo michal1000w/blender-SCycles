@@ -30,7 +30,7 @@ ccl_device void kernel_displace_evaluate(KernelGlobals kg,
   /* Setup shader data. */
   const KernelShaderEvalInput in = input[offset];
 
-#ifdef __KERNEL_METAL__
+#ifdef __PIXEL_DISPLACEMENT__
   /* Negative primitive IDs request exact samples for the pixel-displacement grazing fallback.
    * Evaluate with the same shader setup and arithmetic as a ray query; apply scene scale and clamp
    * at lookup. */

@@ -32,6 +32,31 @@ class CPUKernels {
   IntegratorInitFunction integrator_init_from_bake;
   IntegratorShadeFunction integrator_megakernel;
 
+  /* Light-cache transport. */
+
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *kg,
+                             IntegratorStateCPU *state,
+                             const int photon_index,
+                             const int iteration)>
+      integrator_photon_emit;
+  CPUKernelFunction<int (*)(const ThreadKernelGlobalsCPU *kg)> integrator_photon_map_build;
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *kg,
+                             IntegratorStateCPU *state,
+                             const int light_path_index,
+                             const int iteration,
+                             const int batch_samples)>
+      integrator_bdpt_light_generate;
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *kg)> integrator_bdpt_cache_order;
+  CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *kg,
+                             IntegratorStateCPU *state,
+                             const int vertex_index,
+                             const int iteration,
+                             const int batch_samples,
+                             ccl_global float *render_buffer,
+                             uint *film_locks,
+                             const int film_locks_num)>
+      integrator_bdpt_sensor_connect;
+
   /* Shader evaluation. */
 
   using ShaderEvalFunction = CPUKernelFunction<void (*)(

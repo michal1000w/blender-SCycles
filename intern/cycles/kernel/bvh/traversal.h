@@ -138,7 +138,7 @@ ccl_device_noinline bool BVH_FUNCTION_FULL_NAME(BVH)(KernelGlobals kg,
 
             switch (type & PRIMITIVE_ALL) {
               case PRIMITIVE_TRIANGLE: {
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+#ifdef __PIXEL_DISPLACEMENT_INTERSECT__
                 const Intersection previous_isect = *isect;
 #endif
                 if (triangle_intersect(kg,
@@ -152,7 +152,7 @@ ccl_device_noinline bool BVH_FUNCTION_FULL_NAME(BVH)(KernelGlobals kg,
                                        prim,
                                        prim_addr))
                 {
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+#ifdef __PIXEL_DISPLACEMENT_INTERSECT__
                   if ((visibility & PATH_RAY_VISIBILITY_SHADOW) &&
                       pixel_displacement_shared_edge_shadow_hit(
                           kg, ray->self, prim_object, prim, isect->u, isect->v))
@@ -170,7 +170,7 @@ ccl_device_noinline bool BVH_FUNCTION_FULL_NAME(BVH)(KernelGlobals kg,
               }
 #if BVH_FEATURE(BVH_MOTION)
               case PRIMITIVE_MOTION_TRIANGLE: {
-#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+#  ifdef __PIXEL_DISPLACEMENT_INTERSECT__
                 const Intersection previous_isect = *isect;
 #  endif
                 if (motion_triangle_intersect(kg,
@@ -185,7 +185,7 @@ ccl_device_noinline bool BVH_FUNCTION_FULL_NAME(BVH)(KernelGlobals kg,
                                               prim,
                                               prim_addr))
                 {
-#  ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+#  ifdef __PIXEL_DISPLACEMENT_INTERSECT__
                   if ((visibility & PATH_RAY_VISIBILITY_SHADOW) &&
                       pixel_displacement_shared_edge_shadow_hit(
                           kg, ray->self, prim_object, prim, isect->u, isect->v))

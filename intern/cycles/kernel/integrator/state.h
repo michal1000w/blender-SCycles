@@ -93,6 +93,9 @@ struct IntegratorStateCPU {
 
   IntegratorShadowStateCPU shadow;
   IntegratorShadowStateCPU ao;
+  /* Bidirectional connection of a camera vertex to a cached light vertex. Shading a surface may
+   * queue it in addition to its direct light and ambient occlusion shadow paths. */
+  IntegratorShadowStateCPU bdpt;
 };
 
 /* Path Queue

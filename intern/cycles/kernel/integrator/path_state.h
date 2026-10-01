@@ -22,6 +22,7 @@ ccl_device_inline void path_state_init_queues(IntegratorState state)
 #ifndef __KERNEL_GPU__
   INTEGRATOR_STATE_WRITE(&state->shadow, shadow_path, queued_kernel) = 0;
   INTEGRATOR_STATE_WRITE(&state->ao, shadow_path, queued_kernel) = 0;
+  INTEGRATOR_STATE_WRITE(&state->bdpt, shadow_path, queued_kernel) = 0;
 #endif
 }
 
@@ -135,7 +136,7 @@ ccl_device_inline void path_state_next(KernelGlobals kg,
                                        const int label,
                                        const int runtime_flag)
 {
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
   if (kernel_data.integrator.use_bidirectional_path_tracing) {
     INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 0;
   }
@@ -143,7 +144,7 @@ ccl_device_inline void path_state_next(KernelGlobals kg,
   PathRayVisibility visibility = INTEGRATOR_STATE(state, path, visibility);
   uint32_t flag = INTEGRATOR_STATE(state, path, flag);
 
-#ifdef __KERNEL_METAL__
+#ifdef __BDPT__
   if (kernel_data.integrator.use_bidirectional_path_tracing) {
     const int volume_bounce = INTEGRATOR_STATE(state, path, volume_bounce);
     if ((label & LABEL_RAY_PORTAL) || ((label & LABEL_VOLUME_SCATTER) && volume_bounce > 0) ||

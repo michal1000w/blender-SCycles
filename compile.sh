@@ -362,12 +362,17 @@ verify_installed_cycles_sources() {
     kernel/device/metal/kernel.metal
     kernel/device/gpu/kernel.h
     kernel/geom/pixel_displacement_shader.h
+    kernel/features.h
+    kernel/integrator/bidirectional.h
+    kernel/integrator/guiding_gpu.h
     kernel/integrator/path_state.h
     kernel/integrator/photon_mapping.h
     kernel/integrator/shade_surface.h
     kernel/integrator/state.h
     kernel/integrator/subsurface.h
     kernel/integrator/surface_shader.h
+    kernel/integrator/volume_shader.h
+    kernel/geom/pixel_displacement.h
     kernel/svm/closure.h
     kernel/svm/node_types.h
     kernel/closure/bsdf_microfacet.h
@@ -393,6 +398,9 @@ verify_installed_cycles_sources() {
   done
 
   installed_file="${installed_source}/kernel/integrator/subsurface.h"
+  grep -Fq 'defined(__PIXEL_DISPLACEMENT_SHADE__)' "$installed_file" || die \
+    "Installed Cycles runtime is missing pixel-displacement support in shading kernels."
+  installed_file="${installed_source}/kernel/features.h"
   grep -Fq 'defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)' "$installed_file" || die \
     "Installed Cycles runtime is missing pixel-displacement support in Metal shading kernels."
 

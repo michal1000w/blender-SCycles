@@ -11,6 +11,7 @@
 
 #include "integrator/path_trace_work.h"
 
+#include "util/array.h"
 #include "util/vector.h"
 
 CCL_NAMESPACE_BEGIN
@@ -72,10 +73,30 @@ class PathTraceWorkCPU : public PathTraceWork {
 #endif
 
  protected:
+  /* Render camera samples of all pixels of the effective buffer. */
+  void render_camera_samples(const int start_sample,
+                             const int samples_num,
+                             const int sample_offset);
+
   /* Core path tracing routine. Renders given work time on the given queue. */
   void render_samples_full_pipeline(ThreadKernelGlobalsCPU *kernel_globals,
                                     const KernelWorkTile &work_tile,
                                     const int samples_num);
+
+  /* Light-cache transport, scheduled like PathTraceWorkGPU: every batch of camera samples first
+   * builds its photon map or light-vertex cache. */
+  void render_samples_light_cache(const int start_sample,
+                                  const int samples_num,
+                                  const int sample_offset,
+                                  const bool adaptive_sampling);
+  void alloc_photon_mapping();
+  void alloc_bidirectional_path_tracing();
+  /* Emit and link an independent photon map for the given render sample. */
+  void update_photon_map(const int start_sample);
+  /* Generate light subpaths for a batch of camera samples, and splat their camera connections. */
+  void update_bidirectional_light_cache(const int start_sample, const int batch_samples);
+  /* Run `func(kernel_globals, state, index)` for all indices, in parallel. */
+  template<typename Func> void parallel_for_light_paths(const int num, const Func &func);
 
   /* CPU kernels. */
   const CPUKernels &kernels_;
@@ -83,6 +104,21 @@ class PathTraceWorkCPU : public PathTraceWork {
   /* Pointer to device-owned kernel globals which is suitable for concurrent access from multiple
    * threads. This allows dynamic updates to image_info when textures are loaded on demand. */
   vector<ThreadKernelGlobalsCPU> *kernel_thread_globals_ = nullptr;
+
+  /* Light-cache transport memory, referenced by the kernel thread globals while rendering. */
+  KernelTransportStateCPU transport_state_;
+  IntegratorQueueCounter transport_queue_counter_ = {};
+  array<KernelPhoton> photons_;
+  array<uint> photon_hash_;
+  array<uint8_t> photon_valid_;
+  uint photon_stored_ = 0;
+  array<KernelBDPTVertex> bdpt_vertices_;
+  array<CoherentPathHistory> bdpt_coherent_history_;
+  array<KernelPolarizationState> bdpt_polarization_;
+  array<uint> bdpt_vertex_indices_;
+  array<uint> bdpt_vertex_count_;
+  /* Serialize film accumulation of light-tracing splats, which may land on any pixel. */
+  array<uint> film_locks_;
 };
 
 CCL_NAMESPACE_END

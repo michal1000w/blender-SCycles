@@ -25,7 +25,7 @@
 
 CCL_NAMESPACE_BEGIN
 
-#ifdef __KERNEL_METAL__
+#if defined(__PHOTON_MAPPING__) || defined(__BDPT__)
 ccl_device_inline bool surface_shader_is_hair_closure(const ClosureType type)
 {
   return type == CLOSURE_BSDF_HAIR_REFLECTION_ID || type == CLOSURE_BSDF_HAIR_TRANSMISSION_ID ||
@@ -35,7 +35,8 @@ ccl_device_inline bool surface_shader_is_hair_closure(const ClosureType type)
 /* Photon density estimation is well behaved for diffuse and sufficiently broad non-delta surface
  * lobes. Narrow glossy/transmission lobes remain ray traced. Roughness values returned by Cycles
  * are microfacet alpha, while the UI threshold is artist-facing perceptual roughness. */
-ccl_device_inline bool surface_shader_photon_mapping_receiver(ccl_private const ShaderClosure *sc,
+ccl_device_inline bool surface_shader_photon_mapping_receiver(KernelGlobals kg,
+                                                              ccl_private const ShaderClosure *sc,
                                                               const float3 wi)
 {
   if (!CLOSURE_IS_BSDF(sc->type) || CLOSURE_IS_BSDF_SINGULAR(sc->type) ||
@@ -238,7 +239,7 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
     }
   }
 
-#ifdef __KERNEL_METAL__
+#ifdef __PHOTON_MAPPING__
   /* Partition caustic transport without overlap: photon mapping handles sufficiently sharp
    * glossy/transmission lobes reached after a supported broad receiver event, while ordinary path
    * tracing keeps rough caustics and unsupported receivers. */
@@ -252,7 +253,7 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
           (CLOSURE_IS_BSDF_GLOSSY(sc->type) || CLOSURE_IS_BSDF_TRANSMISSION(sc->type) ||
            CLOSURE_IS_GLASS(sc->type)))
       {
-        if (!surface_shader_photon_mapping_receiver(sc, sd->wi)) {
+        if (!surface_shader_photon_mapping_receiver(kg, sc, sd->wi)) {
           sc->type = CLOSURE_NONE_ID;
           sc->sample_weight = 0.0f;
         }

@@ -11,6 +11,10 @@
 #  pragma GCC diagnostic ignored "-Wuninitialized"
 #endif
 
+/* Traced rays and message queries intersect and shade pixel displaced surfaces, see
+ * `kernel/features.h`. */
+#define __KERNEL_CPU_PIXEL_DISPLACEMENT__
+
 #include "util/log.h"
 #include "util/string.h"
 #include "util/types_image.h"
@@ -24,6 +28,8 @@
 #include "kernel/osl/services_shared.h"
 #include "kernel/osl/strings.h"
 #include "kernel/osl/types.h"
+
+#include "kernel/geom/pixel_displacement_shader.h"
 
 CCL_NAMESPACE_BEGIN
 

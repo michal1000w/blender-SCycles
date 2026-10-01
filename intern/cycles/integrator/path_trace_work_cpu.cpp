@@ -4,6 +4,8 @@
 
 #include "integrator/path_trace_work_cpu.h"
 
+#include <algorithm>
+
 #include "device/cpu/kernel.h"
 #include "device/device.h"
 
@@ -19,6 +21,8 @@
 #include "scene/scene.h"
 #include "session/buffers.h"
 
+#include "util/log.h"
+#include "util/math.h"
 #include "util/tbb.h"
 #include "util/time.h"
 
@@ -70,17 +74,48 @@ void PathTraceWorkCPU::render_samples(RenderStatistics &statistics,
                                       const int start_sample,
                                       const int samples_num,
                                       const int sample_offset,
-                                      const bool /*adaptive_sampling*/)
+                                      const bool adaptive_sampling)
 {
-  const int64_t image_width = effective_buffer_params_.width;
-  const int64_t image_height = effective_buffer_params_.height;
-  const int64_t total_pixels_num = image_width * image_height;
-
   if (device_->profiler.active()) {
     for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
       kernel_globals.start_profiling();
     }
   }
+
+  if (device_scene_->data.integrator.use_photon_mapping ||
+      path_trace_use_bidirectional(device_scene_))
+  {
+    render_samples_light_cache(start_sample, samples_num, sample_offset, adaptive_sampling);
+  }
+  else {
+    render_camera_samples(start_sample, samples_num, sample_offset);
+  }
+
+  if (device_->profiler.active()) {
+    for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
+      kernel_globals.stop_profiling();
+    }
+  }
+
+  bool coherent_error = false;
+  for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
+    coherent_error |= kernel_globals.coherent_error != 0;
+    kernel_globals.coherent_error = 0;
+  }
+  if (coherent_error) {
+    device_->set_error(COHERENT_SPECULAR_ERROR_MESSAGE);
+  }
+
+  statistics.occupancy = 1.0f;
+}
+
+void PathTraceWorkCPU::render_camera_samples(const int start_sample,
+                                             const int samples_num,
+                                             const int sample_offset)
+{
+  const int64_t image_width = effective_buffer_params_.width;
+  const int64_t image_height = effective_buffer_params_.height;
+  const int64_t total_pixels_num = image_width * image_height;
 
   tbb::task_arena local_arena = local_tbb_arena_create(device_);
   local_arena.execute([&]() {
@@ -108,22 +143,253 @@ void PathTraceWorkCPU::render_samples(RenderStatistics &statistics,
       render_samples_full_pipeline(kernel_globals, work_tile, samples_num);
     });
   });
-  if (device_->profiler.active()) {
-    for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
-      kernel_globals.stop_profiling();
-    }
+}
+
+template<typename Func>
+void PathTraceWorkCPU::parallel_for_light_paths(const int num, const Func &func)
+{
+  tbb::task_arena local_arena = local_tbb_arena_create(device_);
+  local_arena.execute([&]() {
+    tbb::parallel_for(tbb::blocked_range<int>(0, num, 64),
+                      [&](const tbb::blocked_range<int> &range) {
+                        if (is_cancel_requested()) {
+                          return;
+                        }
+                        ThreadKernelGlobalsCPU *kernel_globals = kernel_thread_globals_get(
+                            *kernel_thread_globals_);
+                        IntegratorStateCPU state;
+                        for (int index = range.begin(); index != range.end(); index++) {
+                          func(kernel_globals, &state, index);
+                        }
+                      });
+  });
+}
+
+void PathTraceWorkCPU::render_samples_light_cache(const int start_sample,
+                                                  const int samples_num,
+                                                  const int sample_offset,
+                                                  const bool adaptive_sampling)
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+  const bool use_photon_mapping = integrator.use_photon_mapping;
+
+  transport_state_ = KernelTransportStateCPU();
+  transport_state_.queue_counter = &transport_queue_counter_;
+  if (use_photon_mapping) {
+    alloc_photon_mapping();
+  }
+  else {
+    alloc_bidirectional_path_tracing();
   }
 
-  bool coherent_error = false;
+  vector<const KernelTransportStateCPU *> previous_transport_states;
   for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
-    coherent_error |= kernel_globals.coherent_error != 0;
-    kernel_globals.coherent_error = 0;
-  }
-  if (coherent_error) {
-    device_->set_error(COHERENT_SPECULAR_ERROR_MESSAGE);
+    previous_transport_states.push_back(kernel_globals.transport_state);
+    kernel_globals.transport_state = &transport_state_;
   }
 
-  statistics.occupancy = 1.0f;
+  /* Same schedule as PathTraceWorkGPU::render_samples(). Photon mapping renders
+   * `photon_camera_samples` camera paths per scheduled sample (not with adaptive sampling, whose
+   * convergence checks use the scheduled sample index); the film normalization in PathTrace
+   * accounts for them. Camera oversampling is amortized over fewer photon maps. A light cache is
+   * reused for a bounded number of samples, so that renders average independent maps. */
+  const int camera_samples = (use_photon_mapping && !adaptive_sampling) ?
+                                 max(integrator.photon_camera_samples, 1) :
+                                 1;
+  const int update_samples = max(use_photon_mapping ? integrator.photon_map_update_samples :
+                                                      integrator.bdpt_update_samples,
+                                 1);
+  const int map_update_samples = update_samples * camera_samples;
+
+  for (int samples_done = 0; samples_done < samples_num;) {
+    if (is_cancel_requested() || device_->have_error()) {
+      break;
+    }
+    const int batch_samples = min(map_update_samples, samples_num - samples_done);
+    const int batch_start_sample = start_sample + samples_done;
+
+    if (use_photon_mapping) {
+      update_photon_map(batch_start_sample);
+    }
+    else {
+      update_bidirectional_light_cache(batch_start_sample, batch_samples);
+    }
+    if (is_cancel_requested()) {
+      break;
+    }
+
+    render_camera_samples(batch_start_sample * camera_samples,
+                          batch_samples * camera_samples,
+                          sample_offset * camera_samples);
+    samples_done += batch_samples;
+  }
+
+  int index = 0;
+  for (ThreadKernelGlobalsCPU &kernel_globals : *kernel_thread_globals_) {
+    kernel_globals.transport_state = previous_transport_states[index++];
+  }
+}
+
+void PathTraceWorkCPU::alloc_photon_mapping()
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+  const uint capacity = uint(integrator.photon_count);
+  const uint hash_size = max(2048u, next_power_of_two(2u * capacity));
+
+  photons_.resize(capacity);
+  photon_valid_.resize(capacity);
+  photon_hash_.resize(hash_size);
+
+  transport_state_.photons = photons_.data();
+  transport_state_.photon_hash = photon_hash_.data();
+  transport_state_.photon_stored = &photon_stored_;
+  transport_state_.photon_valid = photon_valid_.data();
+  transport_state_.photon_hash_size = hash_size;
+  transport_state_.photon_capacity = capacity;
+}
+
+void PathTraceWorkCPU::update_photon_map(const int start_sample)
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+
+  /* Progressive radius, see PathTraceWorkGPU::enqueue_photon_mapping(). A three-dimensional point
+   * estimate needs N*r^3 to grow, keep the volume shrink exponent below 1/3. */
+  const int iteration = max(start_sample, 0);
+  transport_state_.photon_iteration = iteration;
+  transport_state_.photon_radius = max(
+      integrator.photon_radius * powf(float(iteration + 1), -integrator.photon_radius_decay),
+      1.0e-6f);
+  const float volume_decay = min(integrator.photon_radius_decay, 0.3f);
+  transport_state_.photon_volume_radius = max(integrator.photon_radius *
+                                                  integrator.photon_volume_radius_scale *
+                                                  powf(float(iteration + 1), -volume_decay),
+                                              1.0e-6f);
+
+  std::fill(photon_hash_.begin(), photon_hash_.end(), 0u);
+  photon_stored_ = 0;
+
+  parallel_for_light_paths(
+      int(transport_state_.photon_capacity),
+      [&](ThreadKernelGlobalsCPU *kg, IntegratorStateCPU *state, const int photon_index) {
+        kernels_.integrator_photon_emit(kg, state, photon_index, iteration);
+      });
+  if (is_cancel_requested()) {
+    return;
+  }
+
+  photon_stored_ = uint(kernels_.integrator_photon_map_build(&kernel_thread_globals_->front()));
+
+  LOG_DEBUG << "Photon map stored " << photon_stored_ << " / " << transport_state_.photon_capacity
+            << " photons at radius " << transport_state_.photon_radius;
+}
+
+void PathTraceWorkCPU::alloc_bidirectional_path_tracing()
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+
+  /* Keep the light-subpath density constant as image resolution changes, see
+   * PathTraceWorkGPU::alloc_bidirectional_path_tracing(). The setting is the budget at the
+   * scene's full render resolution; previews and cropped buffers receive the proportional share.
+   * Each emitted path reservoir-selects one connectible vertex. */
+  const uint64_t scaled_light_paths = uint64_t(integrator.bdpt_light_paths) *
+                                      uint64_t(max(effective_buffer_params_.width, 1)) *
+                                      uint64_t(max(effective_buffer_params_.height, 1));
+  const uint64_t reference_pixels = uint64_t(max(integrator.bdpt_reference_pixels, 1));
+  const uint64_t scaled_count = (scaled_light_paths + reference_pixels - 1u) / reference_pixels;
+  const uint light_paths = uint(
+      std::clamp(scaled_count, uint64_t(1), uint64_t(integrator.bdpt_light_paths)));
+  const uint capacity = light_paths;
+
+  LOG_INFO << "BDPT light cache: " << capacity << " vertices, light tree "
+           << (integrator.use_light_tree ? "enabled" : "disabled");
+
+  bdpt_vertices_.resize(capacity);
+  bdpt_vertex_indices_.resize(capacity);
+  bdpt_vertex_count_.resize(1);
+  const bool coherent = integrator.coherent_specular_enabled;
+  const bool polarization = (device_scene_->data.kernel_features & KERNEL_FEATURE_POLARIZATION) !=
+                            0;
+  bdpt_coherent_history_.resize(coherent ? capacity : 0);
+  bdpt_polarization_.resize(polarization ? capacity : 0);
+  if (film_locks_.size() == 0) {
+    film_locks_.resize(4096);
+    std::fill(film_locks_.begin(), film_locks_.end(), 0u);
+  }
+
+  transport_state_.bdpt_vertices = bdpt_vertices_.data();
+  transport_state_.bdpt_coherent_history = coherent ? bdpt_coherent_history_.data() : nullptr;
+  transport_state_.bdpt_polarization = polarization ? bdpt_polarization_.data() : nullptr;
+  transport_state_.bdpt_vertex_indices = bdpt_vertex_indices_.data();
+  transport_state_.bdpt_vertex_count = bdpt_vertex_count_.data();
+  transport_state_.bdpt_vertex_capacity = capacity;
+  transport_state_.bdpt_cache_capacity = 1;
+  transport_state_.bdpt_cache_count = 1;
+  transport_state_.bdpt_cache_start_sample = 0;
+  transport_state_.bdpt_light_path_count = light_paths;
+  transport_state_.bdpt_light_path_sample_ratio = float(light_paths);
+}
+
+void PathTraceWorkCPU::update_bidirectional_light_cache(const int start_sample,
+                                                        const int batch_samples)
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+
+  /* Emit the proportional share of the per-update budget, so that light paths per camera sample
+   * stay constant however the render scheduler divides the sample range, see
+   * PathTraceWorkGPU::enqueue_bidirectional_light_paths(). One cache serves the batch. */
+  const int iteration = max(start_sample, 0);
+  const uint update_samples = uint(max(integrator.bdpt_update_samples, 1));
+  const uint samples_per_cache = uint(batch_samples);
+  const uint batch_light_paths = max(
+      1u,
+      uint((uint64_t(transport_state_.bdpt_vertex_capacity) * uint64_t(samples_per_cache) +
+            update_samples - 1u) /
+           update_samples));
+  const uint paths_per_cache = min(transport_state_.bdpt_vertex_capacity, batch_light_paths);
+  transport_state_.bdpt_cache_count = 1;
+  transport_state_.bdpt_cache_start_sample = uint(iteration);
+  transport_state_.bdpt_light_path_count = paths_per_cache;
+  transport_state_.bdpt_light_path_sample_ratio = float(paths_per_cache) /
+                                                  float(max(samples_per_cache, 1u));
+  transport_state_.bdpt_buffer_full_x = effective_buffer_params_.full_x;
+  transport_state_.bdpt_buffer_full_y = effective_buffer_params_.full_y;
+  transport_state_.bdpt_buffer_width = effective_buffer_params_.width;
+  transport_state_.bdpt_buffer_height = effective_buffer_params_.height;
+  transport_state_.bdpt_buffer_offset = effective_buffer_params_.offset;
+  transport_state_.bdpt_buffer_stride = effective_buffer_params_.stride;
+
+  const int num_light_paths = int(paths_per_cache);
+  std::fill(bdpt_vertex_count_.begin(), bdpt_vertex_count_.end(), 0u);
+  parallel_for_light_paths(
+      num_light_paths,
+      [&](ThreadKernelGlobalsCPU *kg, IntegratorStateCPU *state, const int light_path_index) {
+        kernels_.integrator_bdpt_light_generate(
+            kg, state, light_path_index, iteration, batch_samples);
+      });
+  if (is_cancel_requested()) {
+    return;
+  }
+
+  kernels_.integrator_bdpt_cache_order(&kernel_thread_globals_->front());
+
+  float *render_buffer = buffers_->buffer.data();
+  uint *film_locks = film_locks_.data();
+  const int film_locks_num = int(film_locks_.size());
+  parallel_for_light_paths(
+      num_light_paths,
+      [&](ThreadKernelGlobalsCPU *kg, IntegratorStateCPU *state, const int vertex_index) {
+        kernels_.integrator_bdpt_sensor_connect(kg,
+                                                state,
+                                                vertex_index,
+                                                iteration,
+                                                batch_samples,
+                                                render_buffer,
+                                                film_locks,
+                                                film_locks_num);
+      });
+
+  LOG_DEBUG << "BDPT light cache: sample=" << iteration << " emitted=" << num_light_paths
+            << " camera_samples=" << batch_samples << " cached=" << bdpt_vertex_count_[0];
 }
 
 void PathTraceWorkCPU::render_samples_full_pipeline(ThreadKernelGlobalsCPU *kernel_globals,

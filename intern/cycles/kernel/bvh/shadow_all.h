@@ -231,7 +231,7 @@ ccl_device_inline
               }
             }
 
-#ifdef __KERNEL_METAL_PIXEL_DISPLACEMENT__
+#ifdef __PIXEL_DISPLACEMENT_INTERSECT__
             if (hit && pixel_displacement_shared_edge_shadow_hit(
                            kg, ray->self, prim_object, prim, isect.u, isect.v))
             {

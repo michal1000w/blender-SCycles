@@ -31,6 +31,8 @@
 #    include "kernel/film/read.h"
 #    include "kernel/film/volume_guiding_denoise.h"
 
+#    include "kernel/geom/pixel_displacement_shader.h"
+
 #    include "kernel/bake/bake.h"
 
 #else
@@ -81,6 +83,126 @@ CCL_NAMESPACE_BEGIN
 DEFINE_INTEGRATOR_INIT_KERNEL(init_from_camera)
 DEFINE_INTEGRATOR_INIT_KERNEL(init_from_bake)
 DEFINE_INTEGRATOR_SHADE_KERNEL(megakernel)
+
+/* --------------------------------------------------------------------
+ * Light-cache transport.
+ *
+ * The same kernel functions as the GPU light-cache passes, one emitted path or cached vertex per
+ * call. The render work provides their memory through ThreadKernelGlobalsCPU::transport_state.
+ */
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_photon_emit)(const ThreadKernelGlobalsCPU *kg,
+                                                       IntegratorStateCPU *state,
+                                                       const int photon_index,
+                                                       const int iteration)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_photon_emit);
+  (void)kg;
+  (void)state;
+  (void)photon_index;
+  (void)iteration;
+#else
+  kg->photon_emit_index = uint(photon_index);
+  kernel_integrator_state.photon_valid[photon_index] = 0;
+  integrator_photon_emit(kg, state, uint(photon_index), uint(iteration));
+#endif
+}
+
+int KERNEL_FUNCTION_FULL_NAME(integrator_photon_map_build)(const ThreadKernelGlobalsCPU *kg)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_photon_map_build);
+  (void)kg;
+  return 0;
+#else
+  return int(integrator_photon_map_build(kg));
+#endif
+}
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_light_generate)(const ThreadKernelGlobalsCPU *kg,
+                                                               IntegratorStateCPU *state,
+                                                               const int light_path_index,
+                                                               const int iteration,
+                                                               const int batch_samples)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_bdpt_light_generate);
+  (void)kg;
+  (void)state;
+  (void)light_path_index;
+  (void)iteration;
+  (void)batch_samples;
+#else
+  integrator_bdpt_light_generate(
+      kg, state, uint(light_path_index), uint(iteration), uint(batch_samples));
+#endif
+}
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_cache_order)(const ThreadKernelGlobalsCPU *kg)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_bdpt_cache_order);
+  (void)kg;
+#else
+  for (uint cache = 0; cache < kernel_integrator_state.bdpt_cache_count; cache++) {
+    integrator_bdpt_cache_order(kg, kernel_integrator_state.bdpt_light_path_count, 0, 1, cache);
+  }
+#endif
+}
+
+void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_sensor_connect)(const ThreadKernelGlobalsCPU *kg,
+                                                               IntegratorStateCPU *state,
+                                                               const int vertex_index,
+                                                               const int iteration,
+                                                               const int batch_samples,
+                                                               ccl_global float *render_buffer,
+                                                               uint *film_locks,
+                                                               const int film_locks_num)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_bdpt_sensor_connect);
+  (void)kg;
+  (void)state;
+  (void)vertex_index;
+  (void)iteration;
+  (void)batch_samples;
+  (void)render_buffer;
+  (void)film_locks;
+  (void)film_locks_num;
+#else
+  path_state_init_queues(state);
+  integrator_bdpt_sensor_connect(
+      kg, state, uint(vertex_index), uint(iteration), uint(batch_samples), render_buffer);
+
+  /* Trace the splat's shadow path. Light vertices of different threads project onto arbitrary
+   * pixels, so accumulation into the film is serialized per pixel; the shadow test itself runs
+   * concurrently. */
+  IntegratorShadowStateCPU *shadow_state = &state->shadow;
+  while (true) {
+    const uint32_t queued_kernel = INTEGRATOR_STATE(shadow_state, shadow_path, queued_kernel);
+    if (queued_kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW) {
+      kg->pixel_displacement_intersect_rays = true;
+      integrator_intersect_shadow(kg, shadow_state);
+      kg->pixel_displacement_intersect_rays = false;
+    }
+    else if (queued_kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW) {
+      const uint pixel = INTEGRATOR_STATE(shadow_state, shadow_path, render_pixel_index);
+      uint *lock = film_locks + (pixel % uint(film_locks_num));
+      while (atomic_cas_uint32(lock, 0, 1) != 0) {
+        while (*reinterpret_cast<volatile uint *>(lock) != 0) {
+        }
+      }
+      integrator_shade_shadow(kg, shadow_state, render_buffer);
+      atomic_cas_uint32(lock, 1, 0);
+    }
+    else {
+      kernel_assert(queued_kernel == 0);
+      break;
+    }
+  }
+#endif
+}
 
 /* --------------------------------------------------------------------
  * Shader evaluation.
