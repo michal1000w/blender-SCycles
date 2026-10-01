@@ -811,7 +811,7 @@ ccl_device bool bdpt_volume_connection_transmittance(KernelGlobals kg,
 }
 #  endif
 
-/* Equi-angular sampling as in:
+/* Equiangular sampling as in:
  * "Importance Sampling Techniques for Path Tracing in Participating Media" */
 
 /* Below this pdf we ignore samples, as they tend to lead to very long distances.

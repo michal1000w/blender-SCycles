@@ -798,7 +798,6 @@ class GlassBsdfNode : public BsdfNode {
   void simplify_settings(Scene *scene) override;
   bool prepare_diffraction_two_sided_albedo(Scene *scene, Progress &progress);
 
-  void simplify_settings(Scene *scene) override;
   ClosureType get_closure_type() override
   {
     return distribution;
@@ -840,6 +839,8 @@ class GlassBsdfNode : public BsdfNode {
     return input("Color")->link != nullptr ||
            reduce_max(color) - reduce_min(color) > CLOSURE_WEIGHT_CUTOFF;
   }
+
+  bool is_isotropic();
 
  private:
   int diffraction_two_sided_handle_ = -1;

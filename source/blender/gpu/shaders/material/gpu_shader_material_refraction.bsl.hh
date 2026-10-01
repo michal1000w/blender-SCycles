@@ -13,7 +13,11 @@ void node_bsdf_refraction(float4 color,
                           float ior,
                           float3 N,
                           float weight,
-                          KernelGlobals &kg,
+                          float /*diffraction_weight*/,   /* Unsupported. */
+                          float /*diffraction_pitch*/,    /* Unsupported. */
+                          float /*diffraction_depth*/,    /* Unsupported. */
+                          float /*diffraction_duty*/,     /* Unsupported. */
+                          float3 /*diffraction_tangent*/, /* Unsupported. */
                           ShadingData &sd,
                           Closure &result)
 {

@@ -45,6 +45,20 @@ ccl_device_forceinline bool point_intersect_test(const float4 point,
   const float t_front = projC0 - td;
   const bool valid_front = (ray_tmin <= t_front) & (t_front <= ray_tmax);
 
+  if constexpr (use_backface_culling == false) {
+    const float t_back = projC0 + td;
+    const bool valid_back = (ray_tmin <= t_back) & (t_back <= ray_tmax);
+
+    /* check if there is a first hit */
+    const bool valid_first = valid_front | valid_back;
+    if (!valid_first) {
+      return false;
+    }
+
+    *t = (valid_front) ? t_front : t_back;
+    return true;
+  }
+
   if (valid_front) {
     *t = t_front;
     return true;

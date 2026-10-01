@@ -2,7 +2,11 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "gpu_shader_material_blackbody.glsl"
+#pragma once
+
+#include "gpu_shader_material_blackbody.bsl.hh"
+#include "gpu_shader_material_interface.bsl.hh"
+#include "gpu_shader_math_constants.bsl.hh"
 
 [[node]]
 void node_volume_fast(float4 scatter_color,
@@ -30,6 +34,7 @@ void node_volume_fast(float4 scatter_color,
                       float4 temperature_attribute,
                       sampler1DArray spectrummap,
                       float layer,
+                      ShadingData &sd,
                       Closure &result)
 {
   float3 scatter_coeff = float3(0.0f);
@@ -75,5 +80,5 @@ void node_volume_fast(float4 scatter_color,
   ClosureEmission emission_data;
   emission_data.emission = emission_coeff * weight;
 
-  result = closure_eval(volume_scatter_data, volume_absorption_data, emission_data);
+  result = closure_eval(sd, volume_scatter_data, volume_absorption_data, emission_data);
 }

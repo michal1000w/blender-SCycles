@@ -26,9 +26,6 @@ thread_mutex &metal_compilation_mutex()
   return mutex;
 }
 
-/* Comment this out to test workaround for getting gpuAddress and gpuResourceID on macOS < 13.0. */
-#  define CYCLES_USE_TIER2D_BINDLESS
-
 string MetalInfo::get_device_name(id<MTLDevice> device)
 {
   string device_name = [device.name UTF8String];
@@ -126,129 +123,6 @@ const vector<id<MTLDevice>> &MetalInfo::get_usable_devices()
   already_enumerated = true;
 
   return usable_devices;
-}
-
-struct GPUAddressHelper {
-  id<MTLBuffer> resource_buffer = nil;
-  id<MTLArgumentEncoder> address_encoder = nil;
-
-  /* One time setup of arg encoder. */
-  void init(id<MTLDevice> device)
-  {
-    if (resource_buffer) {
-      /* No setup required - already initialised. */
-      return;
-    }
-
-#  ifdef CYCLES_USE_TIER2D_BINDLESS
-    if (@available(macos 13.0, *)) {
-      /* No setup required - there's an API now! */
-      return;
-    }
-#  endif
-
-    /* Setup a tiny buffer to encode the GPU address / resourceID into. */
-    resource_buffer = [device newBufferWithLength:8 options:MTLResourceStorageModeShared];
-
-    /* Create an encoder to extract a gpuAddress from a MTLBuffer. */
-    MTLArgumentDescriptor *encoder_params = [[MTLArgumentDescriptor alloc] init];
-    encoder_params.arrayLength = 1;
-    encoder_params.access = MTLBindingAccessReadWrite;
-    encoder_params.dataType = MTLDataTypePointer;
-    address_encoder = [device newArgumentEncoderWithArguments:@[ encoder_params ]];
-    [address_encoder setArgumentBuffer:resource_buffer offset:0];
-  };
-
-  uint64_t gpuAddress(id<MTLBuffer> buffer)
-  {
-#  ifdef CYCLES_USE_TIER2D_BINDLESS
-    if (@available(macos 13.0, *)) {
-      return buffer.gpuAddress;
-    }
-#  endif
-    [address_encoder setBuffer:buffer offset:0 atIndex:0];
-    return *(uint64_t *)[resource_buffer contents];
-  }
-
-  uint64_t gpuResourceID(id<MTLTexture> texture)
-  {
-#  ifdef CYCLES_USE_TIER2D_BINDLESS
-    if (@available(macos 13.0, *)) {
-      MTLResourceID resourceID = texture.gpuResourceID;
-      return (uint64_t &)resourceID;
-    }
-#  endif
-    [address_encoder setTexture:texture atIndex:0];
-    return *(uint64_t *)[resource_buffer contents];
-  }
-
-  uint64_t gpuResourceID(id<MTLAccelerationStructure> accel_struct)
-  {
-#  ifdef CYCLES_USE_TIER2D_BINDLESS
-    if (@available(macos 13.0, *)) {
-      MTLResourceID resourceID = accel_struct.gpuResourceID;
-      return (uint64_t &)resourceID;
-    }
-#  endif
-    [address_encoder setAccelerationStructure:accel_struct atIndex:0];
-    return *(uint64_t *)[resource_buffer contents];
-  }
-
-  uint64_t gpuResourceID(id<MTLIntersectionFunctionTable> ift)
-  {
-#  ifdef CYCLES_USE_TIER2D_BINDLESS
-    if (@available(macos 13.0, *)) {
-      MTLResourceID resourceID = ift.gpuResourceID;
-      return (uint64_t &)resourceID;
-    }
-#  endif
-    [address_encoder setIntersectionFunctionTable:ift atIndex:0];
-    return *(uint64_t *)[resource_buffer contents];
-  }
-
-  uint64_t gpuResourceID(id<MTLVisibleFunctionTable> vft)
-  {
-#  ifdef CYCLES_USE_TIER2D_BINDLESS
-    if (@available(macos 13.0, *)) {
-      MTLResourceID resourceID = vft.gpuResourceID;
-      return (uint64_t &)resourceID;
-    }
-#  endif
-    [address_encoder setVisibleFunctionTable:vft atIndex:0];
-    return *(uint64_t *)[resource_buffer contents];
-  }
-};
-
-GPUAddressHelper g_gpu_address_helper;
-
-void metal_gpu_address_helper_init(id<MTLDevice> device)
-{
-  g_gpu_address_helper.init(device);
-}
-
-uint64_t metal_gpuAddress(id<MTLBuffer> buffer)
-{
-  return g_gpu_address_helper.gpuAddress(buffer);
-}
-
-uint64_t metal_gpuResourceID(id<MTLTexture> texture)
-{
-  return g_gpu_address_helper.gpuResourceID(texture);
-}
-
-uint64_t metal_gpuResourceID(id<MTLAccelerationStructure> accel_struct)
-{
-  return g_gpu_address_helper.gpuResourceID(accel_struct);
-}
-
-uint64_t metal_gpuResourceID(id<MTLIntersectionFunctionTable> ift)
-{
-  return g_gpu_address_helper.gpuResourceID(ift);
-}
-
-uint64_t metal_gpuResourceID(id<MTLVisibleFunctionTable> vft)
-{
-  return g_gpu_address_helper.gpuResourceID(vft);
 }
 
 CCL_NAMESPACE_END

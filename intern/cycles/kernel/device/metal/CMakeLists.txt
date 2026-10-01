@@ -72,11 +72,8 @@ if(WITH_CYCLES_DEVICE_METAL)
       -ffast-math
       -fmodules-cache-path=${CMAKE_CURRENT_BINARY_DIR}/module_cache
       -I${CMAKE_SOURCE_DIR}/intern/cycles
-      -D__KERNEL_LOCAL_ATOMIC_SORT__
       -D__KERNEL_METAL_APPLE__
-      -D__METAL_FUNCTION_CONSTANTS_64BIT__
       -D__KERNEL_METAL_TARGET_CPU_ARM64__
-      -D__KERNEL_METAL_MACOS__=${CYCLES_METAL_MACOS_MAJOR}
       -D__KERNEL_METAL_VISIBLE_SHADING__
       # Pixel displacement is inactive at runtime unless the scene enables it.
       -D__KERNEL_METAL_PIXEL_DISPLACEMENT__
