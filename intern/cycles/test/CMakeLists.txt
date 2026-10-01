@@ -69,6 +69,12 @@ set(SRC
   util_types_spherical_harmonics_test.cpp
 )
 
+if(WITH_CYCLES_DEVICE_METAL)
+  list(APPEND SRC
+    device_metal_osl_camera_test.cpp
+  )
+endif()
+
 # Disable AVX tests on macOS. Rosetta has problems running them, and other
 # platforms should be enough to verify AVX operations are implemented correctly.
 if(NOT APPLE)

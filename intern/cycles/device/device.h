@@ -214,6 +214,17 @@ class Device {
     return true;
   }
 
+  /* Custom camera shader for devices that do not run OSL but a translation of the shader to
+   * their own shading language. `key` identifies `source`, an empty key removes the shader:
+   * the custom camera then renders black. Returns false and sets `error` if the device cannot
+   * use the shader. */
+  virtual bool set_osl_camera_source(const string & /*key*/,
+                                     const string & /*source*/,
+                                     string & /*error*/)
+  {
+    return true;
+  }
+
   virtual bool load_osl_kernels()
   {
     return true;

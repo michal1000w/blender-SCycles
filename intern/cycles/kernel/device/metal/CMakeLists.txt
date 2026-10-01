@@ -75,6 +75,8 @@ if(WITH_CYCLES_DEVICE_METAL)
       -D__KERNEL_METAL_APPLE__
       -D__KERNEL_METAL_TARGET_CPU_ARM64__
       -D__KERNEL_METAL_VISIBLE_SHADING__
+      # Custom cameras call a function compiled for the scene, see device/metal/osl_camera.h.
+      -D__KERNEL_METAL_OSL_CAMERA__
       # Pixel displacement is inactive at runtime unless the scene enables it.
       -D__KERNEL_METAL_PIXEL_DISPLACEMENT__
       -D__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__

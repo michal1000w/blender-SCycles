@@ -19,6 +19,7 @@
 #include "scene/light.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
+#include "scene/osl.h"
 #include "scene/scene.h"
 #include "scene/shader.h"
 #include "scene/stats.h"
@@ -1045,6 +1046,16 @@ void BlenderSession::update_status_progress()
 
 bool BlenderSession::check_and_report_session_error()
 {
+  /* Problems that do not stop the render. */
+  const string warning = scene->osl_manager->get_camera_warning();
+  if (warning != last_warning) {
+    if (!warning.empty()) {
+      /* 1 << 4 means RPT_WARNING. */
+      RE_engine_report(&b_engine, 1 << 4, warning.c_str());
+    }
+    last_warning = warning;
+  }
+
   if (!session->progress.get_error()) {
     return false;
   }

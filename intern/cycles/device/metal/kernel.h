@@ -283,6 +283,26 @@ class MetalDisplacementFunctions {
   std::atomic_bool ready_ = false;
 };
 
+/* GPU binary of a custom camera shader translated to Metal, see `osl_camera.h`. Camera ray
+ * kernels call it through a visible function table. It is compiled for a scene and added to the
+ * finished pipeline, which does not recompile the kernel. */
+class MetalCameraFunction {
+ public:
+  ~MetalCameraFunction();
+
+  /* Identifies the function among all functions compiled in this process. */
+  int function_id = 0;
+  /* Identifies the translated shader. */
+  string key;
+  id<MTLFunction> function = nil;
+};
+
+/* Kernels that generate camera rays and therefore call the camera function. */
+static inline bool metal_kernel_uses_camera_function(const DeviceKernel kernel)
+{
+  return kernel == DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA;
+}
+
 /* A pipeline object that can be shared between multiple instances of MetalDeviceQueue. */
 class MetalKernelPipeline {
  public:
@@ -328,6 +348,12 @@ class MetalKernelPipeline {
   id<MTLComputePipelineState> displacement_pipeline(
       const MetalDisplacementFunctions &functions) const;
 
+  /* A custom camera function can be added to the pipeline. */
+  bool camera_function_callable = false;
+  /* The pipeline with the camera function added, or nil if adding it failed. Created on first
+   * use for each function. */
+  id<MTLComputePipelineState> camera_pipeline(const MetalCameraFunction &function) const;
+
   bool should_use_binary_archive() const;
   id<MTLFunction> make_intersection_function(const char *function_name);
 
@@ -338,6 +364,8 @@ class MetalKernelPipeline {
  private:
   mutable thread_mutex displacement_mutex_;
   mutable std::map<int, id<MTLComputePipelineState>> displacement_pipelines_;
+  /* By function ID, the most recent last. */
+  mutable vector<std::pair<int, id<MTLComputePipelineState>>> camera_pipelines_;
 };
 
 /* An actively instanced pipeline that can only be used by a single instance of MetalDeviceQueue.
@@ -349,6 +377,7 @@ class MetalDispatchPipeline {
   bool update(MetalDevice *metal_device, DeviceKernel kernel);
   void free_intersection_function_tables();
   void free_visible_function_tables();
+  void free_camera_function_table();
 
  private:
   friend class MetalDeviceQueue;
@@ -357,6 +386,8 @@ class MetalDispatchPipeline {
   int pipeline_id = -1;
   /* Key of the specialized displacement functions in use, or -1 for the generic. */
   int displacement_key = -1;
+  /* ID of the custom camera function in use, or -1 for none. */
+  int camera_function_id = -1;
 
   MetalDevice *metal_device = nullptr;
   MetalPipelineType pso_type;
@@ -370,6 +401,10 @@ class MetalDispatchPipeline {
   bool use_visible_shading = false;
   API_AVAILABLE(macos(11.0))
   id<MTLVisibleFunctionTable> visible_func_table[METAL_VFT_NUM] = {nil};
+
+  /* The custom camera function of the scene, for camera ray kernels. */
+  API_AVAILABLE(macos(11.0))
+  id<MTLVisibleFunctionTable> camera_func_table = nil;
 };
 
 /* Cache of Metal kernels for each DeviceKernel. */
@@ -391,6 +426,13 @@ std::shared_ptr<MetalDisplacementFunctions> request_displacement_functions(
     const std::shared_ptr<MetalVisibleFunctions> &generic,
     int evaluator_set,
     int bvh_features);
+/* Compile the camera function of a custom camera from its translated source, or return the
+ * function compiled earlier for the same `key`. Blocks until done: the source is small. Returns
+ * null and sets `error` on failure. */
+std::shared_ptr<MetalCameraFunction> compile_camera_function(MetalDevice *device,
+                                                             const string &key,
+                                                             const string &source,
+                                                             string &error);
 /* Compile the shading functions of another generic library on few threads, after the kernels
  * that scenes wait for. request_visible_functions() for the same library then adds threads to
  * a compilation in progress, or returns the finished functions. */

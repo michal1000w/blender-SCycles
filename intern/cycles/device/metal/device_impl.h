@@ -198,6 +198,15 @@ class MetalDevice : public Device {
                                     const float max_distance,
                                     const bool metalrt_compatible) override;
 
+  /* Custom cameras: the kernels can call a camera function compiled for the scene, see
+   * `osl_camera.h`. Requires function pointers. */
+  bool use_osl_camera_function = false;
+  bool set_osl_camera_source(const string &key, const string &source, string &error) override;
+  /* The function of the current scene, or null. */
+  std::shared_ptr<MetalCameraFunction> current_osl_camera_function() const;
+  mutable thread_mutex osl_camera_mutex;
+  std::shared_ptr<MetalCameraFunction> osl_camera_function;
+
   void refresh_source_and_kernels_md5(MetalPipelineType pso_type);
 
   void make_source(MetalPipelineType pso_type, uint64_t kernel_features);

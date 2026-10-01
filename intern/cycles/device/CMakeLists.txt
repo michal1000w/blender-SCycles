@@ -112,6 +112,11 @@ set(SRC_METAL
   metal/graphics_interop.h
   metal/kernel.mm
   metal/kernel.h
+  metal/osl_camera.cpp
+  metal/osl_camera.h
+  metal/osl_camera_prelude.h
+  metal/osl_camera_translate.cpp
+  metal/osl_camera_translate.h
   metal/queue.mm
   metal/queue.h
   metal/util.mm

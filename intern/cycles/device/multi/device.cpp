@@ -182,6 +182,15 @@ class MultiDevice : public Device {
     }
   }
 
+  bool set_osl_camera_source(const string &key, const string &source, string &error) override
+  {
+    bool ok = true;
+    for (SubDevice &sub : devices) {
+      ok &= sub.device->set_osl_camera_source(key, source, error);
+    }
+    return ok;
+  }
+
   bool load_kernels(const uint64_t kernel_features) override
   {
     for (SubDevice &sub : devices) {

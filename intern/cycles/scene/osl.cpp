@@ -19,6 +19,10 @@
 #  include "kernel/osl/globals.h"
 #  include "kernel/osl/services.h"
 
+#  ifdef WITH_METAL
+#    include "device/metal/osl_camera.h"
+#  endif
+
 #  include "util/aligned_malloc.h"
 #  include "util/log.h"
 #  include "util/md5.h"
@@ -103,6 +107,12 @@ void OSLManager::foreach_osl_device(Device *device,
 void OSLManager::tag_update()
 {
   need_update_ = true;
+}
+
+string OSLManager::get_camera_warning() const
+{
+  const thread_scoped_lock lock(camera_warning_mutex_);
+  return camera_warning_;
 }
 
 bool OSLManager::need_update() const
@@ -207,6 +217,12 @@ void OSLManager::device_update_post(Device *device,
     });
   }
 
+#  ifdef WITH_METAL
+  if (need_update()) {
+    device_update_camera_metal(device, scene);
+  }
+#  endif
+
   if (need_update()) {
     scoped_callback_timer timer([scene](double time) {
       if (scene->update_stats) {
@@ -270,8 +286,96 @@ void OSLManager::device_update_post(Device *device,
   need_update_ = false;
 }
 
-void OSLManager::device_free(Device *device, DeviceScene * /*dscene*/, Scene *scene)
+#  ifdef WITH_METAL
+void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
 {
+  bool has_metal = false;
+  device->foreach_device(
+      [&](Device *sub_device) { has_metal |= (sub_device->info.type == DEVICE_METAL); });
+  if (!has_metal) {
+    return;
+  }
+
+  const Camera *camera = scene->camera;
+  DeviceScene &dscene = scene->dscene;
+  const OSLShaderInfo *info = camera->script_name.empty() ?
+                                  nullptr :
+                                  shader_loaded_info(camera->script_name);
+  string warning;
+  if (info == nullptr || info->bytecode.empty()) {
+    /* A custom camera without shader renders black. */
+    device->set_osl_camera_source("", "", warning);
+    dscene.camera_script_params.free();
+    const thread_scoped_lock lock(camera_warning_mutex_);
+    camera_warning_.clear();
+    return;
+  }
+
+  /* Metal devices have no OSL back end, they run a translation of the shader. It only depends
+   * on the bytecode and on which parameters have a value, not on the values of numbers. */
+  const string colorspace = scene->shader_manager->get_scene_linear_interop_id();
+  const string key = metal_osl_camera_program_key(
+      camera->script_name, camera->script_params, colorspace);
+  if (!camera_metal_program_ || camera_metal_key_ != key) {
+    camera_metal_program_ = make_unique<MetalOSLCameraProgram>();
+    camera_metal_error_.clear();
+    camera_metal_key_ = key;
+    if (!metal_osl_camera_translate(info->bytecode,
+                                    camera->script_params,
+                                    colorspace,
+                                    *camera_metal_program_,
+                                    camera_metal_error_))
+    {
+      if (camera_metal_error_.empty()) {
+        camera_metal_error_ = "unknown error";
+      }
+    }
+    else {
+      LOG_INFO << "Translated custom camera shader for Metal: "
+               << camera_metal_program_->source.size() << " bytes, "
+               << camera_metal_program_->params.size() << " parameters";
+    }
+  }
+  /* A shader that cannot be used renders black, as when it fails to compile on other devices.
+   * The render continues, so that the shader can be edited in a running session. */
+  string device_error = camera_metal_error_;
+  const bool ok = device_error.empty() ?
+                      device->set_osl_camera_source(
+                          key, camera_metal_program_->source, device_error) :
+                      device->set_osl_camera_source("", "", warning);
+  if (!ok || !device_error.empty()) {
+    warning = "Custom camera shader is not supported on Metal and renders black: " + device_error;
+    LOG_ERROR << warning;
+  }
+  {
+    const thread_scoped_lock lock(camera_warning_mutex_);
+    camera_warning_ = warning;
+  }
+
+  /* Parameter values. */
+  vector<uint> words;
+  if (warning.empty()) {
+    metal_osl_camera_pack_params(*camera_metal_program_, camera->script_params, words);
+  }
+  if (words.empty()) {
+    dscene.camera_script_params.free();
+  }
+  else {
+    uint *data = dscene.camera_script_params.alloc(words.size());
+    std::copy_n(words.data(), words.size(), data);
+    dscene.camera_script_params.copy_to_device();
+  }
+}
+#  endif
+
+void OSLManager::device_free(Device *device, DeviceScene *dscene, Scene *scene)
+{
+#  ifdef WITH_METAL
+  /* Upload the parameters of the camera shader again on the next update. */
+  dscene->camera_script_params.free();
+  need_update_ = true;
+#  endif
+
   /* clear shader engine */
   foreach_osl_device(device, [](Device *, OSLGlobals *og) {
     og->use_shading = false;
@@ -570,6 +674,7 @@ const char *OSLManager::shader_load_bytecode(const string &hash, const string &b
   info.has_surface_emission = (bytecode.find("\"emission\"") != string::npos);
   info.has_surface_transparent = (bytecode.find("\"transparent\"") != string::npos);
   info.has_surface_bssrdf = (bytecode.find("\"bssrdf\"") != string::npos);
+  info.bytecode = bytecode;
 
   loaded_shaders[hash] = info;
 
@@ -1599,6 +1704,10 @@ void OSLManager::device_update_post(Device * /*device*/,
 void OSLManager::device_free(Device * /*device*/, DeviceScene * /*dscene*/, Scene * /*scene*/) {}
 
 void OSLManager::tag_update() {}
+string OSLManager::get_camera_warning() const
+{
+  return "";
+}
 bool OSLManager::need_update() const
 {
   return false;

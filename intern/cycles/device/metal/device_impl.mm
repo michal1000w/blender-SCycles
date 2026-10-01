@@ -121,6 +121,14 @@ MetalDevice::MetalDevice(const DeviceInfo &info, Stats &stats, Profiler &profile
       use_visible_shading = use_visible_shading && atoi(str) != 0;
     }
 
+    /* Custom cameras call a function compiled for the scene, see `osl_camera.h`. */
+    if (@available(macOS 13.0, *)) {
+      use_osl_camera_function = [mtlDevice supportsFunctionPointers];
+    }
+    if (const char *str = getenv("CYCLES_METAL_OSL_CAMERA")) {
+      use_osl_camera_function = use_osl_camera_function && atoi(str) != 0;
+    }
+
     /* Enable increased concurrent shader compiler limit.
      * This is also done by MTLContext::MTLContext, but only in GUI mode. The separately compiled
      * shading functions keep each compiler job small enough for low-memory devices too. */
@@ -413,6 +421,36 @@ void MetalDevice::set_scene_pixel_displacement(const bool enabled,
   }
 }
 
+bool MetalDevice::set_osl_camera_source(const string &key, const string &source, string &error)
+{
+  /* Without a function the custom camera renders black, see MetalDispatchPipeline::update(). */
+  std::shared_ptr<MetalCameraFunction> function;
+  string function_error;
+  if (!key.empty()) {
+    if (!use_osl_camera_function) {
+      function_error = "this GPU or macOS version does not support function pointers";
+    }
+    else {
+      function = MetalDeviceKernels::compile_camera_function(this, key, source, function_error);
+    }
+  }
+  {
+    thread_scoped_lock lock(osl_camera_mutex);
+    osl_camera_function = function;
+  }
+  if (!function_error.empty()) {
+    error = function_error;
+    return false;
+  }
+  return true;
+}
+
+std::shared_ptr<MetalCameraFunction> MetalDevice::current_osl_camera_function() const
+{
+  thread_scoped_lock lock(osl_camera_mutex);
+  return osl_camera_function;
+}
+
 string MetalDevice::preprocess_source(MetalPipelineType pso_type,
                                       const uint64_t kernel_features,
                                       string *source,
@@ -428,6 +466,10 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
     /* Pixel displacement is inactive at runtime unless the scene enables it. */
     global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT__\n";
     global_defines += "#define __KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__\n";
+  }
+
+  if (use_osl_camera_function) {
+    global_defines += "#define __KERNEL_METAL_OSL_CAMERA__\n";
   }
 
   if (pso_type == PSO_GENERIC && !complete_generic && MetalInfo::use_low_memory_compilation()) {
@@ -830,6 +872,10 @@ string MetalDevice::precompiled_generic_library_path(const bool metalrt) const
   if (!use_visible_shading || !use_local_atomic_sort() || use_metalrt_extended_limits ||
       !metal_kernel_source_is_installed())
   {
+    return "";
+  }
+  /* The precompiled libraries have the function table of custom cameras in their resources. */
+  if (!use_osl_camera_function) {
     return "";
   }
 #  ifdef WITH_NANOVDB
