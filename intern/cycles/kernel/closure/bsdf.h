@@ -1115,7 +1115,7 @@ ccl_device void bsdf_blur(ccl_private ShaderClosure *sc, const float roughness)
 #endif
 }
 
-ccl_device_inline Spectrum bsdf_albedo(KernelGlobals kg,
+ccl_device_inline_outline_metal Spectrum bsdf_albedo(KernelGlobals kg,
                                        const ccl_private ShaderData *sd,
                                        const ccl_private ShaderClosure *sc,
                                        const bool reflection,

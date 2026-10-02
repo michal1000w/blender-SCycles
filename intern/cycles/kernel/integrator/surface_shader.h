@@ -1899,7 +1899,8 @@ ccl_device Spectrum surface_shader_apply_holdout(ccl_private ShaderData *sd)
  * specialized bidirectional/photon shading. Ordinary specialized PT keeps its inlining policy. */
 template<uint64_t node_feature_mask, typename ConstIntegratorGenericState>
 #if defined(__KERNEL_METAL_APPLE__) && \
-    (!defined(__KERNEL_USE_DATA_CONSTANTS__) || defined(__KERNEL_METAL_OUTLINE_SURFACE_EVAL__))
+    (!defined(__KERNEL_USE_DATA_CONSTANTS__) || defined(__KERNEL_METAL_OUTLINE_SURFACE_EVAL__) || \
+     defined(__KERNEL_METAL_LOW_MEMORY_COMPILE__))
 __attribute__((noinline))
 #endif
 ccl_device void surface_shader_eval(KernelGlobals kg,
