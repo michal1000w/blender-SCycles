@@ -15,6 +15,7 @@
 #include "util/thread.h"
 #include "util/unique_ptr.h"
 
+#include "scene/image.h"
 #include "scene/shader.h"
 #include "scene/shader_graph.h"
 #include "scene/shader_nodes.h"
@@ -117,6 +118,8 @@ class OSLManager {
   string camera_metal_key_;
   unique_ptr<MetalOSLCameraProgram> camera_metal_program_;
   string camera_metal_error_;
+  /* The images that the camera shader looks up, which keeps them loaded. */
+  vector<ImageHandle> camera_metal_images_;
 #  endif
   mutable thread_mutex camera_warning_mutex_;
   string camera_warning_;

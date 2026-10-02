@@ -306,6 +306,7 @@ void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
     /* A custom camera without shader renders black. */
     device->set_osl_camera_source("", "", warning);
     dscene.camera_script_params.free();
+    camera_metal_images_.clear();
     const thread_scoped_lock lock(camera_warning_mutex_);
     camera_warning_.clear();
     return;
@@ -320,6 +321,7 @@ void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
     camera_metal_program_ = make_unique<MetalOSLCameraProgram>();
     camera_metal_error_.clear();
     camera_metal_key_ = key;
+    camera_metal_images_.clear();
     if (!metal_osl_camera_translate(info->bytecode,
                                     camera->script_params,
                                     colorspace,
@@ -352,10 +354,31 @@ void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
     camera_warning_ = warning;
   }
 
+  /* The images that the shader looks up are loaded like those of the OSL runtime of other
+   * devices: by file name, with default settings. The image manager updates the device after
+   * this. */
+  vector<int> image_ids;
+  if (warning.empty()) {
+    const vector<MetalOSLCameraProgram::Image> &images = camera_metal_program_->images;
+    if (camera_metal_images_.size() != images.size()) {
+      camera_metal_images_.clear();
+      for (const MetalOSLCameraProgram::Image &image : images) {
+        camera_metal_images_.push_back(
+            scene->image_manager->add_image(image.filename, ImageParams()));
+      }
+    }
+    for (const ImageHandle &handle : camera_metal_images_) {
+      image_ids.push_back(handle.kernel_id());
+    }
+  }
+  else {
+    camera_metal_images_.clear();
+  }
+
   /* Parameter values. */
   vector<uint> words;
   if (warning.empty()) {
-    metal_osl_camera_pack_params(*camera_metal_program_, camera->script_params, words);
+    metal_osl_camera_pack_params(*camera_metal_program_, camera->script_params, image_ids, words);
   }
   if (words.empty()) {
     dscene.camera_script_params.free();
@@ -373,6 +396,7 @@ void OSLManager::device_free(Device *device, DeviceScene *dscene, Scene *scene)
 #  ifdef WITH_METAL
   /* Upload the parameters of the camera shader again on the next update. */
   dscene->camera_script_params.free();
+  camera_metal_images_.clear();
   need_update_ = true;
 #  endif
 

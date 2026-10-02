@@ -303,6 +303,152 @@ ccl_device_inline void camera_sample_to_ray(ccl_constant KernelCamera *cam,
   ray->tmax = cam->cliplength;
 }
 
+#ifdef __KERNEL_METAL_OSL_CAMERA__
+/* Image lookups of a camera shader that was translated for Metal, see
+ * `device/metal/osl_camera.h`.
+ *
+ * The camera function has no access to the images. When it needs a lookup it returns a request,
+ * the kernel answers it here with the same code as the OSL runtime of other devices, and runs
+ * the function again with the result. Returns true if the image data is not loaded yet. */
+ccl_device_noinline bool camera_custom_image_request(KernelGlobals kg,
+                                                     ccl_private const float *request,
+                                                     ccl_private float *result)
+{
+  /* Layout of MetalOSLCameraRequest. */
+  const int type = int(request[0]);
+  const int image = __float_as_int(request[1]);
+  const float3 coord = make_float3(request[2], request[3], request[4]);
+  const float4 missing = (request[8] != 0.0f) ?
+                             make_float4(request[9], request[10], request[11], request[12]) :
+                             IMAGE_MISSING_RGBA;
+
+  /* Only the fields that the image lookup uses. */
+  ShaderDataTinyStorage sd_storage;
+  ccl_private ShaderData *sd = AS_SHADER_DATA(&sd_storage);
+  sd->lcg_state = 0;
+  sd->runtime_flag = 0;
+
+  float4 value = zero_float4();
+  float status = 0.0f;
+
+  if (type == 1) {
+    /* texture() */
+    const dual2 uv(make_float2(request[2], request[3]),
+                   make_float2(request[4], request[5]),
+                   make_float2(request[6], request[7]));
+    value = kernel_image_interp_with_udim(kg, sd, image, uv, missing);
+    status = 1.0f;
+  }
+  else if (type == 2) {
+    /* texture3d() */
+    if (image == KERNEL_IMAGE_NONE) {
+      value = IMAGE_MISSING_RGBA;
+    }
+    else {
+      value = kernel_image_interp_3d(kg, sd, image, coord, INTERPOLATION_NONE, false);
+      status = 1.0f;
+    }
+  }
+  else if (type == 3) {
+    /* environment() is always equirectangular. */
+    const dual2 uv(direction_to_equirectangular(coord));
+    value = kernel_image_interp_with_udim(kg, sd, image, uv, missing);
+    status = 1.0f;
+  }
+  else if (type == 4 || type == 5) {
+    /* gettextureinfo(), with coordinates to select the tile of a tiled image. */
+    int image_texture_id = image;
+    if (type == 5) {
+      float2 uv = make_float2(request[2], request[3]);
+      image_texture_id = kernel_image_udim_map(kg, image, uv);
+    }
+    if (image_texture_id != KERNEL_IMAGE_NONE) {
+      const ccl_global KernelImageTexture &tex = kernel_data_fetch(image_textures,
+                                                                   image_texture_id);
+      if (tex.image_info_id != KERNEL_IMAGE_NONE) {
+        const int data = int(request[13]);
+        if (data == 1) {
+          value = make_float4(float(tex.width), float(tex.height), 1.0f, 0.0f);
+          status = 1.0f;
+        }
+        else if (data == 2) {
+          const ccl_global KernelImageInfo &info = kernel_data_fetch(image_info,
+                                                                     tex.image_info_id);
+          int channels = 4;
+          switch (info.data_type) {
+            case IMAGE_DATA_TYPE_NANOVDB_FLOAT3:
+              channels = 3;
+              break;
+            case IMAGE_DATA_TYPE_FLOAT:
+            case IMAGE_DATA_TYPE_BYTE:
+            case IMAGE_DATA_TYPE_HALF:
+            case IMAGE_DATA_TYPE_USHORT:
+            case IMAGE_DATA_TYPE_NANOVDB_FLOAT:
+            case IMAGE_DATA_TYPE_NANOVDB_FPN:
+            case IMAGE_DATA_TYPE_NANOVDB_FP16:
+              channels = 1;
+              break;
+            case IMAGE_DATA_TYPE_NANOVDB_EMPTY:
+              channels = 0;
+              break;
+            default:
+              break;
+          }
+          value = make_float4(float(channels), 0.0f, 0.0f, 0.0f);
+          status = 1.0f;
+        }
+        else if (data == 3) {
+          value = make_float4(1.0f, 0.0f, 0.0f, 0.0f);
+          status = 1.0f;
+        }
+        else if (data == 4) {
+          value = tex.average_color;
+          status = 1.0f;
+        }
+      }
+    }
+  }
+
+  result[0] = value.x;
+  result[1] = value.y;
+  result[2] = value.z;
+  result[3] = value.w;
+  result[4] = status;
+  return (sd->runtime_flag & SR_CACHE_MISS) != 0;
+}
+
+/* Answer the request in `output` and run the camera function again, until it returns a ray.
+ * `input` are the values that do not depend on the lookups. Returns false if there is no ray.
+ * This is separate from the caller so that cameras without image lookups do not carry the
+ * results of the lookups. */
+ccl_device_noinline bool camera_custom_image_lookups(KernelGlobals kg,
+                                                     ccl_private const float *input,
+                                                     ccl_private float *output,
+                                                     ccl_private int &r_cache_miss)
+{
+  /* Layout of MetalOSLCameraInput. */
+  float input_results[14 + 5 * 32];
+  for (int i = 0; i < 13; i++) {
+    input_results[i] = input[i];
+  }
+  for (int num_results = 0; output[21] != 0.0f; num_results++) {
+    if (num_results >= 32) {
+      /* More lookups for one ray than supported. */
+      return false;
+    }
+    if (camera_custom_image_request(kg, &output[21], &input_results[14 + 5 * num_results])) {
+      r_cache_miss = true;
+      return false;
+    }
+    input_results[13] = float(num_results + 1);
+    output[21] = 0.0f;
+    metal_ancillaries->vft_osl_camera[0](
+        &launch_params_metal, kernel_data_array(camera_script_params), input_results, output);
+  }
+  return true;
+}
+#endif
+
 ccl_device_inline Spectrum camera_sample_custom(KernelGlobals kg,
                                                 ccl_constant KernelCamera *cam,
                                                 const ccl_global DecomposedTransform *cam_motion,
@@ -372,8 +518,9 @@ ccl_device_inline Spectrum camera_sample_custom(KernelGlobals kg,
   /* The `cam:aperture_position` attribute. */
   const float2 aperture_position = camera_sample_aperture(cam, rand_lens) * cam->aperturesize;
 
-  /* Layout of MetalOSLCameraInput. */
-  float input[13];
+  /* Layout of MetalOSLCameraInput: the sensor position and lens sample, followed by the number
+   * of results of image lookups, which is none yet. */
+  float input[14];
   input[0] = sensor.x;
   input[1] = sensor.y;
   input[2] = sensor.z;
@@ -388,10 +535,17 @@ ccl_device_inline Spectrum camera_sample_custom(KernelGlobals kg,
   input[11] = aperture_position.x;
   input[12] = aperture_position.y;
 
-  /* Execute the shader to sample position, direction and transmission. */
-  float output[21];
+  input[13] = 0.0f;
+
+  /* Execute the shader to sample position, direction and transmission. A shader that looks up
+   * an image returns a request for it instead, and runs again with the result. */
+  float output[21 + 14];
+  output[21] = 0.0f;
   metal_ancillaries->vft_osl_camera[0](
       &launch_params_metal, kernel_data_array(camera_script_params), input, output);
+  if (output[21] != 0.0f && !camera_custom_image_lookups(kg, input, output, r_cache_miss)) {
+    return zero_spectrum();
+  }
 
   const float3 P = make_float3(output[0], output[1], output[2]);
   const float3 dPdx = make_float3(output[3], output[4], output[5]);
