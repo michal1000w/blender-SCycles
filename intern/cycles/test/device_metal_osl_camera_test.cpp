@@ -112,9 +112,9 @@ code ___main___
 	end
 )OSO";
 
-/* A shader that samples a texture. */
+/* A shader that looks up an image. */
 static const char *texture_bytecode = R"OSO(OpenShadingLanguage 1.00
-shader bad
+shader image
 oparam	point	position	0 0 0
 oparam	vector	direction	0 0 1
 oparam	color	throughput	1 1 1
@@ -173,6 +173,250 @@ code ___main___
 	mul		throughput $tmp5 $tmp6 	%argrw{"wrr"}
 	end
 )OSO";
+
+/* Strings that are chosen and joined at render time, and one that is made from a number but
+ * only printed:
+ *
+ *   shader strings(string name = "camera",
+ *                  output point position = point(0.0),
+ *                  output vector direction = vector(0.0, 0.0, 1.0),
+ *                  output color throughput = color(1.0))
+ *   {
+ *       string kind = (P[0] > 0.5) ? "perlin" : "cell";
+ *       string joined = concat(kind, "_", name);
+ *       throughput = color(noise(kind, P), strlen(joined), joined == "cell_camera");
+ *       string number = format("%d", (int)P[0]);
+ *       printf("%s", number);
+ *   }
+ */
+static const char *strings_bytecode = R"OSO(OpenShadingLanguage 1.00
+shader strings
+param	string	name	"camera"
+oparam	point	position	0 0 0
+oparam	vector	direction	0 0 1
+oparam	color	throughput	1 1 1
+global	point	P
+local	string	kind
+local	string	joined
+local	string	number
+const	int	$const1	0
+temp	float	$tmp1
+const	float	$const2	0.5
+temp	int	$tmp2
+const	string	$const3	"perlin"
+const	string	$const4	"cell"
+const	string	$const5	"_"
+const	string	$const6	"concat"
+temp	string	$tmp3
+temp	float	$tmp4
+temp	int	$tmp5
+temp	float	$tmp6
+const	string	$const7	"cell_camera"
+temp	int	$tmp7
+temp	float	$tmp8
+const	string	$const8	"%d"
+temp	float	$tmp9
+temp	int	$tmp10
+const	string	$const9	"%s"
+code ___main___
+	compref		$tmp1 P $const1 	  %argrw{"wrr"}
+	gt		$tmp2 $tmp1 $const2 	%argrw{"wrr"}
+	if		$tmp2 4 5 	%argrw{"r"}
+	assign		kind $const3 	%argrw{"wr"}
+	assign		kind $const4 	%argrw{"wr"}
+	functioncall	$const6 8 	 %argrw{"r"}
+	concat		$tmp3 kind $const5 	  %argrw{"wrr"}
+	concat		joined $tmp3 name 	%argrw{"wrr"}
+	noise		$tmp4 kind P 	  %argrw{"wrr"}
+	strlen		$tmp5 joined 	%argrw{"wr"}
+	assign		$tmp6 $tmp5 	%argrw{"wr"}
+	eq		$tmp7 joined $const7 	%argrw{"wrr"}
+	assign		$tmp8 $tmp7 	%argrw{"wr"}
+	color		throughput $tmp4 $tmp6 $tmp8 	%argrw{"wrrr"}
+	compref		$tmp9 P $const1 	 %argrw{"wrr"}
+	assign		$tmp10 $tmp9 	%argrw{"wr"}
+	format		number $const8 $tmp10 	%argrw{"wrr"}
+	printf		$const9 number 	 %argrw{"rr"}
+	end
+)OSO";
+
+/* A string made from a number at render time that the shader looks at:
+ *
+ *   shader number(output point position = point(0.0),
+ *                 output vector direction = vector(0.0, 0.0, 1.0),
+ *                 output color throughput = color(1.0))
+ *   {
+ *       string number = format("%d", (int)P[0]);
+ *       throughput = color(strlen(number));
+ *   }
+ */
+static const char *number_bytecode = R"OSO(OpenShadingLanguage 1.00
+shader number
+oparam	point	position	0 0 0
+oparam	vector	direction	0 0 1
+oparam	color	throughput	1 1 1
+global	point	P
+local	string	number
+const	string	$const1	"%d"
+const	int	$const2	0
+temp	float	$tmp1
+temp	int	$tmp2
+temp	int	$tmp3
+temp	float	$tmp4
+code ___main___
+	compref		$tmp1 P $const2 	  %argrw{"wrr"}
+	assign		$tmp2 $tmp1 	%argrw{"wr"}
+	format		number $const1 $tmp2 	%argrw{"wrr"}
+	strlen		$tmp3 number 	 %argrw{"wr"}
+	assign		$tmp4 $tmp3 	%argrw{"wr"}
+	assign		throughput $tmp4 	%argrw{"wr"}
+	end
+)OSO";
+
+/* Closures and messages:
+ *
+ *   shader misc(output point position = point(0.0),
+ *               output vector direction = vector(0.0, 0.0, 1.0),
+ *               output color throughput = color(1.0),
+ *               output closure color surface = 0)
+ *   {
+ *       closure color c = diffuse(N) * 0.5;
+ *       surface = c;
+ *       setmessage("depth", P[2]);
+ *       float depth = 0.0;
+ *       int found = getmessage("depth", depth);
+ *       throughput = color(depth, found, 0.0);
+ *   }
+ */
+static const char *misc_bytecode = R"OSO(OpenShadingLanguage 1.00
+shader misc
+oparam	point	position	0 0 0
+oparam	vector	direction	0 0 1
+oparam	color	throughput	1 1 1
+oparam	closure color	surface
+global	point	P
+global	normal	N
+local	closure color	c
+local	float	depth
+local	int	found
+temp	closure color	$tmp1
+const	string	$const1	"diffuse"
+const	float	$const2	0.5
+const	string	$const3	"depth"
+const	int	$const4	2
+temp	float	$tmp2
+const	float	$const5	0
+temp	float	$tmp3
+code ___main___
+	closure		$tmp1 $const1 N 	  %argrw{"wrr"}
+	mul		c $tmp1 $const2 	%argrw{"wrr"}
+	assign		surface c 	 %argrw{"wr"}
+	compref		$tmp2 P $const4 	 %argrw{"wrr"}
+	setmessage	$const3 $tmp2 	%argrw{"rr"}
+	assign		depth $const5 	 %argrw{"wr"}
+	getmessage	found $const3 depth 	 %argrw{"wrw"}
+	assign		$tmp3 found 	 %argrw{"wr"}
+	color		throughput depth $tmp3 $const5 	%argrw{"wrrr"}
+	end
+)OSO";
+
+/* A spline, an image, a dictionary and Gabor noise:
+ *
+ *   shader features(string file = "image.png",
+ *                   output point position = point(0.0),
+ *                   output vector direction = vector(0.0, 0.0, 1.0),
+ *                   output color throughput = color(1.0))
+ *   {
+ *       float knots[5] = {0.0, 0.0, 0.5, 1.0, 1.0};
+ *       float s = spline("catmull-rom", P[0], knots);
+ *       color c = texture(file, P[0], P[1]);
+ *       int node = dict_find("<a b=\"2\"/>", "/a");
+ *       int b = 0;
+ *       dict_value(node, "b", b);
+ *       throughput = c * s * b + noise("gabor", P);
+ *   }
+ */
+static const char *features_bytecode = R"OSO(OpenShadingLanguage 1.00
+shader features
+param	string	file	"image.png"
+oparam	point	position	0 0 0
+oparam	vector	direction	0 0 1
+oparam	color	throughput	1 1 1
+global	point	P
+local	float[5]	knots
+local	float	s
+local	color	c
+local	int	node
+local	int	b
+const	float[5]	$const1	0 0 0.5 1 1
+const	string	$const2	"catmull-rom"
+const	int	$const3	0
+temp	float	$tmp1
+temp	float	$tmp2
+const	int	$const4	1
+temp	float	$tmp3
+const	string	$const5	"<a b=\"2\"/>"
+const	string	$const6	"/a"
+temp	int	$tmp4
+const	string	$const7	"b"
+temp	color	$tmp5
+temp	color	$tmp6
+temp	color	$tmp7
+temp	color	$tmp8
+const	string	$const8	"gabor"
+code ___main___
+	assign		knots $const1 	  %argrw{"wr"}
+	compref		$tmp1 P $const3 	 %argrw{"wrr"}
+	spline		s $const2 $tmp1 knots 	%argrw{"wrrr"}
+	compref		$tmp2 P $const3 	 %argrw{"wrr"}
+	compref		$tmp3 P $const4 	%argrw{"wrr"}
+	texture		c file $tmp2 $tmp3 	%argrw{"wrrr"}
+	dict_find	node $const5 $const6 	 %argrw{"wrr"}
+	assign		b $const3 	 %argrw{"wr"}
+	dict_value	$tmp4 node $const7 b 	 %argrw{"wrrw"}
+	mul		$tmp5 c s 	 %argrw{"wrr"}
+	assign		$tmp7 b 	%argrw{"wr"}
+	mul		$tmp6 $tmp5 $tmp7 	%argrw{"wrr"}
+	noise		$tmp8 $const8 P 	%argrw{"wrr"}
+	add		throughput $tmp6 $tmp8 	%argrw{"wrr"}
+	end
+)OSO";
+
+/* A dictionary with one node that has the attribute b="2", found by the query "/a". */
+class TestDictionary : public OSLCameraDictionary {
+ public:
+  int find(const std::string & /*dictionary*/, const std::string &query) override
+  {
+    if (query != "/a") {
+      return 0;
+    }
+    num_nodes_ = 1;
+    return 1;
+  }
+  int find(int /*node*/, const std::string & /*query*/) override
+  {
+    return 0;
+  }
+  int next(int /*node*/) override
+  {
+    return 0;
+  }
+  bool value(const int node, const std::string &attribute, std::string &text) override
+  {
+    if (node != 1 || attribute != "b") {
+      return false;
+    }
+    text = "2";
+    return true;
+  }
+  int num_nodes() override
+  {
+    return num_nodes_;
+  }
+
+ private:
+  int num_nodes_ = 0;
+};
 
 static OSLCameraTranslateOptions unit_options()
 {
@@ -272,17 +516,117 @@ TEST(metal_osl_camera, strings)
   EXPECT_TRUE(contains(world.source, "s_tmp11 = 0;"));
 }
 
+TEST(metal_osl_camera, strings_at_render_time)
+{
+  OSLCameraTranslateResult result;
+  std::string error;
+  ASSERT_TRUE(
+      osl_camera_translate_msl(strings_bytecode, OSLCameraTranslateOptions(), result, error))
+      << error;
+
+  /* A string with two possible values is a number at render time, and the noise that it names
+   * is emitted once for each value. */
+  EXPECT_TRUE(contains(result.source, "int s_kind"));
+  EXPECT_TRUE(contains(result.source, "if (s_kind == "));
+  EXPECT_TRUE(contains(result.source, "else if (s_kind == "));
+  EXPECT_TRUE(contains(result.source, "osl_snoise_f3("));
+  EXPECT_TRUE(contains(result.source, "osl_cellnoise_f3("));
+  /* The length of the joined string is known for each value: "perlin_camera", "cell_camera". */
+  EXPECT_TRUE(contains(result.source, "s_tmp5 = 13;"));
+  EXPECT_TRUE(contains(result.source, "s_tmp5 = 11;"));
+  /* The string made from a number is only printed, which does nothing. */
+  EXPECT_FALSE(contains(result.source, "s_number"));
+
+  /* Looking at such a string is the one thing that cannot be translated. */
+  EXPECT_FALSE(
+      osl_camera_translate_msl(number_bytecode, OSLCameraTranslateOptions(), result, error));
+  EXPECT_TRUE(contains(error, "number")) << error;
+}
+
+TEST(metal_osl_camera, closures_and_messages)
+{
+  OSLCameraTranslateResult result;
+  std::string error;
+  ASSERT_TRUE(osl_camera_translate_msl(misc_bytecode, OSLCameraTranslateOptions(), result, error))
+      << error;
+
+  /* Closures are not computed. */
+  EXPECT_FALSE(contains(result.source, "s_surface"));
+  EXPECT_FALSE(contains(result.source, "s_c "));
+  /* A message is a variable that remembers if it was set. */
+  EXPECT_TRUE(contains(result.source, "int msg_0_state = 0;"));
+  EXPECT_TRUE(contains(result.source, "float msg_0 = 0.0f;"));
+  EXPECT_TRUE(contains(result.source, "if (msg_0_state == 2)"));
+}
+
+TEST(metal_osl_camera, images)
+{
+  OSLCameraTranslateResult result;
+  std::string error;
+  ASSERT_TRUE(
+      osl_camera_translate_msl(texture_bytecode, OSLCameraTranslateOptions(), result, error))
+      << error;
+
+  /* The kernel ID of the image is a parameter word that the host fills in. */
+  ASSERT_EQ(result.images.size(), 1);
+  EXPECT_EQ(result.images[0].filename, "image.png");
+  EXPECT_EQ(result.images[0].offset, 0);
+  EXPECT_EQ(result.num_words, 1);
+  /* The function returns a request for the lookup unless the result was passed in. */
+  EXPECT_TRUE(contains(result.source, "if (tex_next < tex_avail)"));
+  EXPECT_TRUE(contains(result.source, "out[21] = 1.0f;"));
+  EXPECT_TRUE(contains(result.source, "out[22] = as_type<float>(prm[0]);"));
+  EXPECT_TRUE(contains(result.source, "return true;"));
+  /* The coordinates carry derivatives, which select the resolution of the image. */
+  EXPECT_TRUE(contains(result.source, "DualF s_tmp1"));
+}
+
+TEST(metal_osl_camera, features)
+{
+  TestDictionary dictionary;
+  OSLCameraTranslateOptions options;
+  options.dictionary = &dictionary;
+  /* The file name is a parameter of the camera. */
+  options.params["file"] = {OSLCameraTranslateParam::STRING, 0, "other.exr"};
+
+  OSLCameraTranslateResult result;
+  std::string error;
+  ASSERT_TRUE(osl_camera_translate_msl(features_bytecode, options, result, error)) << error;
+
+  ASSERT_EQ(result.images.size(), 1);
+  EXPECT_EQ(result.images[0].filename, "other.exr");
+  EXPECT_TRUE(contains(result.source, "osl_spline_eval(0, "));
+  EXPECT_TRUE(contains(result.source, "osl_gabor_f3("));
+  /* The dictionary is queried during the translation: the node is a constant and its value
+   * is read from a table. */
+  EXPECT_TRUE(contains(result.source, "s_node = 1;"));
+  EXPECT_TRUE(contains(result.source, "constant int osl_dict_0[2] = {0, 2};"));
+  /* The parts of the runtime library that the shader does not use are left out. */
+  EXPECT_FALSE(contains(result.source, "osl_simplexnoise_f3"));
+  EXPECT_FALSE(contains(result.source, "osl_pperlin"));
+
+  /* Without a dictionary the queries are not supported. */
+  EXPECT_FALSE(
+      osl_camera_translate_msl(features_bytecode, OSLCameraTranslateOptions(), result, error));
+  EXPECT_TRUE(contains(error, "dict_find")) << error;
+}
+
 TEST(metal_osl_camera, unsupported)
 {
   OSLCameraTranslateResult result;
   std::string error;
-  EXPECT_FALSE(
-      osl_camera_translate_msl(texture_bytecode, OSLCameraTranslateOptions(), result, error));
-  EXPECT_TRUE(contains(error, "texture")) << error;
-
-  error.clear();
   EXPECT_FALSE(osl_camera_translate_msl("", OSLCameraTranslateOptions(), result, error));
   EXPECT_FALSE(error.empty());
+
+  /* Jump targets that do not describe nested ranges of instructions. */
+  error.clear();
+  EXPECT_FALSE(osl_camera_translate_msl("OpenShadingLanguage 1.00\nshader broken\n"
+                                        "const\tint\t$const1\t1\n"
+                                        "code ___main___\n\tif\t\t$const1 9 2\n\tend\n",
+                                        OSLCameraTranslateOptions(),
+                                        result,
+                                        error));
+  EXPECT_TRUE(contains(error, "malformed")) << error;
 
   error.clear();
   EXPECT_FALSE(osl_camera_translate_msl(

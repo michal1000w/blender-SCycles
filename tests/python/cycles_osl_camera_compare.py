@@ -27,6 +27,9 @@ import numpy as np
 PROBE_ABS = 2e-4
 PROBE_REL = 2e-4
 PROBE_OUTLIERS = 0.004
+# Image lookups: graphics hardware interpolates between pixels with a few bits of precision.
+TEXTURE_PROBE_ABS = 3e-3
+TEXTURE_PROBE_REL = 3e-3
 # Render images: difference of the mean, and RMSE of block averages relative to the mean.
 RENDER_MEAN = 0.02
 RENDER_BLOCK_RMSE = 0.08
@@ -42,12 +45,12 @@ def load(path):
     return pixels.astype(np.float64)
 
 
-def compare_probe(reference, candidate):
+def compare_probe(reference, candidate, absolute=PROBE_ABS, relative=PROBE_REL):
     # Undo the encoding of the probe shader. Black pixels have no ray.
     ref = np.where(reference.sum(axis=2, keepdims=True) > 0.0, (reference - 4.0) * 4.0, -99.0)
     cand = np.where(candidate.sum(axis=2, keepdims=True) > 0.0, (candidate - 4.0) * 4.0, -99.0)
     difference = np.abs(cand - ref)
-    tolerance = PROBE_ABS + PROBE_REL * np.abs(ref)
+    tolerance = absolute + relative * np.abs(ref)
     outliers = float((difference > tolerance).any(axis=2).mean())
     inside = difference[difference <= tolerance]
     return {
@@ -114,7 +117,9 @@ def main():
             result = {"ok": False, "shape_mismatch": True}
         elif not np.isfinite(candidate).all():
             result = {"ok": False, "not_finite": True}
-        elif name.startswith("probe_"):
+        elif name.startswith("probe_texture"):
+            result = compare_probe(reference, candidate, TEXTURE_PROBE_ABS, TEXTURE_PROBE_REL)
+        elif name.startswith("probe"):
             result = compare_probe(reference, candidate)
         else:
             result = compare_render(reference, candidate)

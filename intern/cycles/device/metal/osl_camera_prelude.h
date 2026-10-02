@@ -105,13 +105,29 @@ template<typename T> inline OslDual<T> osl_div(OslDual<T> a, OslDual<T> b)
   return OslDual<T>{q, binv * (a.dx - q * b.dx), binv * (a.dy - q * b.dy)};
 }
 
+/* Numbers that do not fit saturate and NaN is zero, as on the processors that Metal runs on. */
 inline int osl_ftoi(float a)
 {
-  return int(a);
+  if (a >= 2147483648.0f) {
+    return 2147483647;
+  }
+  if (a <= -2147483648.0f) {
+    return -2147483647 - 1;
+  }
+  return (a != a) ? 0 : int(a);
 }
 inline int osl_idx(int i, int n)
 {
   return clamp(i, 0, n - 1);
+}
+/* Index into the table of all parts of a string of length `slen`, see substr(). */
+inline int osl_substr_index(int start, int len, int slen)
+{
+  int b = start;
+  if (b < 0) {
+    b += slen;
+  }
+  return clamp(b, 0, slen) * (slen + 1) + clamp(len, 0, slen);
 }
 
 /* Functions of one argument. `D` is the derivative, with `x` the argument and `f` the value. */
@@ -396,6 +412,32 @@ template<typename T> inline OslDual<T> osl_max(OslDual<T> a, OslDual<T> b)
   return OslDual<T>{osl_if(a.v > b.v, a.v, b.v),
                     osl_if(a.v > b.v, a.dx, b.dx),
                     osl_if(a.v > b.v, a.dy, b.dy)};
+}
+
+/* The upper limit is applied first, as in the OSL runtime. */
+template<typename T> inline T osl_clamp(T x, T low, T high)
+{
+  return osl_max(osl_min(x, high), low);
+}
+inline int osl_clamp(int x, int low, int high)
+{
+  return max(min(x, high), low);
+}
+template<typename T> inline T osl_degrees(T x)
+{
+  return x * T(57.29577951308232f);
+}
+template<typename T> inline OslDual<T> osl_degrees(OslDual<T> x)
+{
+  return OslDual<T>{osl_degrees(x.v), osl_degrees(x.dx), osl_degrees(x.dy)};
+}
+template<typename T> inline T osl_radians(T x)
+{
+  return x * T(0.017453292519943295f);
+}
+template<typename T> inline OslDual<T> osl_radians(OslDual<T> x)
+{
+  return OslDual<T>{osl_radians(x.v), osl_radians(x.dx), osl_radians(x.dy)};
 }
 
 template<typename T> inline T osl_mix(T a, T b, T t)
@@ -829,6 +871,20 @@ inline uint osl_cell_key(float x)
 OSL_HASH_NOISE(osl_hashnoise, osl_hash_key)
 OSL_HASH_NOISE(osl_cellnoise, osl_cell_key)
 
+/* Position in a period that is a whole number of at least one. */
+inline float osl_wrap(float s, float period)
+{
+  period = floor(period);
+  if (period < 1.0f) {
+    period = 1.0f;
+  }
+  return s - period * floor(s / period);
+}
+inline float3 osl_wrap(float3 s, float3 period)
+{
+  return float3(osl_wrap(s.x, period.x), osl_wrap(s.y, period.y), osl_wrap(s.z, period.z));
+}
+
 /* The integer hash() function. */
 inline int osl_hash_i1(int x)
 {
@@ -983,7 +1039,7 @@ inline float3 osl_color_matrix(float3 c, float3 r, float3 g, float3 b)
 }
 )MSL";
 
-/* Perlin noise, with derivatives when the type is dual. */
+/* Operators and helpers of the noise functions, which have derivatives when the type is dual. */
 static const char *osl_camera_msl_prelude_3 = R"MSL(
 template<typename T> inline OslDual<T> operator+(OslDual<T> a, OslDual<T> b)
 {
@@ -1067,6 +1123,10 @@ inline T osl_trilerp(T v0, T v1, T v2, T v3, T v4, T v5, T v6, T v7, T s, T t, T
          r * (t1 * (v4 * s1 + v5 * s) + t * (v6 * s1 + v7 * s));
 }
 
+)MSL";
+
+/* Perlin noise, only for shaders that use it. */
+static const char *osl_camera_msl_perlin = R"MSL(
 /* Gradients: the dot product with a pseudo-random vector chosen by the hash. */
 template<typename T> inline T osl_grad(int hash, T x)
 {
@@ -1287,6 +1347,1452 @@ inline DualV osl_noise_unsigned(DualV a)
 
 OSL_PERLIN_NOISE(float, float3)
 OSL_PERLIN_NOISE(DualF, DualV)
+)MSL";
+
+/* Periodic noise. */
+static const char *osl_camera_msl_periodic = R"MSL(
+/* Always in [0, b), also for negative numbers. */
+inline int osl_imod(int a, int b)
+{
+  const int remainder = a % b;
+  return (remainder < 0) ? remainder + b : remainder;
+}
+inline int osl_period(float p)
+{
+  const int i = int(floor(p));
+  return (i < 1) ? 1 : i;
+}
+
+#define OSL_PPH1(i) osl_noise_hash(osl_inthash(uint(osl_imod(X + i, px))), shift)
+#define OSL_PPH2(i, j) \
+  osl_noise_hash(osl_inthash(uint(osl_imod(X + i, px)), uint(osl_imod(Y + j, py))), shift)
+#define OSL_PPH3(i, j, k) \
+  osl_noise_hash(osl_inthash(uint(osl_imod(X + i, px)), \
+                             uint(osl_imod(Y + j, py)), \
+                             uint(osl_imod(Z + k, pz))), \
+                 shift)
+#define OSL_PPH4(i, j, k, l) \
+  osl_noise_hash(osl_inthash(uint(osl_imod(X + i, px)), \
+                             uint(osl_imod(Y + j, py)), \
+                             uint(osl_imod(Z + k, pz)), \
+                             uint(osl_imod(W + l, pw))), \
+                 shift)
+
+template<typename T> inline T osl_pperlin(T x, int px, int shift)
+{
+  const int X = int(floor(osl_val(x)));
+  const T fx = x - float(X);
+  const T u = osl_fade(fx);
+  return 0.25f * osl_lerp(osl_grad(OSL_PPH1(0), fx), osl_grad(OSL_PPH1(1), fx - 1.0f), u);
+}
+template<typename T> inline T osl_pperlin(T x, T y, int px, int py, int shift)
+{
+  const int X = int(floor(osl_val(x)));
+  const int Y = int(floor(osl_val(y)));
+  const T fx = x - float(X);
+  const T fy = y - float(Y);
+  const T u = osl_fade(fx);
+  const T v = osl_fade(fy);
+  return 0.6616f * osl_bilerp(osl_grad(OSL_PPH2(0, 0), fx, fy),
+                              osl_grad(OSL_PPH2(1, 0), fx - 1.0f, fy),
+                              osl_grad(OSL_PPH2(0, 1), fx, fy - 1.0f),
+                              osl_grad(OSL_PPH2(1, 1), fx - 1.0f, fy - 1.0f),
+                              u,
+                              v);
+}
+template<typename T> inline T osl_pperlin(T x, T y, T z, int px, int py, int pz, int shift)
+{
+  const int X = int(floor(osl_val(x)));
+  const int Y = int(floor(osl_val(y)));
+  const int Z = int(floor(osl_val(z)));
+  const T fx = x - float(X);
+  const T fy = y - float(Y);
+  const T fz = z - float(Z);
+  const T u = osl_fade(fx);
+  const T v = osl_fade(fy);
+  const T w = osl_fade(fz);
+  return 0.9820f * osl_trilerp(osl_grad(OSL_PPH3(0, 0, 0), fx, fy, fz),
+                               osl_grad(OSL_PPH3(1, 0, 0), fx - 1.0f, fy, fz),
+                               osl_grad(OSL_PPH3(0, 1, 0), fx, fy - 1.0f, fz),
+                               osl_grad(OSL_PPH3(1, 1, 0), fx - 1.0f, fy - 1.0f, fz),
+                               osl_grad(OSL_PPH3(0, 0, 1), fx, fy, fz - 1.0f),
+                               osl_grad(OSL_PPH3(1, 0, 1), fx - 1.0f, fy, fz - 1.0f),
+                               osl_grad(OSL_PPH3(0, 1, 1), fx, fy - 1.0f, fz - 1.0f),
+                               osl_grad(OSL_PPH3(1, 1, 1), fx - 1.0f, fy - 1.0f, fz - 1.0f),
+                               u,
+                               v,
+                               w);
+}
+template<typename T>
+inline T osl_pperlin(T x, T y, T z, T t, int px, int py, int pz, int pw, int shift)
+{
+  const int X = int(floor(osl_val(x)));
+  const int Y = int(floor(osl_val(y)));
+  const int Z = int(floor(osl_val(z)));
+  const int W = int(floor(osl_val(t)));
+  const T fx = x - float(X);
+  const T fy = y - float(Y);
+  const T fz = z - float(Z);
+  const T fw = t - float(W);
+  const T u = osl_fade(fx);
+  const T v = osl_fade(fy);
+  const T w = osl_fade(fz);
+  const T s = osl_fade(fw);
+  const T a = osl_trilerp(osl_grad(OSL_PPH4(0, 0, 0, 0), fx, fy, fz, fw),
+                          osl_grad(OSL_PPH4(1, 0, 0, 0), fx - 1.0f, fy, fz, fw),
+                          osl_grad(OSL_PPH4(0, 1, 0, 0), fx, fy - 1.0f, fz, fw),
+                          osl_grad(OSL_PPH4(1, 1, 0, 0), fx - 1.0f, fy - 1.0f, fz, fw),
+                          osl_grad(OSL_PPH4(0, 0, 1, 0), fx, fy, fz - 1.0f, fw),
+                          osl_grad(OSL_PPH4(1, 0, 1, 0), fx - 1.0f, fy, fz - 1.0f, fw),
+                          osl_grad(OSL_PPH4(0, 1, 1, 0), fx, fy - 1.0f, fz - 1.0f, fw),
+                          osl_grad(OSL_PPH4(1, 1, 1, 0), fx - 1.0f, fy - 1.0f, fz - 1.0f, fw),
+                          u,
+                          v,
+                          w);
+  const T b = osl_trilerp(
+      osl_grad(OSL_PPH4(0, 0, 0, 1), fx, fy, fz, fw - 1.0f),
+      osl_grad(OSL_PPH4(1, 0, 0, 1), fx - 1.0f, fy, fz, fw - 1.0f),
+      osl_grad(OSL_PPH4(0, 1, 0, 1), fx, fy - 1.0f, fz, fw - 1.0f),
+      osl_grad(OSL_PPH4(1, 1, 0, 1), fx - 1.0f, fy - 1.0f, fz, fw - 1.0f),
+      osl_grad(OSL_PPH4(0, 0, 1, 1), fx, fy, fz - 1.0f, fw - 1.0f),
+      osl_grad(OSL_PPH4(1, 0, 1, 1), fx - 1.0f, fy, fz - 1.0f, fw - 1.0f),
+      osl_grad(OSL_PPH4(0, 1, 1, 1), fx, fy - 1.0f, fz - 1.0f, fw - 1.0f),
+      osl_grad(OSL_PPH4(1, 1, 1, 1), fx - 1.0f, fy - 1.0f, fz - 1.0f, fw - 1.0f),
+      u,
+      v,
+      w);
+  return 0.8344f * osl_lerp(a, b, s);
+}
+
+/* Signed and unsigned periodic Perlin noise. Periods have no derivatives. */
+#define OSL_PERIODIC_PERLIN_NOISE(F, V) \
+  inline F osl_psnoise_f1(F x, float px) \
+  { \
+    return osl_pperlin(x, osl_period(px), 0); \
+  } \
+  inline F osl_psnoise_f2(F x, F y, float px, float py) \
+  { \
+    return osl_pperlin(x, y, osl_period(px), osl_period(py), 0); \
+  } \
+  inline F osl_psnoise_f3(V p, float3 pp) \
+  { \
+    return osl_pperlin(osl_comp(p, 0), osl_comp(p, 1), osl_comp(p, 2), osl_period(pp.x), \
+                       osl_period(pp.y), osl_period(pp.z), 0); \
+  } \
+  inline F osl_psnoise_f4(V p, F t, float3 pp, float pt) \
+  { \
+    return osl_pperlin(osl_comp(p, 0), osl_comp(p, 1), osl_comp(p, 2), t, osl_period(pp.x), \
+                       osl_period(pp.y), osl_period(pp.z), osl_period(pt), 0); \
+  } \
+  inline V osl_psnoise_v1(F x, float px) \
+  { \
+    const int ix = osl_period(px); \
+    return osl_vec(osl_pperlin(x, ix, 0), osl_pperlin(x, ix, 8), osl_pperlin(x, ix, 16)); \
+  } \
+  inline V osl_psnoise_v2(F x, F y, float px, float py) \
+  { \
+    const int ix = osl_period(px), iy = osl_period(py); \
+    return osl_vec(osl_pperlin(x, y, ix, iy, 0), osl_pperlin(x, y, ix, iy, 8), \
+                   osl_pperlin(x, y, ix, iy, 16)); \
+  } \
+  inline V osl_psnoise_v3(V p, float3 pp) \
+  { \
+    const F x = osl_comp(p, 0), y = osl_comp(p, 1), z = osl_comp(p, 2); \
+    const int ix = osl_period(pp.x), iy = osl_period(pp.y), iz = osl_period(pp.z); \
+    return osl_vec(osl_pperlin(x, y, z, ix, iy, iz, 0), osl_pperlin(x, y, z, ix, iy, iz, 8), \
+                   osl_pperlin(x, y, z, ix, iy, iz, 16)); \
+  } \
+  inline V osl_psnoise_v4(V p, F t, float3 pp, float pt) \
+  { \
+    const F x = osl_comp(p, 0), y = osl_comp(p, 1), z = osl_comp(p, 2); \
+    const int ix = osl_period(pp.x), iy = osl_period(pp.y), iz = osl_period(pp.z); \
+    const int it = osl_period(pt); \
+    return osl_vec(osl_pperlin(x, y, z, t, ix, iy, iz, it, 0), \
+                   osl_pperlin(x, y, z, t, ix, iy, iz, it, 8), \
+                   osl_pperlin(x, y, z, t, ix, iy, iz, it, 16)); \
+  } \
+  inline F osl_pnoise_f1(F x, float px) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_f1(x, px)); \
+  } \
+  inline F osl_pnoise_f2(F x, F y, float px, float py) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_f2(x, y, px, py)); \
+  } \
+  inline F osl_pnoise_f3(V p, float3 pp) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_f3(p, pp)); \
+  } \
+  inline F osl_pnoise_f4(V p, F t, float3 pp, float pt) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_f4(p, t, pp, pt)); \
+  } \
+  inline V osl_pnoise_v1(F x, float px) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_v1(x, px)); \
+  } \
+  inline V osl_pnoise_v2(F x, F y, float px, float py) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_v2(x, y, px, py)); \
+  } \
+  inline V osl_pnoise_v3(V p, float3 pp) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_v3(p, pp)); \
+  } \
+  inline V osl_pnoise_v4(V p, F t, float3 pp, float pt) \
+  { \
+    return osl_noise_unsigned(osl_psnoise_v4(p, t, pp, pt)); \
+  }
+
+OSL_PERIODIC_PERLIN_NOISE(float, float3)
+OSL_PERIODIC_PERLIN_NOISE(DualF, DualV)
+
+/* Periodic cell and hash noise wrap the position. */
+#define OSL_PERIODIC_HASH_NOISE(name, base) \
+  inline float name##_f1(float x, float px) \
+  { \
+    return base##_f1(osl_wrap(x, px)); \
+  } \
+  inline float name##_f2(float x, float y, float px, float py) \
+  { \
+    return base##_f2(osl_wrap(x, px), osl_wrap(y, py)); \
+  } \
+  inline float name##_f3(float3 p, float3 pp) \
+  { \
+    return base##_f3(osl_wrap(p, pp)); \
+  } \
+  inline float name##_f4(float3 p, float t, float3 pp, float pt) \
+  { \
+    return base##_f4(osl_wrap(p, pp), osl_wrap(t, pt)); \
+  } \
+  inline float3 name##_v1(float x, float px) \
+  { \
+    return base##_v1(osl_wrap(x, px)); \
+  } \
+  inline float3 name##_v2(float x, float y, float px, float py) \
+  { \
+    return base##_v2(osl_wrap(x, px), osl_wrap(y, py)); \
+  } \
+  inline float3 name##_v3(float3 p, float3 pp) \
+  { \
+    return base##_v3(osl_wrap(p, pp)); \
+  } \
+  inline float3 name##_v4(float3 p, float t, float3 pp, float pt) \
+  { \
+    return base##_v4(osl_wrap(p, pp), osl_wrap(t, pt)); \
+  }
+
+OSL_PERIODIC_HASH_NOISE(osl_pcellnoise, osl_cellnoise)
+OSL_PERIODIC_HASH_NOISE(osl_phashnoise, osl_hashnoise)
+)MSL";
+
+/* Simplex noise, after `sfm_simplex.h` of Open Shading Language (BSD-3-Clause), which is
+ * based on the public domain code of Stefan Gustavson. */
+static const char *osl_camera_msl_simplex = R"MSL(
+constant float2 osl_simplex_grad2[8] = {
+    float2(-1.0f, -1.0f), float2(1.0f, 0.0f), float2(-1.0f, 0.0f), float2(1.0f, 1.0f),
+    float2(-1.0f, 1.0f), float2(0.0f, -1.0f), float2(0.0f, 1.0f), float2(1.0f, -1.0f)};
+constant float3 osl_simplex_grad3[16] = {
+    float3(1.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 1.0f), float3(-1.0f, 0.0f, 1.0f),
+    float3(0.0f, -1.0f, 1.0f), float3(1.0f, 0.0f, -1.0f), float3(0.0f, 1.0f, -1.0f),
+    float3(-1.0f, 0.0f, -1.0f), float3(0.0f, -1.0f, -1.0f), float3(1.0f, -1.0f, 0.0f),
+    float3(1.0f, 1.0f, 0.0f), float3(-1.0f, 1.0f, 0.0f), float3(-1.0f, -1.0f, 0.0f),
+    float3(1.0f, 0.0f, 1.0f), float3(-1.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, -1.0f),
+    float3(0.0f, -1.0f, -1.0f)};
+constant float4 osl_simplex_grad4[32] = {
+    float4(0.0f, 1.0f, 1.0f, 1.0f), float4(0.0f, 1.0f, 1.0f, -1.0f),
+    float4(0.0f, 1.0f, -1.0f, 1.0f), float4(0.0f, 1.0f, -1.0f, -1.0f),
+    float4(0.0f, -1.0f, 1.0f, 1.0f), float4(0.0f, -1.0f, 1.0f, -1.0f),
+    float4(0.0f, -1.0f, -1.0f, 1.0f), float4(0.0f, -1.0f, -1.0f, -1.0f),
+    float4(1.0f, 0.0f, 1.0f, 1.0f), float4(1.0f, 0.0f, 1.0f, -1.0f),
+    float4(1.0f, 0.0f, -1.0f, 1.0f), float4(1.0f, 0.0f, -1.0f, -1.0f),
+    float4(-1.0f, 0.0f, 1.0f, 1.0f), float4(-1.0f, 0.0f, 1.0f, -1.0f),
+    float4(-1.0f, 0.0f, -1.0f, 1.0f), float4(-1.0f, 0.0f, -1.0f, -1.0f),
+    float4(1.0f, 1.0f, 0.0f, 1.0f), float4(1.0f, 1.0f, 0.0f, -1.0f),
+    float4(1.0f, -1.0f, 0.0f, 1.0f), float4(1.0f, -1.0f, 0.0f, -1.0f),
+    float4(-1.0f, 1.0f, 0.0f, 1.0f), float4(-1.0f, 1.0f, 0.0f, -1.0f),
+    float4(-1.0f, -1.0f, 0.0f, 1.0f), float4(-1.0f, -1.0f, 0.0f, -1.0f),
+    float4(1.0f, 1.0f, 1.0f, 0.0f), float4(1.0f, 1.0f, -1.0f, 0.0f),
+    float4(1.0f, -1.0f, 1.0f, 0.0f), float4(1.0f, -1.0f, -1.0f, 0.0f),
+    float4(-1.0f, 1.0f, 1.0f, 0.0f), float4(-1.0f, 1.0f, -1.0f, 0.0f),
+    float4(-1.0f, -1.0f, 1.0f, 0.0f), float4(-1.0f, -1.0f, -1.0f, 0.0f)};
+/* The order in which the corners of a 4D simplex are traversed. */
+constant uchar4 osl_simplex_lut[64] = {
+    uchar4(0, 1, 2, 3), uchar4(0, 1, 3, 2), uchar4(0, 0, 0, 0), uchar4(0, 2, 3, 1),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(1, 2, 3, 0),
+    uchar4(0, 2, 1, 3), uchar4(0, 0, 0, 0), uchar4(0, 3, 1, 2), uchar4(0, 3, 2, 1),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(1, 3, 2, 0),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(1, 2, 0, 3), uchar4(0, 0, 0, 0), uchar4(1, 3, 0, 2), uchar4(0, 0, 0, 0),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(2, 3, 0, 1), uchar4(2, 3, 1, 0),
+    uchar4(1, 0, 2, 3), uchar4(1, 0, 3, 2), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(0, 0, 0, 0), uchar4(2, 0, 3, 1), uchar4(0, 0, 0, 0), uchar4(2, 1, 3, 0),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(2, 0, 1, 3), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(3, 0, 1, 2), uchar4(3, 0, 2, 1), uchar4(0, 0, 0, 0), uchar4(3, 1, 2, 0),
+    uchar4(2, 1, 0, 3), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0), uchar4(0, 0, 0, 0),
+    uchar4(3, 1, 0, 2), uchar4(0, 0, 0, 0), uchar4(3, 2, 0, 1), uchar4(3, 2, 1, 0)};
+
+inline uint osl_scramble(uint v0, uint v1, uint v2)
+{
+  return osl_bjfinal(v0, v1, v2 ^ 0xdeadbeefu);
+}
+inline float osl_simplex_grad(int i, int seed)
+{
+  const uint h = osl_scramble(uint(i), uint(seed), 0u);
+  const float g = 1.0f + float(h & 7u);
+  return (h & 8u) ? -g : g;
+}
+inline float2 osl_simplex_grad(int i, int j, int seed)
+{
+  return osl_simplex_grad2[osl_scramble(uint(i), uint(j), uint(seed)) & 7u];
+}
+inline float3 osl_simplex_grad(int i, int j, int k, int seed)
+{
+  return osl_simplex_grad3[
+      osl_scramble(uint(i), uint(j), osl_scramble(uint(k), uint(seed), 0u)) & 15u];
+}
+inline float4 osl_simplex_grad(int i, int j, int k, int l, int seed)
+{
+  return osl_simplex_grad4[
+      osl_scramble(uint(i), uint(j), osl_scramble(uint(k), uint(l), uint(seed))) & 31u];
+}
+
+/* The noise and its derivative by each coordinate. */
+struct OslSimplex {
+  float n;
+  float4 d;
+};
+
+inline OslSimplex osl_simplex(float x, int seed)
+{
+  const int i0 = int(floor(x));
+  const int i1 = i0 + 1;
+  const float x0 = x - float(i0);
+  const float x1 = x0 - 1.0f;
+  const float x20 = x0 * x0;
+  const float t0 = 1.0f - x20;
+  const float t20 = t0 * t0;
+  const float t40 = t20 * t20;
+  const float gx0 = osl_simplex_grad(i0, seed);
+  const float n0 = t40 * gx0 * x0;
+  const float x21 = x1 * x1;
+  const float t1 = 1.0f - x21;
+  const float t21 = t1 * t1;
+  const float t41 = t21 * t21;
+  const float gx1 = osl_simplex_grad(i1, seed);
+  const float n1 = t41 * gx1 * x1;
+  const float scale = 0.36f;
+  float dx = t20 * t0 * gx0 * x20;
+  dx += t21 * t1 * gx1 * x21;
+  dx *= -8.0f;
+  dx += t40 * gx0 + t41 * gx1;
+  dx *= scale;
+  return OslSimplex{scale * (n0 + n1), float4(dx, 0.0f, 0.0f, 0.0f)};
+}
+
+inline OslSimplex osl_simplex(float x, float y, int seed)
+{
+  const float F2 = 0.366025403f;
+  const float G2 = 0.211324865f;
+  const float s = (x + y) * F2;
+  const float xs = x + s;
+  const float ys = y + s;
+  const int i = int(floor(xs));
+  const int j = int(floor(ys));
+  const float t = float(i + j) * G2;
+  const float X0 = float(i) - t;
+  const float Y0 = float(j) - t;
+  const float x0 = x - X0;
+  const float y0 = y - Y0;
+  const int i1 = int(x0 > y0);
+  const int j1 = 1 - i1;
+  const float x1 = x0 - float(i1) + G2;
+  const float y1 = y0 - float(j1) + G2;
+  const float x2 = x0 - 1.0f + 2.0f * G2;
+  const float y2 = y0 - 1.0f + 2.0f * G2;
+
+  const float t0 = 0.5f - x0 * x0 - y0 * y0;
+  const float t20 = t0 * t0;
+  const float t40 = t20 * t20;
+  float2 g0 = osl_simplex_grad(i, j, seed);
+  float n0 = t40 * (g0.x * x0 + g0.y * y0);
+  if (t0 < 0.0f) {
+    n0 = 0.0f;
+    g0 = float2(0.0f);
+  }
+  const float t1 = 0.5f - x1 * x1 - y1 * y1;
+  const float t21 = t1 * t1;
+  const float t41 = t21 * t21;
+  float2 g1 = osl_simplex_grad(i + i1, j + j1, seed);
+  float n1 = t41 * (g1.x * x1 + g1.y * y1);
+  if (t1 < 0.0f) {
+    n1 = 0.0f;
+    g1 = float2(0.0f);
+  }
+  const float t2 = 0.5f - x2 * x2 - y2 * y2;
+  const float t22 = t2 * t2;
+  const float t42 = t22 * t22;
+  float2 g2 = osl_simplex_grad(i + 1, j + 1, seed);
+  float n2 = t42 * (g2.x * x2 + g2.y * y2);
+  if (t2 < 0.0f) {
+    n2 = 0.0f;
+    g2 = float2(0.0f);
+  }
+  const float scale = 64.0f;
+  const float temp0 = t20 * t0 * (g0.x * x0 + g0.y * y0);
+  const float temp1 = t21 * t1 * (g1.x * x1 + g1.y * y1);
+  const float temp2 = t22 * t2 * (g2.x * x2 + g2.y * y2);
+  float2 d = float2(temp0 * x0, temp0 * y0) + float2(temp1 * x1, temp1 * y1) +
+             float2(temp2 * x2, temp2 * y2);
+  d *= -8.0f;
+  d += t40 * g0 + t41 * g1 + t42 * g2;
+  d *= scale;
+  return OslSimplex{scale * (n0 + n1 + n2), float4(d.x, d.y, 0.0f, 0.0f)};
+}
+
+inline OslSimplex osl_simplex(float x, float y, float z, int seed)
+{
+  const float F3 = 0.333333333f;
+  const float G3 = 0.166666667f;
+  const float s = (x + y + z) * F3;
+  const float xs = x + s;
+  const float ys = y + s;
+  const float zs = z + s;
+  const int i = int(floor(xs));
+  const int j = int(floor(ys));
+  const int k = int(floor(zs));
+  const float t = float(i + j + k) * G3;
+  const float X0 = float(i) - t;
+  const float Y0 = float(j) - t;
+  const float Z0 = float(k) - t;
+  const float3 p0 = float3(x - X0, y - Y0, z - Z0);
+
+  const int bg0 = int(p0.x >= p0.y);
+  const int bg1 = int(p0.y >= p0.z);
+  const int bg2 = int(p0.x >= p0.z);
+  const int nbg0 = 1 - bg0;
+  const int nbg1 = 1 - bg1;
+  const int nbg2 = 1 - bg2;
+  const int i1 = bg0 & (bg1 | bg2);
+  const int j1 = nbg0 & bg1;
+  const int k1 = nbg1 & ((bg0 & nbg2) | nbg0);
+  const int i2 = bg0 | (bg1 & bg2);
+  const int j2 = bg1 | nbg0;
+  const int k2 = (bg0 & nbg1) | (nbg0 & (nbg1 | nbg2));
+
+  const float3 p1 = p0 - float3(float(i1), float(j1), float(k1)) + G3;
+  const float3 p2 = p0 - float3(float(i2), float(j2), float(k2)) + 2.0f * G3;
+  const float3 p3 = p0 - 1.0f + 3.0f * G3;
+
+  const float t0 = 0.5f - p0.x * p0.x - p0.y * p0.y - p0.z * p0.z;
+  const float t20 = t0 * t0;
+  const float t40 = t20 * t20;
+  float3 g0 = osl_simplex_grad(i, j, k, seed);
+  float n0 = t40 * (g0.x * p0.x + g0.y * p0.y + g0.z * p0.z);
+  if (t0 < 0.0f) {
+    n0 = 0.0f;
+    g0 = float3(0.0f);
+  }
+  const float t1 = 0.5f - p1.x * p1.x - p1.y * p1.y - p1.z * p1.z;
+  const float t21 = t1 * t1;
+  const float t41 = t21 * t21;
+  float3 g1 = osl_simplex_grad(i + i1, j + j1, k + k1, seed);
+  float n1 = t41 * (g1.x * p1.x + g1.y * p1.y + g1.z * p1.z);
+  if (t1 < 0.0f) {
+    n1 = 0.0f;
+    g1 = float3(0.0f);
+  }
+  const float t2 = 0.5f - p2.x * p2.x - p2.y * p2.y - p2.z * p2.z;
+  const float t22 = t2 * t2;
+  const float t42 = t22 * t22;
+  float3 g2 = osl_simplex_grad(i + i2, j + j2, k + k2, seed);
+  float n2 = t42 * (g2.x * p2.x + g2.y * p2.y + g2.z * p2.z);
+  if (t2 < 0.0f) {
+    n2 = 0.0f;
+    g2 = float3(0.0f);
+  }
+  const float t3 = 0.5f - p3.x * p3.x - p3.y * p3.y - p3.z * p3.z;
+  const float t23 = t3 * t3;
+  const float t43 = t23 * t23;
+  float3 g3 = osl_simplex_grad(i + 1, j + 1, k + 1, seed);
+  float n3 = t43 * (g3.x * p3.x + g3.y * p3.y + g3.z * p3.z);
+  if (t3 < 0.0f) {
+    n3 = 0.0f;
+    g3 = float3(0.0f);
+  }
+  const float scale = 68.0f;
+  const float temp0 = t20 * t0 * (g0.x * p0.x + g0.y * p0.y + g0.z * p0.z);
+  const float temp1 = t21 * t1 * (g1.x * p1.x + g1.y * p1.y + g1.z * p1.z);
+  const float temp2 = t22 * t2 * (g2.x * p2.x + g2.y * p2.y + g2.z * p2.z);
+  const float temp3 = t23 * t3 * (g3.x * p3.x + g3.y * p3.y + g3.z * p3.z);
+  float3 d = temp0 * p0 + temp1 * p1 + temp2 * p2 + temp3 * p3;
+  d *= -8.0f;
+  d += t40 * g0 + t41 * g1 + t42 * g2 + t43 * g3;
+  d *= scale;
+  return OslSimplex{scale * (n0 + n1 + n2 + n3), float4(d.x, d.y, d.z, 0.0f)};
+}
+
+inline OslSimplex osl_simplex(float x, float y, float z, float w, int seed)
+{
+  const float F4 = 0.309016994f;
+  const float G4 = 0.138196601f;
+  const float s = (x + y + z + w) * F4;
+  const float xs = x + s;
+  const float ys = y + s;
+  const float zs = z + s;
+  const float ws = w + s;
+  const int i = int(floor(xs));
+  const int j = int(floor(ys));
+  const int k = int(floor(zs));
+  const int l = int(floor(ws));
+  const float t = float(i + j + k + l) * G4;
+  const float4 p0 = float4(x - (float(i) - t), y - (float(j) - t), z - (float(k) - t),
+                           w - (float(l) - t));
+
+  const int c1 = (p0.x > p0.y) ? 32 : 0;
+  const int c2 = (p0.x > p0.z) ? 16 : 0;
+  const int c3 = (p0.y > p0.z) ? 8 : 0;
+  const int c4 = (p0.x > p0.w) ? 4 : 0;
+  const int c5 = (p0.y > p0.w) ? 2 : 0;
+  const int c6 = (p0.z > p0.w) ? 1 : 0;
+  const uchar4 order = osl_simplex_lut[c1 | c2 | c3 | c4 | c5 | c6];
+  const int4 o1 = int4(order >= uchar4(3));
+  const int4 o2 = int4(order >= uchar4(2));
+  const int4 o3 = int4(order >= uchar4(1));
+
+  const float4 p1 = p0 - float4(o1) + G4;
+  const float4 p2 = p0 - float4(o2) + 2.0f * G4;
+  const float4 p3 = p0 - float4(o3) + 3.0f * G4;
+  const float4 p4 = p0 - 1.0f + 4.0f * G4;
+
+  const float t0 = 0.5f - p0.x * p0.x - p0.y * p0.y - p0.z * p0.z - p0.w * p0.w;
+  const float t20 = t0 * t0;
+  const float t40 = t20 * t20;
+  float4 g0 = osl_simplex_grad(i, j, k, l, seed);
+  float n0 = t40 * (g0.x * p0.x + g0.y * p0.y + g0.z * p0.z + g0.w * p0.w);
+  if (t0 < 0.0f) {
+    n0 = 0.0f;
+    g0 = float4(0.0f);
+  }
+  const float t1 = 0.5f - p1.x * p1.x - p1.y * p1.y - p1.z * p1.z - p1.w * p1.w;
+  const float t21 = t1 * t1;
+  const float t41 = t21 * t21;
+  float4 g1 = osl_simplex_grad(i + o1.x, j + o1.y, k + o1.z, l + o1.w, seed);
+  float n1 = t41 * (g1.x * p1.x + g1.y * p1.y + g1.z * p1.z + g1.w * p1.w);
+  if (t1 < 0.0f) {
+    n1 = 0.0f;
+    g1 = float4(0.0f);
+  }
+  const float t2 = 0.5f - p2.x * p2.x - p2.y * p2.y - p2.z * p2.z - p2.w * p2.w;
+  const float t22 = t2 * t2;
+  const float t42 = t22 * t22;
+  float4 g2 = osl_simplex_grad(i + o2.x, j + o2.y, k + o2.z, l + o2.w, seed);
+  float n2 = t42 * (g2.x * p2.x + g2.y * p2.y + g2.z * p2.z + g2.w * p2.w);
+  if (t2 < 0.0f) {
+    n2 = 0.0f;
+    g2 = float4(0.0f);
+  }
+  const float t3 = 0.5f - p3.x * p3.x - p3.y * p3.y - p3.z * p3.z - p3.w * p3.w;
+  const float t23 = t3 * t3;
+  const float t43 = t23 * t23;
+  float4 g3 = osl_simplex_grad(i + o3.x, j + o3.y, k + o3.z, l + o3.w, seed);
+  float n3 = t43 * (g3.x * p3.x + g3.y * p3.y + g3.z * p3.z + g3.w * p3.w);
+  if (t3 < 0.0f) {
+    n3 = 0.0f;
+    g3 = float4(0.0f);
+  }
+  const float t4 = 0.5f - p4.x * p4.x - p4.y * p4.y - p4.z * p4.z - p4.w * p4.w;
+  const float t24 = t4 * t4;
+  const float t44 = t24 * t24;
+  float4 g4 = osl_simplex_grad(i + 1, j + 1, k + 1, l + 1, seed);
+  float n4 = t44 * (g4.x * p4.x + g4.y * p4.y + g4.z * p4.z + g4.w * p4.w);
+  if (t4 < 0.0f) {
+    n4 = 0.0f;
+    g4 = float4(0.0f);
+  }
+  const float scale = 54.0f;
+  const float temp0 = t20 * t0 * (g0.x * p0.x + g0.y * p0.y + g0.z * p0.z + g0.w * p0.w);
+  const float temp1 = t21 * t1 * (g1.x * p1.x + g1.y * p1.y + g1.z * p1.z + g1.w * p1.w);
+  const float temp2 = t22 * t2 * (g2.x * p2.x + g2.y * p2.y + g2.z * p2.z + g2.w * p2.w);
+  const float temp3 = t23 * t3 * (g3.x * p3.x + g3.y * p3.y + g3.z * p3.z + g3.w * p3.w);
+  const float temp4 = t24 * t4 * (g4.x * p4.x + g4.y * p4.y + g4.z * p4.z + g4.w * p4.w);
+  float4 d = temp0 * p0 + temp1 * p1 + temp2 * p2 + temp3 * p3 + temp4 * p4;
+  d *= -8.0f;
+  d += t40 * g0 + t41 * g1 + t42 * g2 + t43 * g3 + t44 * g4;
+  d *= scale;
+  return OslSimplex{scale * (n0 + n1 + n2 + n3 + n4), d};
+}
+
+/* With derivatives by the chain rule. */
+inline float osl_sx(float x, int seed)
+{
+  return osl_simplex(x, seed).n;
+}
+inline DualF osl_sx(DualF x, int seed)
+{
+  const OslSimplex r = osl_simplex(x.v, seed);
+  return DualF{r.n, r.d.x * x.dx, r.d.x * x.dy};
+}
+inline float osl_sx(float x, float y, int seed)
+{
+  return osl_simplex(x, y, seed).n;
+}
+inline DualF osl_sx(DualF x, DualF y, int seed)
+{
+  const OslSimplex r = osl_simplex(x.v, y.v, seed);
+  return DualF{r.n, r.d.x * x.dx + r.d.y * y.dx, r.d.x * x.dy + r.d.y * y.dy};
+}
+inline float osl_sx(float3 p, int seed)
+{
+  return osl_simplex(p.x, p.y, p.z, seed).n;
+}
+inline DualF osl_sx(DualV p, int seed)
+{
+  const OslSimplex r = osl_simplex(p.v.x, p.v.y, p.v.z, seed);
+  return DualF{r.n, dot(r.d.xyz, p.dx), dot(r.d.xyz, p.dy)};
+}
+inline float osl_sx(float3 p, float t, int seed)
+{
+  return osl_simplex(p.x, p.y, p.z, t, seed).n;
+}
+inline DualF osl_sx(DualV p, DualF t, int seed)
+{
+  const OslSimplex r = osl_simplex(p.v.x, p.v.y, p.v.z, t.v, seed);
+  return DualF{r.n, dot(r.d.xyz, p.dx) + r.d.w * t.dx, dot(r.d.xyz, p.dy) + r.d.w * t.dy};
+}
+
+#define OSL_SIMPLEX_NOISE(F, V) \
+  inline F osl_simplexnoise_f1(F x) \
+  { \
+    return osl_sx(x, 0); \
+  } \
+  inline F osl_simplexnoise_f2(F x, F y) \
+  { \
+    return osl_sx(x, y, 0); \
+  } \
+  inline F osl_simplexnoise_f3(V p) \
+  { \
+    return osl_sx(p, 0); \
+  } \
+  inline F osl_simplexnoise_f4(V p, F t) \
+  { \
+    return osl_sx(p, t, 0); \
+  } \
+  inline V osl_simplexnoise_v1(F x) \
+  { \
+    return osl_vec(osl_sx(x, 0), osl_sx(x, 1), osl_sx(x, 2)); \
+  } \
+  inline V osl_simplexnoise_v2(F x, F y) \
+  { \
+    return osl_vec(osl_sx(x, y, 0), osl_sx(x, y, 1), osl_sx(x, y, 2)); \
+  } \
+  inline V osl_simplexnoise_v3(V p) \
+  { \
+    return osl_vec(osl_sx(p, 0), osl_sx(p, 1), osl_sx(p, 2)); \
+  } \
+  inline V osl_simplexnoise_v4(V p, F t) \
+  { \
+    return osl_vec(osl_sx(p, t, 0), osl_sx(p, t, 1), osl_sx(p, t, 2)); \
+  } \
+  inline F osl_usimplexnoise_f1(F x) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_f1(x)); \
+  } \
+  inline F osl_usimplexnoise_f2(F x, F y) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_f2(x, y)); \
+  } \
+  inline F osl_usimplexnoise_f3(V p) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_f3(p)); \
+  } \
+  inline F osl_usimplexnoise_f4(V p, F t) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_f4(p, t)); \
+  } \
+  inline V osl_usimplexnoise_v1(F x) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_v1(x)); \
+  } \
+  inline V osl_usimplexnoise_v2(F x, F y) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_v2(x, y)); \
+  } \
+  inline V osl_usimplexnoise_v3(V p) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_v3(p)); \
+  } \
+  inline V osl_usimplexnoise_v4(V p, F t) \
+  { \
+    return osl_noise_unsigned(osl_simplexnoise_v4(p, t)); \
+  }
+
+OSL_SIMPLEX_NOISE(float, float3)
+OSL_SIMPLEX_NOISE(DualF, DualV)
+)MSL";
+
+/* Splines. */
+static const char *osl_camera_msl_spline = R"MSL(
+/* Bases in the order catmull-rom, bezier, bspline, hermite, linear, constant. */
+constant float osl_spline_basis[6][16] = {
+    {-0.5f, 1.5f, -1.5f, 0.5f, 1.0f, -2.5f, 2.0f, -0.5f, -0.5f, 0.0f, 0.5f, 0.0f, 0.0f, 1.0f,
+     0.0f, 0.0f},
+    {-1.0f, 3.0f, -3.0f, 1.0f, 3.0f, -6.0f, 3.0f, 0.0f, -3.0f, 3.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+     0.0f, 0.0f},
+    {-1.0f / 6.0f, 3.0f / 6.0f, -3.0f / 6.0f, 1.0f / 6.0f, 3.0f / 6.0f, -6.0f / 6.0f,
+     3.0f / 6.0f, 0.0f, -3.0f / 6.0f, 0.0f, 3.0f / 6.0f, 0.0f, 1.0f / 6.0f, 4.0f / 6.0f,
+     1.0f / 6.0f, 0.0f},
+    {2.0f, 1.0f, -2.0f, 1.0f, -3.0f, -2.0f, 3.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+     0.0f, 0.0f},
+    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+     0.0f},
+    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     0.0f}};
+constant int osl_spline_step[6] = {1, 3, 1, 2, 1, 1};
+
+inline int osl_spline_segments(int basis, int count)
+{
+  return ((count - 4) / osl_spline_step[basis]) + 1;
+}
+/* The segment that contains `x`. */
+inline int osl_spline_segment(float x, int nsegs)
+{
+  const int segnum = int(clamp(x, 0.0f, 1.0f) * float(nsegs));
+  return clamp(segnum, 0, max(nsegs - 1, 0));
+}
+/* Position inside the segment. */
+inline float osl_spline_param(float x, int nsegs, int segnum)
+{
+  return clamp(x, 0.0f, 1.0f) * float(nsegs) - float(segnum);
+}
+inline DualF osl_spline_param(DualF x, int nsegs, int segnum)
+{
+  const bool inside = (x.v >= 0.0f && x.v <= 1.0f);
+  const float scale = inside ? float(nsegs) : 0.0f;
+  return DualF{clamp(x.v, 0.0f, 1.0f) * float(nsegs) - float(segnum), x.dx * scale,
+               x.dy * scale};
+}
+
+inline float osl_spline_mul(float a, float x)
+{
+  return a * x;
+}
+inline float3 osl_spline_mul(float3 a, float x)
+{
+  return a * x;
+}
+inline DualF osl_spline_mul(DualF a, DualF x)
+{
+  return osl_mul(a, x);
+}
+inline DualV osl_spline_mul(DualV a, DualF x)
+{
+  return osl_mul(a, osl_dual3(x));
+}
+inline DualF osl_spline_scale(float c, DualF a)
+{
+  return DualF{c * a.v, c * a.dx, c * a.dy};
+}
+inline DualV osl_spline_scale(float c, DualV a)
+{
+  return DualV{c * a.v, c * a.dx, c * a.dy};
+}
+inline float osl_spline_scale(float c, float a)
+{
+  return c * a;
+}
+inline float3 osl_spline_scale(float c, float3 a)
+{
+  return c * a;
+}
+inline float osl_spline_add(float a, float b)
+{
+  return a + b;
+}
+inline float3 osl_spline_add(float3 a, float3 b)
+{
+  return a + b;
+}
+template<typename T> inline OslDual<T> osl_spline_add(OslDual<T> a, OslDual<T> b)
+{
+  return osl_add(a, b);
+}
+
+/* Evaluate one segment from its four knots. */
+template<typename T, typename X> inline T osl_spline_eval(int basis, X x, T p0, T p1, T p2, T p3)
+{
+  T tk[4];
+  for (int k = 0; k < 4; k++) {
+    tk[k] = osl_spline_add(osl_spline_add(osl_spline_scale(osl_spline_basis[basis][k * 4], p0),
+                                          osl_spline_scale(osl_spline_basis[basis][k * 4 + 1],
+                                                           p1)),
+                           osl_spline_add(osl_spline_scale(osl_spline_basis[basis][k * 4 + 2],
+                                                           p2),
+                                          osl_spline_scale(osl_spline_basis[basis][k * 4 + 3],
+                                                           p3)));
+  }
+  T result = osl_spline_add(osl_spline_mul(tk[0], x), tk[1]);
+  result = osl_spline_add(osl_spline_mul(result, x), tk[2]);
+  return osl_spline_add(osl_spline_mul(result, x), tk[3]);
+}
+
+inline float osl_spline_value(int basis, float x, thread const float *knots, int count, int len)
+{
+  const int nsegs = osl_spline_segments(basis, count);
+  const int segnum = osl_spline_segment(x, nsegs);
+  if (basis == 5) {
+    return knots[osl_idx(segnum + 1, len)];
+  }
+  const int s = segnum * osl_spline_step[basis];
+  return osl_spline_eval(basis,
+                         osl_spline_param(x, nsegs, segnum),
+                         knots[osl_idx(s, len)],
+                         knots[osl_idx(s + 1, len)],
+                         knots[osl_idx(s + 2, len)],
+                         knots[osl_idx(s + 3, len)]);
+}
+
+/* Find `x` with the spline value `y` in the range, by regula falsi and bisection. */
+inline float osl_spline_invert(int basis,
+                               float y,
+                               float xmin,
+                               float xmax,
+                               thread const float *knots,
+                               int count,
+                               int len,
+                               thread bool &bracketed)
+{
+  const int maxiters = 32;
+  const float eps = 1.0e-6f;
+  float v0 = osl_spline_value(basis, xmin, knots, count, len);
+  float v1 = osl_spline_value(basis, xmax, knots, count, len);
+  float x = xmin;
+  float v = v0;
+  const bool increasing = (v0 < v1);
+  const float vmin = increasing ? v0 : v1;
+  const float vmax = increasing ? v1 : v0;
+  bracketed = (y >= vmin && y <= vmax);
+  if (!bracketed) {
+    return ((y < vmin) == increasing) ? xmin : xmax;
+  }
+  if (abs(v0 - v1) < eps) {
+    return xmin;
+  }
+  const int rfiters = (3 * maxiters) / 4;
+  for (int iters = 0; iters < maxiters; iters++) {
+    float t;
+    if (iters < rfiters) {
+      t = (y - v0) / (v1 - v0);
+      if (t <= 0.0f || t >= 1.0f) {
+        t = 0.5f;
+      }
+    }
+    else {
+      t = 0.5f;
+    }
+    x = xmin * (1.0f - t) + xmax * t;
+    v = osl_spline_value(basis, x, knots, count, len);
+    if ((v < y) == increasing) {
+      xmin = x;
+      v0 = v;
+    }
+    else {
+      xmax = x;
+      v1 = v;
+    }
+    if (abs(xmax - xmin) < eps || abs(v - y) < eps) {
+      return x;
+    }
+  }
+  return x;
+}
+
+inline float osl_splineinverse(int basis, float y, thread const float *knots, int count, int len)
+{
+  const int step = osl_spline_step[basis];
+  const int lowindex = (step == 1) ? 1 : 0;
+  const int highindex = (step == 1) ? count - 2 : count - 1;
+  const float low = knots[osl_idx(lowindex, len)];
+  const float high = knots[osl_idx(highindex, len)];
+  const bool increasing = knots[osl_idx(1, len)] < knots[osl_idx(count - 2, len)];
+  if (increasing) {
+    if (y <= low) {
+      return 0.0f;
+    }
+    if (y >= high) {
+      return 1.0f;
+    }
+  }
+  else {
+    if (y >= low) {
+      return 0.0f;
+    }
+    if (y <= high) {
+      return 1.0f;
+    }
+  }
+  const int nsegs = osl_spline_segments(basis, count);
+  const float nseginv = 1.0f / float(nsegs);
+  /* Without a segment that contains the value, the result is the end of the last segment
+   * that is nearest to it. */
+  float r = 0.0f;
+  for (int s = 0; s < min(nsegs, 4096); s++) {
+    bool bracketed = false;
+    r = osl_spline_invert(
+        basis, y, float(s) * nseginv, float(s + 1) * nseginv, knots, count, len, bracketed);
+    if (bracketed) {
+      break;
+    }
+  }
+  return r;
+}
+)MSL";
+
+/* Color space conversions with derivatives. */
+static const char *osl_camera_msl_color_derivs = R"MSL(
+inline DualF osl_dual_if(bool c, DualF a, DualF b)
+{
+  if (c) {
+    return a;
+  }
+  return b;
+}
+inline DualV osl_hsv_to_rgb(DualV hsv)
+{
+  const DualF h = osl_comp(hsv, 0), s = osl_comp(hsv, 1), v = osl_comp(hsv, 2);
+  if (s.v < 0.0001f) {
+    return osl_vec(v, v, v);
+  }
+  const DualF hh = 6.0f * (h - floor(h.v));
+  const int hi = int(hh.v);
+  const DualF f = hh - float(hi);
+  const DualF p = v * (1.0f - s);
+  const DualF q = v * (1.0f - s * f);
+  const DualF t = v * (1.0f - s * (1.0f - f));
+  switch (hi) {
+    case 0:
+      return osl_vec(v, t, p);
+    case 1:
+      return osl_vec(q, v, p);
+    case 2:
+      return osl_vec(p, v, t);
+    case 3:
+      return osl_vec(p, q, v);
+    case 4:
+      return osl_vec(t, p, v);
+    default:
+      return osl_vec(v, p, q);
+  }
+}
+inline DualV osl_rgb_to_hsv(DualV rgb)
+{
+  const DualF r = osl_comp(rgb, 0), g = osl_comp(rgb, 1), b = osl_comp(rgb, 2);
+  const DualF mincomp = osl_min(r, osl_min(g, b));
+  const DualF maxcomp = osl_max(r, osl_max(g, b));
+  const DualF delta = maxcomp - mincomp;
+  DualF h = osl_dual(0.0f), s = osl_dual(0.0f);
+  if (maxcomp.v > 0.0f) {
+    s = osl_div(delta, maxcomp);
+  }
+  if (s.v > 0.0f) {
+    if (r.v >= maxcomp.v) {
+      h = osl_div(g - b, delta);
+    }
+    else if (g.v >= maxcomp.v) {
+      h = osl_div(b - r, delta) + 2.0f;
+    }
+    else {
+      h = osl_div(r - g, delta) + 4.0f;
+    }
+    h = h * (1.0f / 6.0f);
+    if (h.v < 0.0f) {
+      h = h + 1.0f;
+    }
+  }
+  return osl_vec(h, s, maxcomp);
+}
+inline DualV osl_hsl_to_rgb(DualV hsl)
+{
+  const DualF h = osl_comp(hsl, 0), s = osl_comp(hsl, 1), l = osl_comp(hsl, 2);
+  const DualF v = osl_dual_if(l.v <= 0.5f, l * (s + 1.0f), l * (1.0f - s) + s);
+  if (v.v <= 0.0f) {
+    return osl_dual(float3(0.0f));
+  }
+  const DualF m = 2.0f * l - v;
+  return osl_hsv_to_rgb(osl_vec(h, osl_div(v - m, v), v));
+}
+inline DualV osl_rgb_to_hsl(DualV rgb)
+{
+  const DualF mincomp = osl_min(osl_comp(rgb, 0), osl_min(osl_comp(rgb, 1), osl_comp(rgb, 2)));
+  const DualV hsv = osl_rgb_to_hsv(rgb);
+  const DualF h = osl_comp(hsv, 0), v = osl_comp(hsv, 2);
+  const DualF l = 0.5f * (mincomp + v);
+  if (l.v <= 0.0f) {
+    return osl_dual(float3(0.0f));
+  }
+  DualF s;
+  if (l.v <= 0.5f) {
+    s = osl_div(v - mincomp, v + mincomp);
+  }
+  else {
+    s = osl_div(v - mincomp, 2.0f - (v + mincomp));
+  }
+  return osl_vec(h, s, l);
+}
+inline DualV osl_color_matrix(DualV c, float3 r, float3 g, float3 b)
+{
+  return DualV{osl_color_matrix(c.v, r, g, b), osl_color_matrix(c.dx, r, g, b),
+               osl_color_matrix(c.dy, r, g, b)};
+}
+inline DualV osl_yiq_to_rgb(DualV c)
+{
+  return DualV{osl_yiq_to_rgb(c.v), osl_yiq_to_rgb(c.dx), osl_yiq_to_rgb(c.dy)};
+}
+inline DualV osl_rgb_to_yiq(DualV c)
+{
+  return DualV{osl_rgb_to_yiq(c.v), osl_rgb_to_yiq(c.dx), osl_rgb_to_yiq(c.dy)};
+}
+inline DualV osl_xyy_to_xyz(DualV c)
+{
+  const DualF x = osl_comp(c, 0), y = osl_comp(c, 1), Y = osl_comp(c, 2);
+  const DualF n = osl_div(Y, osl_dual_if(y.v == 0.0f, osl_dual(1.0e-37f), y));
+  return osl_vec(x * n, Y, (1.0f - x - y) * n);
+}
+inline DualV osl_xyz_to_xyy(DualV c)
+{
+  const DualF X = osl_comp(c, 0), Y = osl_comp(c, 1), Z = osl_comp(c, 2);
+  const DualF n = X + Y + Z;
+  const DualF n_inv = osl_dual_if(n.v == 0.0f, osl_dual(0.0f), osl_div(osl_dual(1.0f), n));
+  return osl_vec(X * n_inv, Y * n_inv, Y);
+}
+inline DualF osl_srgb_to_linear(DualF x)
+{
+  if (x.v <= 0.04045f) {
+    return x * (1.0f / 12.92f);
+  }
+  return osl_pow((x + 0.055f) * (1.0f / 1.055f), osl_dual(2.4f));
+}
+inline DualF osl_linear_to_srgb(DualF x)
+{
+  if (x.v <= 0.0031308f) {
+    return 12.92f * x;
+  }
+  return 1.055f * osl_pow(x, osl_dual(1.0f / 2.4f)) - 0.055f;
+}
+inline DualV osl_srgb_to_linear(DualV c)
+{
+  return osl_vec(osl_srgb_to_linear(osl_comp(c, 0)), osl_srgb_to_linear(osl_comp(c, 1)),
+                 osl_srgb_to_linear(osl_comp(c, 2)));
+}
+inline DualV osl_linear_to_srgb(DualV c)
+{
+  return osl_vec(osl_linear_to_srgb(osl_comp(c, 0)), osl_linear_to_srgb(osl_comp(c, 1)),
+                 osl_linear_to_srgb(osl_comp(c, 2)));
+}
+)MSL";
+
+/* Gabor noise, with the algorithm and constants of Open Shading Language (BSD-3-Clause):
+ * sparse convolution of Gabor kernels at random impulses, filtered with the derivatives of the
+ * position. The random numbers, the approximations of exp2() and sincos() and the fallbacks for
+ * singular matrices are the ones of the OSL runtime, so that the noise has the same values. */
+static const char *osl_camera_msl_gabor = R"MSL(
+struct OslGaborParams {
+  int anisotropic;
+  float3 direction;
+  float bandwidth;
+  float impulses;
+  int do_filter;
+};
+inline OslGaborParams osl_gabor_params(
+    int anisotropic, float3 direction, float bandwidth, float impulses, int do_filter)
+{
+  return OslGaborParams{anisotropic, direction, bandwidth, impulses, do_filter};
+}
+
+struct OslGabor {
+  float3 omega;
+  int anisotropic;
+  bool do_filter;
+  float a;
+  float weight;
+  float3 N;
+  /* 2x2 matrices are stored as (m00, m01, m10, m11). */
+  float4 filter;
+  /* The tangent, bitangent and normal that make up the tangent space. */
+  float3 t;
+  float3 b;
+  float3 n;
+  bool periodic;
+  float3 period;
+  float lambda;
+  float sqrt_lambda_inv;
+  float radius;
+  float radius2;
+  float radius3;
+  float radius_inv;
+};
+
+inline float osl_fast_exp2(float xval)
+{
+  float x = clamp(xval, -126.0f, 126.0f);
+  const int m = int(x);
+  x -= float(m);
+  x = 1.0f - (1.0f - x);
+  float r = 1.33336498402e-3f;
+  r = fma(x, r, 9.810352697968e-3f);
+  r = fma(x, r, 5.551834031939e-2f);
+  r = fma(x, r, 0.2401793301105f);
+  r = fma(x, r, 0.693144857883f);
+  r = fma(x, r, 1.0f);
+  return as_type<float>(as_type<uint>(r) + (uint(m) << 23));
+}
+/* Returns the cosine and the sine. */
+inline float2 osl_fast_cossin(float x)
+{
+  const int q = int(x * 0.318309886f + ((x < 0.0f) ? -0.5f : 0.5f));
+  const float qf = float(q);
+  x = fma(qf, -0.78515625f * 4.0f, x);
+  x = fma(qf, -0.00024187564849853515625f * 4.0f, x);
+  x = fma(qf, -3.7747668102383613586e-08f * 4.0f, x);
+  x = fma(qf, -1.2816720341285448015e-12f * 4.0f, x);
+  x = 1.5707963267948966f - (1.5707963267948966f - x);
+  const float s = x * x;
+  if ((q & 1) != 0) {
+    x = -x;
+  }
+  float su = 2.6083159809786593541503e-06f;
+  su = fma(su, s, -0.0001981069071916863322258f);
+  su = fma(su, s, 0.00833307858556509017944336f);
+  su = fma(su, s, -0.166666597127914428710938f);
+  su = fma(s, su * x, x);
+  float cu = -2.71811842367242206819355e-07f;
+  cu = fma(cu, s, 2.47990446951007470488548e-05f);
+  cu = fma(cu, s, -0.00138888787478208541870117f);
+  cu = fma(cu, s, 0.0416666641831398010253906f);
+  cu = fma(cu, s, -0.5f);
+  cu = fma(cu, s, 1.0f);
+  if ((q & 1) != 0) {
+    cu = -cu;
+  }
+  return float2(clamp(cu, -1.0f, 1.0f), clamp(su, -1.0f, 1.0f));
+}
+
+/* Random numbers in [0, 1), with a linear congruential generator. */
+inline float osl_gabor_rng(thread uint &seed)
+{
+  seed *= 3039177861u;
+  return float(seed) * 2.3283064365386963e-10f;
+}
+
+inline float osl_m22_det(float4 m)
+{
+  return m.x * m.w - m.z * m.y;
+}
+/* A matrix that cannot be inverted has the identity as its inverse. */
+inline float4 osl_m22_inverse(float4 m)
+{
+  const float4 s = float4(m.w, -m.y, -m.z, m.x);
+  const float r = osl_m22_det(m);
+  if (abs(r) >= 1.0f) {
+    return s / r;
+  }
+  const float mr = abs(r) * 8.507059173e37f;
+  if (all(float4(mr) > abs(s))) {
+    return s / r;
+  }
+  return float4(1.0f, 0.0f, 0.0f, 1.0f);
+}
+
+inline DualF osl_gabor_dot(float3 a, DualV x)
+{
+  return DualF{dot(a, x.v), dot(a, x.dx), dot(a, x.dy)};
+}
+
+/* A harmonic in a Gaussian envelope. */
+inline DualF osl_gabor_kernel(DualF weight, float3 omega, DualF phi, float bandwidth, DualV x)
+{
+  const DualF g = osl_exp((-3.14159265358979f * (bandwidth * bandwidth)) * osl_dot(x, x));
+  const DualF h = osl_cos(6.28318530717959f * osl_gabor_dot(omega, x) + phi);
+  return weight * g * h;
+}
+inline DualF osl_gabor_kernel(
+    DualF weight, float2 omega, DualF phi, float bandwidth, DualF x, DualF y)
+{
+  const DualF g = osl_exp((-3.14159265358979f * (bandwidth * bandwidth)) * (x * x + y * y));
+  const DualF h = osl_cos(6.28318530717959f * (omega.x * x + omega.y * y) + phi);
+  return weight * g * h;
+}
+
+inline DualF osl_gabor_filtered_kernel(thread const OslGabor &gp, float3 omega, float phi, DualV x)
+{
+  const float two_pi = 6.28318530717959f;
+  /* The orientation of the impulse in tangent space. */
+  const float3 omega_t = float3(dot(omega, gp.t), dot(omega, gp.b), dot(omega, gp.n));
+  /* Slice the kernel with the tangent plane. */
+  const DualF d = -osl_gabor_dot(gp.N, x);
+  const DualF w_s = gp.weight * osl_exp((-3.14159265358979f * (gp.a * gp.a)) * (d * d));
+  const float2 mu_g = omega_t.xy;
+  const DualF phi_s = phi - (two_pi * omega_t.z) * d;
+
+  /* Filter the sliced kernel: the product of two Gaussians in the frequency domain. */
+  const float sigma_g = gp.a * gp.a / two_pi;
+  const float c_f = 1.0f / (two_pi * sqrt(osl_m22_det(gp.filter)));
+  const float4 sigma_f = 0.0253302959105844f * osl_m22_inverse(gp.filter);
+  const float4 sigma_sum = float4(sigma_g, 0.0f, 0.0f, sigma_g) + sigma_f;
+  const float4 sum_inv = osl_m22_inverse(sigma_sum);
+  const float quadratic = mu_g.y * (mu_g.x * sum_inv.y + mu_g.y * sum_inv.w) +
+                          (mu_g.x * sum_inv.x + mu_g.y * sum_inv.z) * mu_g.x;
+  const DualF w_f = (c_f * (1.0f / (two_pi * sqrt(osl_m22_det(sigma_sum)))) *
+                     exp(-0.5f * quadratic)) *
+                    w_s;
+  const float4 sigma_g_inv = osl_m22_inverse(float4(sigma_g, 0.0f, 0.0f, sigma_g));
+  const float4 sigma_gf = osl_m22_inverse(osl_m22_inverse(sigma_f) + sigma_g_inv);
+  /* The product with the inverse, which is a multiple of the identity. */
+  const float4 product = sigma_gf * sigma_g_inv.x;
+  const float2 mu_gf = float2(mu_g.x * product.x + mu_g.y * product.z,
+                              mu_g.x * product.y + mu_g.y * product.w);
+  const float a_f = sqrt(two_pi * sqrt(osl_m22_det(sigma_gf)));
+
+  /* Evaluate the filtered kernel in the tangent plane. */
+  const DualF gk = osl_gabor_kernel(
+      w_f, mu_gf, phi_s, a_f, osl_gabor_dot(gp.t, x), osl_gabor_dot(gp.b, x));
+  if (osl_isfinite(gk.v) == 0) {
+    /* The filter failed numerically. */
+    return osl_gabor_kernel(osl_dual(gp.weight), omega, osl_dual(phi), gp.a, x);
+  }
+  return gk;
+}
+
+/* The sum of all impulses in one cell. `x_c` is the position relative to the cell. */
+inline DualF osl_gabor_cell(thread const OslGabor &gp, float3 cell, DualV x_c, int seed_offset)
+{
+  if (gp.periodic) {
+    cell = osl_wrap(cell, gp.period);
+  }
+  uint seed = osl_inthash(uint(int(floor(cell.x))),
+                          uint(int(floor(cell.y))),
+                          uint(int(floor(cell.z))),
+                          uint(seed_offset));
+  if (seed == 0u) {
+    seed = 1u;
+  }
+  /* The number of impulses has a Poisson distribution. */
+  const float g = exp(-(gp.lambda * gp.radius3));
+  int num_impulses = 0;
+  float t = osl_gabor_rng(seed);
+  while (t > g && num_impulses < 1024) {
+    num_impulses++;
+    t *= osl_gabor_rng(seed);
+  }
+
+  DualF sum = osl_dual(0.0f);
+  for (int i = 0; i < num_impulses; i++) {
+    const float z_rng = osl_gabor_rng(seed);
+    const float y_rng = osl_gabor_rng(seed);
+    const float x_rng = osl_gabor_rng(seed);
+    const float3 x_i = float3(x_rng, y_rng, z_rng);
+    const DualV x_k = DualV{gp.radius * (x_c.v - x_i), gp.radius * x_c.dx, gp.radius * x_c.dy};
+
+    /* Orientation and phase of the impulse. */
+    float3 omega;
+    if (gp.anisotropic == 1) {
+      omega = gp.omega;
+    }
+    else if (gp.anisotropic == 0) {
+      const float2 cs = osl_fast_cossin(6.28318530717959f * osl_gabor_rng(seed));
+      const float u = osl_gabor_rng(seed);
+      const float cos_p = u - (1.0f - u);
+      const float sin_p = sqrt(max(0.0f, 1.0f - cos_p * cos_p));
+      omega = osl_normalize(float3(cs.x * sin_p, cs.y * sin_p, cos_p));
+    }
+    else {
+      const float2 cs = osl_fast_cossin(6.28318530717959f * osl_gabor_rng(seed));
+      omega = osl_length(gp.omega) * float3(cs.x, cs.y, 0.0f);
+    }
+    const float phi = 6.28318530717959f * osl_gabor_rng(seed);
+
+    if (dot(x_k.v, x_k.v) < gp.radius2) {
+      if (gp.do_filter) {
+        sum = sum + osl_gabor_filtered_kernel(gp, omega, phi, x_k);
+      }
+      else {
+        sum = sum + osl_gabor_kernel(osl_dual(gp.weight), omega, osl_dual(phi), gp.a, x_k);
+      }
+    }
+  }
+  return sum;
+}
+
+inline DualF osl_gabor_evaluate(thread const OslGabor &gp, DualV p, int seed)
+{
+  const DualV x_g = DualV{p.v * gp.radius_inv, p.dx * gp.radius_inv, p.dy * gp.radius_inv};
+  const float3 cell = floor(x_g.v);
+  DualF sum = osl_dual(0.0f);
+  for (int k = -1; k <= 1; k++) {
+    for (int j = -1; j <= 1; j++) {
+      for (int i = -1; i <= 1; i++) {
+        const float3 c = float3(float(i), float(j), float(k));
+        sum = sum + osl_gabor_cell(gp, cell + c, DualV{x_g.v - cell - c, x_g.dx, x_g.dy}, seed);
+      }
+    }
+  }
+  return sum * gp.sqrt_lambda_inv;
+}
+
+inline OslGabor osl_gabor_setup(OslGaborParams opt, DualV p, bool periodic, float3 period)
+{
+  OslGabor gp;
+  gp.omega = opt.direction;
+  gp.anisotropic = opt.anisotropic;
+  gp.do_filter = (opt.do_filter != 0);
+  gp.weight = 1.0f;
+  gp.periodic = periodic;
+  gp.period = period;
+  gp.N = float3(0.0f);
+  gp.filter = float4(1.0f, 0.0f, 0.0f, 1.0f);
+  gp.t = float3(1.0f, 0.0f, 0.0f);
+  gp.b = float3(0.0f, 1.0f, 0.0f);
+  gp.n = float3(0.0f, 0.0f, 1.0f);
+
+  const float bandwidth = clamp(opt.bandwidth, 0.01f, 100.0f);
+  const float two_to_bandwidth = osl_fast_exp2(bandwidth);
+  gp.a = 2.0f * ((two_to_bandwidth - 1.0f) / (two_to_bandwidth + 1.0f)) * 2.12893403886245f;
+  /* Impulses further away than this have a negligible envelope. */
+  gp.radius = 1.11590123f / gp.a;
+  gp.radius2 = gp.radius * gp.radius;
+  gp.radius3 = gp.radius2 * gp.radius;
+  gp.radius_inv = 1.0f / gp.radius;
+  gp.lambda = clamp(opt.impulses, 1.0f, 32.0f) / (gp.radius3 * 4.18877649f);
+  gp.sqrt_lambda_inv = 1.0f / sqrt(gp.lambda);
+
+  if (gp.do_filter) {
+    /* The filter in the tangent space of the surface that the position moves on. */
+    float3 n = cross(p.dx, p.dy);
+    if (dot(n, n) < 1.0e-6f) {
+      gp.do_filter = false;
+    }
+    else {
+      n = osl_normalize(n);
+      float3 t = (abs(n.x) < 0.9f) ? float3(0.0f, n.z, -n.y) : float3(-n.z, 0.0f, n.x);
+      t = osl_normalize(t);
+      const float3 b = cross(n, t);
+      const float m00 = p.dx.x * t.x + p.dy.x * t.y;
+      const float m01 = p.dx.x * b.x + p.dy.x * b.y;
+      const float m10 = p.dx.y * t.x + p.dy.y * t.y;
+      const float m11 = p.dx.y * b.x + p.dy.y * b.y;
+      const float off = 0.25f * (m00 * m01 + m10 * m11);
+      gp.filter = float4(0.25f * (m00 * m00 + m10 * m10), off, off,
+                         0.25f * (m01 * m01 + m11 * m11));
+      gp.N = n;
+      gp.t = t;
+      gp.b = b;
+      gp.n = n;
+      if (osl_m22_det(gp.filter) < 1.0e-18f) {
+        gp.do_filter = false;
+      }
+    }
+  }
+  return gp;
+}
+
+/* Scale to make the noise fit in [-1, 1]. */
+inline float osl_gabor_scale(float a)
+{
+  const float variance = 1.0f / (5.65685415f * (a * a * a));
+  return 0.5f * (1.0f / (3.0f * sqrt(variance)));
+}
+
+inline DualF osl_gabor_noise(DualV p, OslGaborParams opt, bool periodic, float3 period)
+{
+  const OslGabor gp = osl_gabor_setup(opt, p, periodic, period);
+  return osl_gabor_evaluate(gp, p, 0) * osl_gabor_scale(gp.a);
+}
+inline DualV osl_gabor_noise3(DualV p, OslGaborParams opt, bool periodic, float3 period)
+{
+  const OslGabor gp = osl_gabor_setup(opt, p, periodic, period);
+  const float scale = osl_gabor_scale(gp.a);
+  return osl_vec(osl_gabor_evaluate(gp, p, 0) * scale,
+                 osl_gabor_evaluate(gp, p, 1) * scale,
+                 osl_gabor_evaluate(gp, p, 2) * scale);
+}
+
+inline DualV osl_gabor_p(DualF x)
+{
+  return osl_vec(x, osl_dual(0.0f), osl_dual(0.0f));
+}
+inline DualV osl_gabor_p(DualF x, DualF y)
+{
+  return osl_vec(x, y, osl_dual(0.0f));
+}
+
+/* Noise of 1 to 4 dimensions. The fourth dimension is not used. */
+inline DualF osl_gabor_f1(DualF x, OslGaborParams opt)
+{
+  return osl_gabor_noise(osl_gabor_p(x), opt, false, float3(0.0f));
+}
+inline DualF osl_gabor_f2(DualF x, DualF y, OslGaborParams opt)
+{
+  return osl_gabor_noise(osl_gabor_p(x, y), opt, false, float3(0.0f));
+}
+inline DualF osl_gabor_f3(DualV p, OslGaborParams opt)
+{
+  return osl_gabor_noise(p, opt, false, float3(0.0f));
+}
+inline DualF osl_gabor_f4(DualV p, DualF t, OslGaborParams opt)
+{
+  return osl_gabor_noise(p, opt, false, float3(0.0f));
+}
+inline DualV osl_gabor_v1(DualF x, OslGaborParams opt)
+{
+  return osl_gabor_noise3(osl_gabor_p(x), opt, false, float3(0.0f));
+}
+inline DualV osl_gabor_v2(DualF x, DualF y, OslGaborParams opt)
+{
+  return osl_gabor_noise3(osl_gabor_p(x, y), opt, false, float3(0.0f));
+}
+inline DualV osl_gabor_v3(DualV p, OslGaborParams opt)
+{
+  return osl_gabor_noise3(p, opt, false, float3(0.0f));
+}
+inline DualV osl_gabor_v4(DualV p, DualF t, OslGaborParams opt)
+{
+  return osl_gabor_noise3(p, opt, false, float3(0.0f));
+}
+inline DualF osl_pgabor_f1(DualF x, float px, OslGaborParams opt)
+{
+  return osl_gabor_noise(osl_gabor_p(x), opt, true, float3(px, 0.0f, 0.0f));
+}
+inline DualF osl_pgabor_f2(DualF x, DualF y, float px, float py, OslGaborParams opt)
+{
+  return osl_gabor_noise(osl_gabor_p(x, y), opt, true, float3(px, py, 0.0f));
+}
+inline DualF osl_pgabor_f3(DualV p, float3 pp, OslGaborParams opt)
+{
+  return osl_gabor_noise(p, opt, true, pp);
+}
+inline DualF osl_pgabor_f4(DualV p, DualF t, float3 pp, float pt, OslGaborParams opt)
+{
+  return osl_gabor_noise(p, opt, true, pp);
+}
+inline DualV osl_pgabor_v1(DualF x, float px, OslGaborParams opt)
+{
+  return osl_gabor_noise3(osl_gabor_p(x), opt, true, float3(px, 0.0f, 0.0f));
+}
+inline DualV osl_pgabor_v2(DualF x, DualF y, float px, float py, OslGaborParams opt)
+{
+  return osl_gabor_noise3(osl_gabor_p(x, y), opt, true, float3(px, py, 0.0f));
+}
+inline DualV osl_pgabor_v3(DualV p, float3 pp, OslGaborParams opt)
+{
+  return osl_gabor_noise3(p, opt, true, pp);
+}
+inline DualV osl_pgabor_v4(DualV p, DualF t, float3 pp, float pt, OslGaborParams opt)
+{
+  return osl_gabor_noise3(p, opt, true, pp);
+}
 )MSL";
 
 CCL_NAMESPACE_END

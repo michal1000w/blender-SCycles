@@ -33,7 +33,31 @@ enum MetalOSLCameraInput {
   METAL_OSL_CAMERA_INPUT_DSDY = 6,
   METAL_OSL_CAMERA_INPUT_RAND_LENS = 9,
   METAL_OSL_CAMERA_INPUT_APERTURE_POSITION = 11,
-  METAL_OSL_CAMERA_INPUT_NUM = 13,
+  /* Number of image lookup results that follow, each five floats: four values and a status. */
+  METAL_OSL_CAMERA_INPUT_NUM_RESULTS = 13,
+  METAL_OSL_CAMERA_INPUT_RESULTS = 14,
+};
+
+/* The function cannot look up images itself. It returns a request instead of a ray, in the
+ * output array after the ray, and the kernel calls it again with the result appended to the
+ * input, see `camera_custom_image_request()`. A ray can use this many lookups. */
+#  define METAL_OSL_CAMERA_MAX_IMAGE_LOOKUPS 32
+
+/* An image lookup request, as offsets after the ray in the output array. */
+enum MetalOSLCameraRequest {
+  /* 0 for no request, 1 texture(), 2 texture3d(), 3 environment(), 4 gettextureinfo(), 5
+   * gettextureinfo() with coordinates. */
+  METAL_OSL_CAMERA_REQUEST_TYPE = 0,
+  /* Kernel image ID, as the bits of an integer. */
+  METAL_OSL_CAMERA_REQUEST_IMAGE = 1,
+  /* s, t, ds/dx, dt/dx, ds/dy, dt/dy, or a position or direction. */
+  METAL_OSL_CAMERA_REQUEST_COORDS = 2,
+  /* Whether a color for missing images follows, and the color. */
+  METAL_OSL_CAMERA_REQUEST_HAS_MISSING = 8,
+  METAL_OSL_CAMERA_REQUEST_MISSING = 9,
+  /* For gettextureinfo(): 1 resolution, 2 channels, 3 exists, 4 averagecolor. */
+  METAL_OSL_CAMERA_REQUEST_INFO = 13,
+  METAL_OSL_CAMERA_REQUEST_NUM = 14,
 };
 
 /* Layout is {P, dPdx, dPdy, D, dDdx, dDdy, T}, as for the other devices. */
@@ -58,6 +82,13 @@ struct MetalOSLCameraProgram {
   vector<Param> params;
   int num_param_words = 0;
 
+  /* An image that the shader looks up. Its kernel image ID is a parameter word. */
+  struct Image {
+    string filename;
+    int offset;
+  };
+  vector<Image> images;
+
   /* Identifies everything the translation depends on besides the bytecode: the set of
    * parameters with a value, and the values of the string parameters. */
   string key;
@@ -77,9 +108,11 @@ bool metal_osl_camera_translate(const string &bytecode,
                                 MetalOSLCameraProgram &program,
                                 string &error);
 
-/* Values of the parameters, for the `camera_script_params` kernel array. */
+/* Values of the parameters, for the `camera_script_params` kernel array. `image_ids` are the
+ * kernel image IDs of MetalOSLCameraProgram::images. */
 void metal_osl_camera_pack_params(const MetalOSLCameraProgram &program,
                                   const OSLCameraParams &params,
+                                  const vector<int> &image_ids,
                                   vector<uint> &words);
 
 CCL_NAMESPACE_END
