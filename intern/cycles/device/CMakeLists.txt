@@ -112,6 +112,8 @@ set(SRC_METAL
   metal/graphics_interop.h
   metal/kernel.mm
   metal/kernel.h
+  metal/metalfx.mm
+  metal/metalfx.h
   metal/osl_camera.cpp
   metal/osl_camera.h
   metal/osl_camera_prelude.h
@@ -201,6 +203,8 @@ if(WITH_CYCLES_DEVICE_METAL)
   set_source_files_properties(metal/diffraction/backend.mm metal/diffraction/albedo.mm PROPERTIES
     COMPILE_OPTIONS "-fobjc-arc")
   list(APPEND LIB PRIVATE "-framework MetalPerformanceShaders")
+  set_source_files_properties(metal/metalfx.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  list(APPEND LIB PRIVATE "-framework MetalFX")
   list(APPEND LIB
     PRIVATE ${METAL_LIBRARY}
   )

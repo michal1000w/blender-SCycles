@@ -307,7 +307,11 @@ KERNEL_STRUCT_MEMBER(integrator, float4, guiding_bounds_max)
  * 256 certifies displacement directions parallel to the base-face normals.
  * See PixelDisplacementEvaluatorFlags; capability bits are independent of evaluator kinds. */
 KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_evaluator_set)
+/* Keeps the jitter on a multiple of 8 bytes, where the Metal shading language puts a float2. */
+KERNEL_STRUCT_MEMBER(integrator, int, pad1)
 
+/* Sub-pixel offset of the camera rays, changes with every frame of real-time denoisers. */
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float2, pixel_jitter)
 KERNEL_STRUCT_END(KernelIntegrator)
 

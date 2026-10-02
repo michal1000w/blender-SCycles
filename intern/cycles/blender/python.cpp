@@ -509,26 +509,20 @@ static PyObject *available_devices_func(PyObject * /*self*/, PyObject *args)
   for (size_t i = 0; i < devices.size(); i++) {
     const DeviceInfo &device = devices[i];
     const string type_name = Device::string_from_type(device.type);
-    PyObject *device_info = PyStructSequence_New(&DeviceInfoType);
-    int j = 0;
-
-    /* Same order as #device_info_fields. */
-    PyStructSequence_SET_ITEM(device_info, j++, pyunicode_from_string(device.description.c_str()));
-    PyStructSequence_SET_ITEM(device_info, j++, pyunicode_from_string(type_name.c_str()));
-    PyStructSequence_SET_ITEM(device_info, j++, pyunicode_from_string(device.id.c_str()));
-    PyStructSequence_SET_ITEM(device_info, j++, PyBool_FromLong(device.has_peer_memory));
-    PyStructSequence_SET_ITEM(device_info, j++, PyBool_FromLong(device.use_hardware_raytracing));
-    PyStructSequence_SET_ITEM(
-        device_info, j++, PyBool_FromLong(device.denoisers & DENOISER_OPENIMAGEDENOISE));
-    PyStructSequence_SET_ITEM(
-        device_info, j++, PyBool_FromLong(device.denoisers & DENOISER_OPTIX));
-    PyStructSequence_SET_ITEM(
-        device_info, j++, PyBool_FromLong(device.has_execution_optimization));
-    PyStructSequence_SET_ITEM(device_info, j++, PyBool_FromLong(device.meets_driver_requirement));
-    PyStructSequence_SET_ITEM(device_info, j++, PyBool_FromLong(device.denoisers & DENOISER_DLSS));
-    assert(j == device_info_desc.n_in_sequence);
-
-    PyTuple_SET_ITEM(ret, i, device_info);
+    PyObject *device_tuple = PyTuple_New(11);
+    PyTuple_SET_ITEM(device_tuple, 0, pyunicode_from_string(device.description.c_str()));
+    PyTuple_SET_ITEM(device_tuple, 1, pyunicode_from_string(type_name.c_str()));
+    PyTuple_SET_ITEM(device_tuple, 2, pyunicode_from_string(device.id.c_str()));
+    PyTuple_SET_ITEM(device_tuple, 3, PyBool_FromLong(device.has_peer_memory));
+    PyTuple_SET_ITEM(device_tuple, 4, PyBool_FromLong(device.use_hardware_raytracing));
+    PyTuple_SET_ITEM(
+        device_tuple, 5, PyBool_FromLong(device.denoisers & DENOISER_OPENIMAGEDENOISE));
+    PyTuple_SET_ITEM(device_tuple, 6, PyBool_FromLong(device.denoisers & DENOISER_OPTIX));
+    PyTuple_SET_ITEM(device_tuple, 7, PyBool_FromLong(device.has_execution_optimization));
+    PyTuple_SET_ITEM(device_tuple, 8, PyBool_FromLong(device.meets_driver_requirement));
+    PyTuple_SET_ITEM(device_tuple, 9, PyBool_FromLong(device.denoisers & DENOISER_DLSS));
+    PyTuple_SET_ITEM(device_tuple, 10, PyBool_FromLong(device.denoisers & DENOISER_METALFX));
+    PyTuple_SET_ITEM(ret, i, device_tuple);
   }
 
   return ret;
@@ -1044,6 +1038,12 @@ void *blender::CCL_python_module_init()
   PyModule_AddObjectRef(mod, "with_dlss", Py_True);
 #else
   PyModule_AddObjectRef(mod, "with_dlss", Py_False);
+#endif
+
+#ifdef WITH_METAL
+  PyModule_AddObjectRef(mod, "with_metalfx", Py_True);
+#else
+  PyModule_AddObjectRef(mod, "with_metalfx", Py_False);
 #endif
 
 #ifdef WITH_CYCLES_DEBUG

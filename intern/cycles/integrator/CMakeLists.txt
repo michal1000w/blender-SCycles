@@ -14,6 +14,7 @@ set(SRC
   denoiser.cpp
   denoiser_dlss.cpp
   denoiser_gpu.cpp
+  denoiser_metalfx.cpp
   denoiser_oidn.cpp
   denoiser_oidn_base.cpp
   denoiser_oidn_gpu.cpp
@@ -39,6 +40,7 @@ set(SRC_HEADERS
   denoiser.h
   denoiser_dlss.h
   denoiser_gpu.h
+  denoiser_metalfx.h
   denoiser_oidn.h
   denoiser_oidn_base.h
   denoiser_oidn_gpu.h
