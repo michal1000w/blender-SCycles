@@ -681,7 +681,8 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   const bool preview_scrambling_distance = get_boolean(cscene, "preview_scrambling_distance");
   if ((preview && !preview_scrambling_distance) ||
       sampling_pattern != SAMPLING_PATTERN_TABULATED_SOBOL ||
-      (denoise_params.use && denoise_params.type == DENOISER_DLSS))
+      (denoise_params.use && (denoise_params.type == DENOISER_DLSS ||
+                              denoise_params.type == DENOISER_METALFX)))
   {
     scrambling_distance = 1.0f;
   }
@@ -1302,6 +1303,19 @@ DenoiseParams BlenderSync::get_denoise_params(blender::Scene &b_scene,
         denoising.use = false;
       }
     }
+
+    if (denoising.type == DENOISER_METALFX) {
+      if (Denoiser::is_device_supported(denoising.type, denoise_device_info)) {
+        /* The samples of the render are denoised as a sequence of frames of a still scene,
+         * so there is no motion. */
+        denoising.use_gpu = true;
+        denoising.passes = DENOISER_PASS_ALBEDO | DENOISER_PASS_NORMAL |
+                           DENOISER_PASS_ROUGHNESS | DENOISER_PASS_DEPTH;
+        return denoising;
+      }
+      /* Not available on the device that renders, as when rendering on the CPU. */
+      denoising.type = DENOISER_OPENIMAGEDENOISE;
+    }
   }
   else {
     /* Viewport Denoising */
@@ -1326,7 +1340,17 @@ DenoiseParams BlenderSync::get_denoise_params(blender::Scene &b_scene,
       }
     }
 
-    if (denoising.type == DENOISER_DLSS) {
+    if (denoising.type == DENOISER_METALFX &&
+        !Denoiser::is_device_supported(denoising.type, denoise_device_info))
+    {
+      /* Not available on the device that renders, as when rendering on the CPU. */
+      denoising.type = Denoiser::automatic_viewport_denoiser_type(denoise_device_info);
+      if (denoising.type == DENOISER_NONE) {
+        denoising.use = false;
+      }
+    }
+
+    if (denoising.type == DENOISER_DLSS || denoising.type == DENOISER_METALFX) {
       /* Disable denoising when DLSS is not supported. */
       if (!Denoiser::is_device_supported(denoising.type, denoise_device_info)) {
         denoising.use = false;
@@ -1360,6 +1384,14 @@ DenoiseParams BlenderSync::get_denoise_params(blender::Scene &b_scene,
           denoising.quality = DENOISER_QUALITY_FAST;
           denoising.upscale_factor = 3.0f;
           break;
+      }
+
+      if (denoising.type == DENOISER_METALFX) {
+        /* MetalFX has no input for the motion of reflections. */
+        denoising.use_gpu = true;
+        denoising.passes = DENOISER_PASS_ALBEDO | DENOISER_PASS_NORMAL |
+                           DENOISER_PASS_ROUGHNESS | DENOISER_PASS_DEPTH | DENOISER_PASS_MOTION;
+        return denoising;
       }
 
       denoising.passes = DENOISER_PASS_ALBEDO | DENOISER_PASS_SPECULAR_ALBEDO |

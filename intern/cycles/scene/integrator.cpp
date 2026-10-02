@@ -320,6 +320,7 @@ NODE_DEFINE(Integrator)
   denoiser_type_enum.insert("optix", DENOISER_OPTIX);
   denoiser_type_enum.insert("openimagedenoise", DENOISER_OPENIMAGEDENOISE);
   denoiser_type_enum.insert("dlss", DENOISER_DLSS);
+  denoiser_type_enum.insert("metalfx", DENOISER_METALFX);
 
   static NodeEnum denoiser_prefilter_enum;
   denoiser_prefilter_enum.insert("none", DENOISER_PREFILTER_NONE);
@@ -366,6 +367,11 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   });
 
   if (use_denoise && denoiser_type == DENOISER_DLSS) {
+    use_pixel_jitter = true;
+  }
+  /* MetalFX works on jittered frames in the viewport. Final renders keep the pixel filter, so
+   * that all passes are the same as without it. */
+  if (use_denoise && denoiser_type == DENOISER_METALFX && !scene->params.background) {
     use_pixel_jitter = true;
   }
 
@@ -645,6 +651,13 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
     }
     else {
       kintegrator->pixel_jitter = pixel_jitter_state.next();
+    }
+    if (use_denoise && denoiser_type == DENOISER_METALFX) {
+      /* The kernel subtracts the jitter from the integer raster position, which is the corner
+       * of the pixel, while the pixel filter is centered on the middle of the pixel. Jitter
+       * around the middle, so that the frames line up with renders that use the filter. */
+      kintegrator->pixel_jitter = make_float2(kintegrator->pixel_jitter.x - 0.5f,
+                                              kintegrator->pixel_jitter.y - 0.5f);
     }
   }
   else {

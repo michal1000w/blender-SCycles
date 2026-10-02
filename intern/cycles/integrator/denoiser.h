@@ -11,6 +11,8 @@
 
 #include "device/denoise.h"
 #include "device/device.h"
+#include "util/projection.h"
+#include "util/transform.h"
 #include "util/unique_ptr.h"
 
 CCL_NAMESPACE_BEGIN
@@ -26,6 +28,8 @@ bool use_optix_denoiser(Device *denoiser_device, const DenoiseParams &params);
 bool use_gpu_oidn_denoiser(Device *denoiser_device, const DenoiseParams &params);
 
 bool use_dlss_denoiser(Device *denoiser_device, const DenoiseParams &params);
+
+bool use_metalfx_denoiser(Device *denoiser_device, const DenoiseParams &params);
 
 DenoiseParams get_effective_denoise_params(Device *denoiser_device,
                                            Device *cpu_fallback_device,
@@ -100,6 +104,33 @@ class Denoiser {
                               bool allow_inplace_modification,
                               float2 pixel_jitter = {}) = 0;
 
+  /* State of the frame that denoisers working on a sequence of frames need next to the buffers.
+   * Set before every call of #denoise_buffer. */
+  struct FrameInfo {
+    /* The frames are shown as they are rendered and follow changes of the scene, as in the
+     * viewport. */
+    bool interactive = true;
+    /* The render buffer keeps accumulating samples between the calls until the render is
+     * restarted. Otherwise every call denoises an independent render. */
+    bool accumulate = false;
+
+    /* Camera the frame was rendered with. */
+    bool has_camera = false;
+    Transform world_to_camera = transform_identity();
+    Transform camera_to_world = transform_identity();
+    /* World space to 0..1 in X, Y and depth, for perspective and orthographic cameras. */
+    ProjectionTransform world_to_ndc = projection_identity();
+    /* The depth pass holds the distance to the camera, as it does for panoramic cameras. */
+    bool depth_is_distance = false;
+    float nearclip = 0.0f;
+    float farclip = 0.0f;
+  };
+
+  void set_frame_info(const FrameInfo &frame_info)
+  {
+    frame_info_ = frame_info;
+  }
+
   /* Get a device which is used to perform actual denoising.
    *
    * Notes:
@@ -133,6 +164,7 @@ class Denoiser {
   Device *denoiser_device_;
   bool denoise_kernels_are_loaded_;
   DenoiseParams params_;
+  FrameInfo frame_info_;
 };
 
 CCL_NAMESPACE_END

@@ -289,6 +289,16 @@ def enum_dlss_denoiser(self, context):
     return []
 
 
+def enum_metalfx_denoiser(self, context):
+    import _cycles
+    if _cycles.with_metalfx and (not context or bool(
+            context.preferences.addons[__package__].preferences.get_devices_for_type('METAL'))):
+        return [('METALFX', "MetalFX",
+                 n_("Use the Apple MetalFX temporal denoiser and upscaler, "
+                    "only available on Apple GPUs with macOS 26 or newer"), 16)]
+    return []
+
+
 def enum_optix_denoiser(self, context):
     if not context or bool(context.preferences.addons[__package__].preferences.get_devices_for_type('OPTIX')):
         return [('OPTIX', "OptiX", n_(
@@ -300,8 +310,9 @@ def enum_preview_denoiser(self, context):
     optix_items = enum_optix_denoiser(self, context)
     oidn_items = enum_openimagedenoise_denoiser(self, context)
     dlss_items = enum_dlss_denoiser(self, context)
+    metalfx_items = enum_metalfx_denoiser(self, context)
 
-    if len(optix_items) or len(oidn_items) or len(dlss_items):
+    if len(optix_items) or len(oidn_items) or len(dlss_items) or len(metalfx_items):
         items = [
             ('AUTO',
              "Automatic",
@@ -314,6 +325,7 @@ def enum_preview_denoiser(self, context):
     items += optix_items
     items += oidn_items
     items += dlss_items
+    items += metalfx_items
     return items
 
 
@@ -321,6 +333,7 @@ def enum_denoiser(self, context):
     items = []
     items += enum_optix_denoiser(self, context)
     items += enum_openimagedenoise_denoiser(self, context)
+    items += enum_metalfx_denoiser(self, context)
     return items
 
 
@@ -525,7 +538,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     )
     preview_denoising_upscale_quality: EnumProperty(
         name="Viewport Denoising Upscale Quality",
-        description="Overall upscale factor and denoising quality when using DLSS",
+        description="Overall upscale factor and denoising quality when using DLSS or MetalFX",
         items=enum_denoising_upscale_quality,
         default='BALANCED',
     )
@@ -2179,6 +2192,22 @@ class CyclesPreferences(bpy.types.AddonPreferences):
 
                 has_device_dlss_support = device[9]
                 if has_device_dlss_support and self.find_existing_device_entry(device).use:
+                    return True
+
+        return False
+
+    def has_metalfx_gpu_devices(self):
+        compute_device_type = self.get_compute_device_type()
+
+        # We need Metal devices, used for rendering and supporting MetalFX denoising
+        if compute_device_type == 'METAL':
+            for device in self.get_device_list(compute_device_type):
+                device_type = device[1]
+                if device_type == 'CPU':
+                    continue
+
+                has_device_metalfx_support = device[10]
+                if has_device_metalfx_support and self.find_existing_device_entry(device).use:
                     return True
 
         return False

@@ -47,7 +47,7 @@ void RenderScheduler::set_denoiser_params(const DenoiseParams &params)
 {
   denoiser_params_ = params;
 
-  if (is_denoiser_interactive()) {
+  if (is_denoiser_temporal() && !background_) {
     state_.resolution_divider = pixel_size_;
   }
 }
@@ -975,6 +975,11 @@ int RenderScheduler::get_num_samples_to_path_trace() const
     num_samples_to_render = min(limit_samples_per_update_, num_samples_to_render);
   }
 
+  if (is_denoiser_progressive() && background_ && !tile_manager_.has_multiple_tiles()) {
+    num_samples_to_render = min(get_progressive_denoiser_samples_per_frame(),
+                                num_samples_to_render);
+  }
+
   /* If adaptive sampling is not use, render as many samples per update as possible, keeping
    * the device fully occupied, without much overhead of display updates. */
   if (!adaptive_sampling_.use) {
@@ -1045,6 +1050,10 @@ bool RenderScheduler::work_need_denoise(bool &delayed, bool &ready_to_display)
 
   if (done()) {
     /* Always denoise at the last sample. */
+    return true;
+  }
+
+  if (is_denoiser_progressive()) {
     return true;
   }
 
@@ -1168,7 +1177,7 @@ bool RenderScheduler::work_need_rebalance()
 
 void RenderScheduler::update_start_resolution_divider()
 {
-  if (is_denoiser_interactive()) {
+  if (is_denoiser_temporal() && !background_) {
     start_resolution_divider_ = 1;
     return;
   }
@@ -1257,6 +1266,25 @@ bool RenderScheduler::is_denoise_active_during_update() const
 bool RenderScheduler::is_denoiser_interactive() const
 {
   return denoiser_params_.use && denoiser_params_.type == DENOISER_DLSS;
+}
+
+bool RenderScheduler::is_denoiser_progressive() const
+{
+  return denoiser_params_.use && denoiser_params_.type == DENOISER_METALFX;
+}
+
+bool RenderScheduler::is_denoiser_temporal() const
+{
+  return is_denoiser_interactive() || is_denoiser_progressive();
+}
+
+int RenderScheduler::get_progressive_denoiser_samples_per_frame() const
+{
+  /* The denoiser accumulates over the frames it is given, but not over many: the fewer samples
+   * a frame has the noisier the result. A single frame leaves it nothing to accumulate. Eight
+   * frames were the best at every number of samples in the test scenes. */
+  const int num_frames = 8;
+  return max(1, (num_samples_ + num_frames - 1) / num_frames);
 }
 
 bool RenderScheduler::work_is_usable_for_first_render_estimation(const RenderWork &render_work)

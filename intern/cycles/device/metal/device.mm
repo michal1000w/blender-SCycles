@@ -8,6 +8,7 @@
 
 #  include "device/metal/device.h"
 #  include "device/metal/device_impl.h"
+#  include "device/metal/metalfx.h"
 #  include "integrator/denoiser_oidn_gpu.h"
 
 #endif
@@ -76,6 +77,10 @@ void device_metal_info(vector<DeviceInfo> &devices)
     }
 #  endif
 
+    if (MetalFXDenoiserContext::is_device_supported(info)) {
+      info.denoisers |= DENOISER_METALFX;
+    }
+
     info.has_nanovdb = true;
     info.has_guiding = true;
     info.has_mnee_ = true;
@@ -101,6 +106,10 @@ void device_metal_info(vector<DeviceInfo> &devices)
     if (info.denoisers & DENOISER_OPENIMAGEDENOISE) {
       LOG_INFO << "Device with id \"" << info.id << "\" supports "
                << denoiserTypeToHumanReadable(DENOISER_OPENIMAGEDENOISE) << ".";
+    }
+    if (info.denoisers & DENOISER_METALFX) {
+      LOG_INFO << "Device with id \"" << info.id << "\" supports "
+               << denoiserTypeToHumanReadable(DENOISER_METALFX) << ".";
     }
   }
 }

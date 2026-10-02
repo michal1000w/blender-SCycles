@@ -104,6 +104,10 @@ class RenderScheduler {
 
   bool is_background() const;
 
+  /* Check whether a denoiser is active that works on the sequence of sample batches of a render
+   * that accumulates, like MetalFX: it is run after every batch instead of once at the end. */
+  bool is_denoiser_progressive() const;
+
   void set_denoiser_params(const DenoiseParams &params);
   bool is_denoiser_gpu_used() const;
 
@@ -251,6 +255,13 @@ class RenderScheduler {
 
   /* Check whether a real-time denoiser like DLSS is active. */
   bool is_denoiser_interactive() const;
+
+  /* Either of the above: a denoiser that works on a sequence of frames. In the viewport those
+   * take care of navigation themselves, there is no low resolution preview. */
+  bool is_denoiser_temporal() const;
+
+  /* Largest number of samples in a batch for a progressive denoiser. */
+  int get_progressive_denoiser_samples_per_frame() const;
 
   /* Heuristic which aims to give perceptually pleasant update of display interval in a way that at
    * lower samples and near the beginning of rendering, updates happen more often, but with higher
