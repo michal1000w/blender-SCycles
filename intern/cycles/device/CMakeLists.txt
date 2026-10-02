@@ -159,6 +159,8 @@ set(LIB
   PUBLIC cycles_util
   PRIVATE bf::dependencies::optional::openimagedenoise
   PRIVATE bf::dependencies::optional::osl
+  # Dictionaries of custom camera shaders translated for Metal.
+  PRIVATE bf::dependencies::optional::pugixml
 )
 
 if(WITH_CYCLES_DEVICE_OPTIX OR WITH_CYCLES_DEVICE_CUDA)
