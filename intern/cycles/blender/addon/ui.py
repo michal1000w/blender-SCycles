@@ -177,7 +177,8 @@ def show_denoise_active(context):
     if cscene.denoiser == 'OPTIX':
         return has_optixdenoiser_gpu_devices(context)
 
-    # OIDN is always available, thanks to CPU support
+    # OIDN is always available, thanks to CPU support. It also stands in for MetalFX on devices
+    # without it.
     return True
 
 
@@ -208,6 +209,10 @@ def has_oidn_gpu_devices(context):
 
 def has_dlss_gpu_devices(context):
     return context.preferences.addons[__package__].preferences.has_dlss_gpu_devices()
+
+
+def has_metalfx_gpu_devices(context):
+    return context.preferences.addons[__package__].preferences.has_metalfx_gpu_devices() and use_metal(context)
 
 
 def has_optixdenoiser_gpu_devices(context):
@@ -293,6 +298,15 @@ class CYCLES_RENDER_PT_sampling_viewport_denoise(CyclesButtonsPanel, Panel):
                           icon='BLANK1', translate=False)
             return
 
+        if effective_preview_denoiser == 'METALFX':
+            if has_metalfx_gpu_devices(context):
+                col.prop(cscene, "preview_denoising_upscale_quality", text="Upscale Mode")
+                return
+            col.label(text="Requires rendering on an Apple GPU", icon='INFO')
+            col.label(text=rpt_("with macOS %s or newer") % "26", icon='BLANK1', translate=False)
+            col.label(text="OpenImageDenoise is used instead", icon='BLANK1')
+            effective_preview_denoiser = 'OPENIMAGEDENOISE'
+
         col.prop(cscene, "preview_denoising_input_passes", text="Passes")
 
         if effective_preview_denoiser == 'OPENIMAGEDENOISE':
@@ -365,12 +379,22 @@ class CYCLES_RENDER_PT_sampling_render_denoise(CyclesButtonsPanel, Panel):
         sub.active = show_denoise_active(context)
         sub.prop(cscene, "denoiser", text="Denoiser")
 
+        # MetalFX has no settings. On devices without it OpenImageDenoise is used.
+        denoiser = cscene.denoiser
+        if denoiser == 'METALFX':
+            if has_metalfx_gpu_devices(context):
+                return
+            col.label(text="Requires rendering on an Apple GPU", icon='INFO')
+            col.label(text=rpt_("with macOS %s or newer") % "26", icon='BLANK1', translate=False)
+            col.label(text="OpenImageDenoise is used instead", icon='BLANK1')
+            denoiser = 'OPENIMAGEDENOISE'
+
         col.prop(cscene, "denoising_input_passes", text="Passes")
-        if cscene.denoiser == 'OPENIMAGEDENOISE':
+        if denoiser == 'OPENIMAGEDENOISE':
             col.prop(cscene, "denoising_prefilter", text="Prefilter")
             col.prop(cscene, "denoising_quality", text="Quality")
 
-        if cscene.denoiser == 'OPENIMAGEDENOISE':
+        if denoiser == 'OPENIMAGEDENOISE':
             row = col.row()
             row.active = has_oidn_gpu_devices(context)
             row.prop(cscene, "denoising_use_gpu", text="Use GPU")

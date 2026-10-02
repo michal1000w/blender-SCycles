@@ -474,10 +474,17 @@ void Film::device_update(Device *device, DeviceScene *dscene, Scene *scene)
 
   /* denoiser pass parameters */
   kfilm->denoising_pass_options_flag = 0;
-  if (denoising_pass_follow_reflections) {
+  /* MetalFX keeps what is seen in mirrors and glass only when the features follow sharp
+   * reflections and refractions. Rough ones need the features of the surface itself: behind
+   * them the features of single samples are noise, which it would preserve. Both together are
+   * what these two options do, so they are not left to the view layer for MetalFX. */
+  const bool denoiser_needs_reflection_features = scene->integrator->get_use_denoise() &&
+                                                  scene->integrator->get_denoiser_type() ==
+                                                      DENOISER_METALFX;
+  if (denoising_pass_follow_reflections || denoiser_needs_reflection_features) {
     kfilm->denoising_pass_options_flag |= DENOISING_PASS_FOLLOW_REFLECTIONS;
   }
-  if (denoising_pass_use_albedo_roughness_weighting) {
+  if (denoising_pass_use_albedo_roughness_weighting || denoiser_needs_reflection_features) {
     kfilm->denoising_pass_options_flag |= DENOISING_PASS_USE_ALBEDO_ROUGHNESS_WEIGHTING;
   }
 

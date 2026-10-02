@@ -486,7 +486,7 @@ static PyObject *available_devices_func(PyObject * /*self*/, PyObject *args)
   for (size_t i = 0; i < devices.size(); i++) {
     const DeviceInfo &device = devices[i];
     const string type_name = Device::string_from_type(device.type);
-    PyObject *device_tuple = PyTuple_New(10);
+    PyObject *device_tuple = PyTuple_New(11);
     PyTuple_SET_ITEM(device_tuple, 0, pyunicode_from_string(device.description.c_str()));
     PyTuple_SET_ITEM(device_tuple, 1, pyunicode_from_string(type_name.c_str()));
     PyTuple_SET_ITEM(device_tuple, 2, pyunicode_from_string(device.id.c_str()));
@@ -498,6 +498,7 @@ static PyObject *available_devices_func(PyObject * /*self*/, PyObject *args)
     PyTuple_SET_ITEM(device_tuple, 7, PyBool_FromLong(device.has_execution_optimization));
     PyTuple_SET_ITEM(device_tuple, 8, PyBool_FromLong(device.meets_driver_requirement));
     PyTuple_SET_ITEM(device_tuple, 9, PyBool_FromLong(device.denoisers & DENOISER_DLSS));
+    PyTuple_SET_ITEM(device_tuple, 10, PyBool_FromLong(device.denoisers & DENOISER_METALFX));
     PyTuple_SET_ITEM(ret, i, device_tuple);
   }
 
@@ -1012,6 +1013,12 @@ void *blender::CCL_python_module_init()
   PyModule_AddObjectRef(mod, "with_dlss", Py_True);
 #else
   PyModule_AddObjectRef(mod, "with_dlss", Py_False);
+#endif
+
+#ifdef WITH_METAL
+  PyModule_AddObjectRef(mod, "with_metalfx", Py_True);
+#else
+  PyModule_AddObjectRef(mod, "with_metalfx", Py_False);
 #endif
 
 #ifdef WITH_CYCLES_DEBUG

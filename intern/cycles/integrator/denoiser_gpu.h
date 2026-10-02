@@ -55,7 +55,7 @@ class DenoiserGPU : public Denoiser {
                                    const BufferParams &buffer_params,
                                    const DenoisePass &pass);
   bool denoise_filter_guiding_flip_y(const DenoiseContext &context);
-  bool denoise_filter_guiding_set_fake_albedo(DenoiseContext &context);
+  virtual bool denoise_filter_guiding_set_fake_albedo(DenoiseContext &context);
 
   /* Read guiding passes from the render buffers, preprocess them in a way which is expected by
    * the GPU denoiser and store in the guiding passes memory within the given context.

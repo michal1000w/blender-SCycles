@@ -587,6 +587,7 @@ void PathTrace::set_denoiser_params(const DenoiseParams &params)
     const bool is_cpu_denoising = old_denoiser_params.type == DENOISER_OPENIMAGEDENOISE &&
                                   old_denoiser_params.use_gpu == false;
     const bool always_gpu_denoising = effective_denoise_params.type == DENOISER_DLSS ||
+                                      effective_denoise_params.type == DENOISER_METALFX ||
                                       effective_denoise_params.type == DENOISER_OPTIX;
     const bool requested_gpu_denoising = always_gpu_denoising ||
                                          (effective_denoise_params.type ==
@@ -698,6 +699,22 @@ void PathTrace::denoise(const RenderWork &render_work)
     DCHECK_EQ(path_trace_works_.size(), 1);
 
     buffer_to_denoise = path_trace_works_.front()->get_render_buffers();
+  }
+
+  {
+    const KernelCamera &kcam = device_scene_->data.cam;
+    Denoiser::FrameInfo frame_info;
+    frame_info.interactive = !render_scheduler_.is_background();
+    frame_info.accumulate = render_scheduler_.is_denoiser_progressive();
+    frame_info.has_camera = true;
+    frame_info.world_to_camera = kcam.worldtocamera;
+    frame_info.camera_to_world = kcam.cameratoworld;
+    frame_info.world_to_ndc = kcam.worldtondc;
+    frame_info.depth_is_distance = !(kcam.type == CAMERA_PERSPECTIVE ||
+                                     kcam.type == CAMERA_ORTHOGRAPHIC);
+    frame_info.nearclip = kcam.nearclip;
+    frame_info.farclip = kcam.nearclip + kcam.cliplength;
+    denoiser_->set_frame_info(frame_info);
   }
 
   if (denoiser_->denoise_buffer(render_state_.effective_big_tile_params,
