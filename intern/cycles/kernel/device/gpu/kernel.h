@@ -33,16 +33,20 @@
 #include "kernel/integrator/init_from_bake.h"
 #include "kernel/integrator/init_from_camera.h"
 #include "kernel/integrator/intersect_closest.h"
+#ifdef __KERNEL_METAL__
+/* Light-cache transport. Must come before any header which includes a shading kernel: those
+ * include it for other devices only, and when Metal sources are built at runtime includes are
+ * inlined textually with `#pragma once` tracking, so a first occurrence inside their inactive
+ * `#if` block would drop these headers from the source. */
+#  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/guiding_gpu.h"
+#  include "kernel/integrator/photon_mapping.h"
+#endif
 #include "kernel/integrator/intersect_dedicated_light.h"
 #include "kernel/integrator/intersect_mnee.h"
 #include "kernel/integrator/intersect_shadow.h"
 #include "kernel/integrator/intersect_subsurface.h"
 #include "kernel/integrator/intersect_volume_stack.h"
-#ifdef __KERNEL_METAL__
-#  include "kernel/integrator/bidirectional.h"
-#  include "kernel/integrator/guiding_gpu.h"
-#  include "kernel/integrator/photon_mapping.h"
-#endif
 #include "kernel/integrator/shade_background.h"
 #include "kernel/integrator/shade_dedicated_light.h"
 #include "kernel/integrator/shade_light.h"

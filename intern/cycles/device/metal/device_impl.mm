@@ -472,6 +472,13 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
     global_defines += "#define __KERNEL_METAL_OSL_CAMERA__\n";
   }
 
+  if (requires_scene_specialization()) {
+    /* Without separately compiled shading functions every kernel contains the shader
+     * interpreter. Inlining it at each call site makes the Metal backend compiler exhaust
+     * memory on machines which use low memory compilation. */
+    global_defines += "#define __KERNEL_METAL_LOW_MEMORY_COMPILE__\n";
+  }
+
   if (pso_type == PSO_GENERIC && !complete_generic && MetalInfo::use_low_memory_compilation()) {
     global_defines += "#define __KERNEL_METAL_GENERIC_NO_SHADE__\n";
     global_defines += "#define __KERNEL_METAL_GENERIC_NO_LIGHT_CACHE__\n";
