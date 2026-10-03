@@ -1877,6 +1877,7 @@ void BlenderSync::sync_materials(blender::Depsgraph &b_depsgraph,
       shader->set_emission_sampling_method(get_emission_sampling(cmat));
       shader->set_use_transparent_shadow(b_mat.blend_flag & blender::MA_BL_TRANSPARENT_SHADOW);
       shader->set_use_bump_map_correction(get_boolean(cmat, "use_bump_map_correction"));
+      shader->set_nested_priority(get_int(cmat, "nested_priority"));
       shader->set_volume_sampling_method(get_volume_sampling(cmat));
       shader->set_volume_interpolation_method(get_volume_interpolation(cmat));
       shader->set_volume_step_rate(get_float(cmat, "volume_step_rate"));

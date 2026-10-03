@@ -595,7 +595,7 @@ void Camera::device_update_volume(Device * /*device*/, DeviceScene *dscene, Scen
   kernel_camera.is_inside_volume = 0;
 
   KernelIntegrator *kintegrator = &dscene->data.integrator;
-  if (kintegrator->use_volumes) {
+  if (kintegrator->use_volumes || kintegrator->use_nested_dielectrics) {
     if (camera_type == CAMERA_CUSTOM) {
       kernel_camera.is_inside_volume = 1;
       LOG_INFO << "Considering custom camera to be inside volume.";
@@ -610,7 +610,8 @@ void Camera::device_update_volume(Device * /*device*/, DeviceScene *dscene, Scen
                    [&](const blocked_range<size_t> &r) {
                      for (size_t i = r.begin(); i != r.end(); i++) {
                        Object *object = scene->objects[i];
-                       if (object->get_geometry()->has_volume &&
+                       if ((object->get_geometry()->has_volume ||
+                            object->get_geometry()->has_nested_priority) &&
                            viewplane_boundbox.intersects(object->bounds))
                        {
                          /* TODO(sergey): Consider adding more grained check. */

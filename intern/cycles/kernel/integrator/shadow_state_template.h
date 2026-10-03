@@ -163,3 +163,14 @@ KERNEL_STRUCT_ARRAY_MEMBER(shadow_volume_stack, int, shader, KERNEL_FEATURE_VOLU
 KERNEL_STRUCT_END_ARRAY(shadow_volume_stack,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE)
+
+/******************************** Medium Stack ********************************/
+
+/* Shadow rays skip the surfaces a higher priority medium overrides, which only needs to know the
+ * media and not their index of refraction. */
+KERNEL_STRUCT_BEGIN(shadow_medium_stack)
+KERNEL_STRUCT_ARRAY_MEMBER(shadow_medium_stack, int, object, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(shadow_medium_stack, int, shader, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_END_ARRAY(shadow_medium_stack,
+                        KERNEL_STRUCT_MEDIUM_STACK_SIZE,
+                        KERNEL_STRUCT_MEDIUM_STACK_SIZE)

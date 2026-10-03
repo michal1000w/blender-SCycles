@@ -217,14 +217,40 @@ ccl_device void osl_closure_reflection_setup(KernelGlobals kg,
   sd->runtime_flag |= bsdf_microfacet_ggx_setup(bsdf);
 }
 
+/* Nested dielectrics: make the index of refraction of a dielectric closure relative to the
+ * medium around the surface. Returns false when that leaves no interface, after replacing the
+ * transmission of the closure by a transparent one. */
+ccl_device_inline bool osl_closure_nested_ior(ccl_private ShaderData *sd,
+                                              const uint32_t path_flag,
+                                              const Spectrum transmission_weight,
+                                              ccl_private float *ior,
+                                              ccl_private float *inv_abbe = nullptr)
+{
+  if (!bsdf_nested_dielectric(sd)) {
+    return true;
+  }
+  const bool index_matched = bsdf_nested_index_matched(bsdf_nested_relative_ior(sd, *ior));
+  *ior = bsdf_nested_relative_ior(sd, *ior, inv_abbe);
+  if (index_matched) {
+    bsdf_transparent_setup(sd, transmission_weight, path_flag);
+    return false;
+  }
+  return true;
+}
+
 ccl_device void osl_closure_refraction_setup(KernelGlobals kg,
                                              ccl_private ShaderData *sd,
                                              const PathRayVisibility path_visibility,
-                                             const uint32_t /*path_flag*/,
+                                             const uint32_t path_flag,
                                              const float3 weight,
                                              const ccl_private RefractionClosure *closure,
                                              float3 * /*layer_albedo*/)
 {
+  float ior = closure->ior;
+  if (!osl_closure_nested_ior(sd, path_flag, rgb_to_spectrum(weight), &ior)) {
+    return;
+  }
+
   if (osl_closure_skip(kg, path_visibility, LABEL_SINGULAR)) {
     return;
   }
@@ -238,7 +264,7 @@ ccl_device void osl_closure_refraction_setup(KernelGlobals kg,
   const bool backfacing = (sd->runtime_flag & SR_BACKFACING);
 
   bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
-  bsdf->ior = backfacing ? 1.0f / closure->ior : closure->ior;
+  bsdf->ior = backfacing ? 1.0f / ior : ior;
   bsdf->alpha_x = bsdf->alpha_y = 0.0f;
 
   sd->runtime_flag |= bsdf_microfacet_ggx_refraction_setup(bsdf);
@@ -309,12 +335,23 @@ ccl_device void osl_closure_coat_bsdf_setup(KernelGlobals kg,
 ccl_device void osl_closure_dielectric_bsdf_setup(KernelGlobals kg,
                                                   ccl_private ShaderData *sd,
                                                   const PathRayVisibility path_visibility,
-                                                  const uint32_t /*path_flag*/,
+                                                  const uint32_t path_flag,
                                                   const float3 weight,
                                                   const ccl_private DielectricBSDFClosure *closure,
                                                   float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+
+  float ior = closure->ior;
+  if (!osl_closure_nested_ior(
+          sd,
+          path_flag,
+          rgb_to_spectrum(weight) *
+              bsdf_spectral_transmission_color(kg, sd, closure->transmission_tint),
+          &ior))
+  {
+    return;
+  }
 
   if (osl_closure_skip(kg, path_visibility, LABEL_GLOSSY | LABEL_REFLECT)) {
     return;
@@ -338,13 +375,14 @@ ccl_device void osl_closure_dielectric_bsdf_setup(KernelGlobals kg,
   bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
-  bsdf->ior = backfacing ? 1.0f / closure->ior : closure->ior;
+  bsdf->ior = backfacing ? 1.0f / ior : ior;
   bsdf->T = closure->T;
 
   const bool beckmann = closure->distribution == make_string("beckmann", 14712237670914973463ull);
   const bool multiggx = closure->distribution == make_string("multi_ggx", 16842698693386468366ull);
 
-  fresnel->thin_film = {closure->thinfilm_thickness, closure->thinfilm_ior};
+  fresnel->thin_film = {closure->thinfilm_thickness,
+                        bsdf_nested_relative_film_ior(sd, closure->thinfilm_ior)};
   fresnel->tint = {rgb_to_spectrum(closure->reflection_tint),
                    bsdf_spectral_transmission_color(kg, sd, closure->transmission_tint)};
   if (backfacing) {
@@ -428,7 +466,7 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const PathRayVisibility path_visibility,
-    const uint32_t /*path_flag*/,
+    const uint32_t path_flag,
     const float3 weight,
     const ccl_private GeneralizedSchlickBSDFClosure *closure,
     float3 *layer_albedo)
@@ -437,6 +475,23 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
 
   const bool has_reflection = !is_zero(closure->reflection_tint);
   const bool has_transmission = !is_zero(closure->transmission_tint);
+
+  /* Only the real Fresnel curve of a transmissive closure carries the index of refraction of
+   * the interior. The Schlick form of other exponents and reflective layers, which shaders give
+   * an index inverted for the back side, stay an interface with vacuum. */
+  const bool nested = bsdf_nested_dielectric(sd) && closure->exponent < 0.0f && has_transmission;
+  float nested_ior = -closure->exponent;
+  float nested_inv_abbe = closure->inv_abbe;
+  if (nested && !osl_closure_nested_ior(
+                    sd,
+                    path_flag,
+                    rgb_to_spectrum(weight) *
+                        bsdf_spectral_transmission_color(kg, sd, closure->transmission_tint),
+                    &nested_ior,
+                    &nested_inv_abbe))
+  {
+    return;
+  }
 
   int label = LABEL_GLOSSY | LABEL_REFLECT;
   if (has_transmission) {
@@ -472,8 +527,13 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
      * to the F0...F90 range, this allows us to use the real IOR.
      * Computing it back from F0 might give a different result in case of specular
      * tinting. */
-    const float ior = backfacing ? 1.0f / -closure->exponent : -closure->exponent;
-    bsdf->ior = bsdf_glass_ior(sd, ior, closure->inv_abbe);
+    if (nested) {
+      bsdf->ior = backfacing ? 1.0f / nested_ior : nested_ior;
+    }
+    else {
+      const float ior = backfacing ? 1.0f / -closure->exponent : -closure->exponent;
+      bsdf->ior = bsdf_glass_ior(sd, ior, closure->inv_abbe);
+    }
   }
   else {
     const float ior = ior_from_F0(average(closure->f0));
@@ -520,10 +580,17 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
                                                           kg, sd, closure->transmission_tint) :
                                                       zero_spectrum();
   fresnel->f0 = rgb_to_spectrum(closure->f0);
+  if (nested) {
+    /* The shader derived F0 from the interface with vacuum, which has none for an index of 1. */
+    const float vacuum_f0 = F0_from_ior(-closure->exponent);
+    const float nested_f0 = F0_from_ior(bsdf->ior);
+    fresnel->f0 = (vacuum_f0 > 1e-6f) ? fresnel->f0 * (nested_f0 / vacuum_f0) :
+                                        make_spectrum(nested_f0);
+  }
   fresnel->f90 = rgb_to_spectrum(closure->f90);
   fresnel->exponent = closure->exponent;
   fresnel->thin_film.thickness = closure->thinfilm_thickness;
-  fresnel->thin_film.ior = closure->thinfilm_ior;
+  fresnel->thin_film.ior = bsdf_nested_relative_film_ior(sd, closure->thinfilm_ior);
   if (backfacing) {
     adjust_thin_film_ior_at_backface(fresnel->thin_film.ior, bsdf->ior);
   }
@@ -853,12 +920,24 @@ ccl_device void osl_closure_diffraction_setup(KernelGlobals kg,
 ccl_device void osl_closure_microfacet_setup(KernelGlobals kg,
                                              ccl_private ShaderData *sd,
                                              const PathRayVisibility path_visibility,
-                                             const uint32_t /*path_flag*/,
+                                             const uint32_t path_flag,
                                              const float3 weight,
                                              const ccl_private MicrofacetClosure *closure,
                                              float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+
+  float ior = closure->ior;
+  if (closure->refract && !osl_closure_nested_ior(
+                              sd,
+                              path_flag,
+                              (closure->refract == 1) ?
+                                  bsdf_spectral_transmission_color(kg, sd, weight) :
+                                  rgb_to_spectrum(weight),
+                              &ior))
+  {
+    return;
+  }
 
   const int label = (closure->refract) ? LABEL_TRANSMIT : LABEL_REFLECT;
   if (osl_closure_skip(kg, path_visibility, LABEL_GLOSSY | label)) {
@@ -879,7 +958,7 @@ ccl_device void osl_closure_microfacet_setup(KernelGlobals kg,
   bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
-  bsdf->ior = backfacing ? 1.0f / closure->ior : closure->ior;
+  bsdf->ior = backfacing ? 1.0f / ior : ior;
   bsdf->T = closure->T;
 
   /* Beckmann */
@@ -997,11 +1076,18 @@ ccl_device void osl_closure_microfacet_multi_ggx_glass_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const PathRayVisibility path_visibility,
-    const uint32_t /*path_flag*/,
+    const uint32_t path_flag,
     const float3 weight,
     const ccl_private MicrofacetMultiGGXGlassClosure *closure,
     float3 * /*layer_albedo*/)
 {
+  float ior = closure->ior;
+  if (!osl_closure_nested_ior(
+          sd, path_flag, rgb_to_spectrum(weight) * rgb_to_spectrum(closure->color), &ior))
+  {
+    return;
+  }
+
   /* Technically, the MultiGGX closure may also transmit. However,
    * since this is set statically and only used for caustic flags, this
    * is probably as good as it gets. */
@@ -1020,7 +1106,7 @@ ccl_device void osl_closure_microfacet_multi_ggx_glass_setup(
   bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = bsdf->alpha_x;
-  bsdf->ior = backfacing ? 1.0f / closure->ior : closure->ior;
+  bsdf->ior = backfacing ? 1.0f / ior : ior;
 
   bsdf->T = zero_float3();
 

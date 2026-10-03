@@ -12,6 +12,7 @@
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/geom/shader_data.h"
+#include "kernel/integrator/nested_dielectrics.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/surface_shader.h"
 #include "kernel/light/coherent_history_kernel.h"
@@ -111,6 +112,59 @@ ccl_device_inline int3 photon_cell(const float3 P, const float radius)
                    float_to_int(floorf(P.y / radius)),
                    float_to_int(floorf(P.z / radius)));
 }
+
+#ifdef __NESTED_DIELECTRICS__
+enum LightPathNestedHit {
+  /* The surface exists, with the medium around it stored in the shader data. */
+  LIGHT_PATH_NESTED_TRUE = 0,
+  /* The surface does not exist, the ray was moved past it. */
+  LIGHT_PATH_NESTED_PASSED = 1,
+  LIGHT_PATH_NESTED_TERMINATE = 2,
+  LIGHT_PATH_NESTED_CACHE_MISS = 3,
+};
+
+/* Nested dielectrics for light subpaths, as integrate_surface_nested_false_intersection() does
+ * for camera paths: classify the hit against the media the path is inside of and pass through a
+ * surface which a medium of higher priority overrides. */
+ccl_device_inline LightPathNestedHit light_path_nested_dielectric_hit(
+    KernelGlobals kg,
+    IntegratorState state,
+    ccl_private ShaderData *sd,
+    ccl_private Ray *ray,
+    const PathRayVisibility path_visibility)
+{
+  if (!nested_dielectric_surface_setup(kg, state, sd)) {
+    return LIGHT_PATH_NESTED_TRUE;
+  }
+
+  if (!(sd->runtime_flag & SR_BACKFACING) && !(sd->shader_flag & SD_HAS_ONLY_VOLUME)) {
+    /* The index of refraction of the medium the path enters. */
+    surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
+        kg, state, sd, nullptr, path_visibility, INTEGRATOR_STATE(state, path, flag));
+    if (sd->runtime_flag & SR_CACHE_MISS) {
+      return LIGHT_PATH_NESTED_CACHE_MISS;
+    }
+  }
+
+  const uint32_t volume_bounds_bounce = INTEGRATOR_STATE(state, path, volume_bounds_bounce) + 1;
+  INTEGRATOR_STATE_WRITE(state, path, volume_bounds_bounce) = volume_bounds_bounce;
+  if (volume_bounds_bounce > VOLUME_BOUNDS_MAX) {
+    return LIGHT_PATH_NESTED_TERMINATE;
+  }
+  INTEGRATOR_STATE_WRITE(state, path, rng_offset) += PRNG_BOUNCE_NUM;
+
+  path_media_enter_exit<false>(kg, state, sd);
+
+  /* Keep the ray origin and advance tmin past this intersection. */
+  ray->tmin = intersection_t_offset(sd->ray_length);
+  ray->tmax = FLT_MAX;
+  ray->self.prim = sd->prim;
+  ray->self.object = sd->object;
+  ray->self.light_prim = PRIM_NONE;
+  ray->self.light_object = OBJECT_NONE;
+  return LIGHT_PATH_NESTED_PASSED;
+}
+#endif
 
 ccl_device_inline void photon_state_init(KernelGlobals kg,
                                          IntegratorState state,
@@ -748,7 +802,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
   throughput /= float(kernel_integrator_state.photon_capacity);
 
 #ifdef __VOLUME__
-  if (kernel_data.integrator.use_volumes) {
+  if (kernel_data.integrator.use_volumes || kernel_data.integrator.use_nested_dielectrics) {
     /* Photon emitters may be inside object or world volumes. Initialize the same stack used by
      * camera paths, but with light-path visibility so holdout/camera visibility does not change
      * photon transport. */
@@ -810,6 +864,20 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
 #ifdef __SPECTRAL__
     shader_setup_wavelength(kg, &sd, state);
 #endif
+#ifdef __NESTED_DIELECTRICS__
+    {
+      const LightPathNestedHit nested_hit = light_path_nested_dielectric_hit(
+          kg, state, &sd, &ray, path_visibility);
+      if (nested_hit == LIGHT_PATH_NESTED_PASSED) {
+        /* Not a transport bounce, as for volume bounds below. */
+        bounce--;
+        continue;
+      }
+      if (nested_hit != LIGHT_PATH_NESTED_TRUE) {
+        return;
+      }
+    }
+#endif
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
         kg, state, &sd, nullptr, path_visibility, INTEGRATOR_STATE(state, path, flag));
     if (sd.runtime_flag & SR_CACHE_MISS) {
@@ -826,7 +894,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       if (!path_state_volume_next(state)) {
         return;
       }
-      volume_stack_enter_exit<false>(kg, state, &sd);
+      path_media_enter_exit<false>(kg, state, &sd);
       ray.tmin = intersection_t_offset(sd.ray_length);
       ray.tmax = FLT_MAX;
       ray.self.prim = sd.prim;
@@ -870,6 +938,13 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
                    photon_wavelength_rand,
                    (INTEGRATOR_STATE(state, path, flag) & PATH_RAY_SPECTRAL) != 0u,
                    false);
+      return;
+    }
+
+    /* A surface without scattering closures, an emitter for example, ends the photon path.
+     * Picking from it would return a closure that an earlier shader evaluation left in this
+     * memory. */
+    if (!(sd.runtime_flag & (SR_BSDF | SR_BSSRDF))) {
       return;
     }
 
@@ -923,11 +998,9 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
                                          incident_side);
     }
 
-#ifdef __VOLUME__
     if (label & LABEL_TRANSMIT) {
-      volume_stack_enter_exit<false>(kg, state, &sd);
+      path_media_enter_exit<false>(kg, state, &sd);
     }
-#endif
 
     if (!(label & LABEL_TRANSPARENT)) {
       if (((label & LABEL_REFLECT) && !kernel_data.integrator.caustics_reflective) ||
@@ -954,8 +1027,18 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       ray.tmin = 0.0f;
     }
     else {
-      ray.P = sd.P;
+      /* Keep the ray origin and advance tmin past this intersection: the distance is measured
+       * from that origin. */
       ray.tmin = intersection_t_offset(sd.ray_length);
+#ifdef __NESTED_DIELECTRICS__
+      if ((sd.shader_flag & SD_HAS_NESTED_PRIORITY) &&
+          INTEGRATOR_STATE(state, path, transparent_bounce) <= VOLUME_BOUNDS_MAX)
+      {
+        /* An interface between nested dielectrics of the same index of refraction does not
+         * exist, like the surfaces of an overridden medium it is no transport bounce. */
+        bounce--;
+      }
+#endif
     }
     ray.D = normalize(wo);
     ray.tmax = FLT_MAX;

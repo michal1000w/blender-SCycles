@@ -719,6 +719,7 @@ struct Intersection {
     } \
     ;
 #  define KERNEL_STRUCT_VOLUME_STACK_SIZE MAX_VOLUME_STACK_SIZE
+#  define KERNEL_STRUCT_MEDIUM_STACK_SIZE MAX_MEDIUM_STACK_SIZE
 
 #  include "kernel/integrator/shadow_state_template.h"
 #  include "kernel/integrator/state_template.h"
@@ -731,6 +732,7 @@ struct Intersection {
 #  undef KERNEL_STRUCT_END
 #  undef KERNEL_STRUCT_END_ARRAY
 #  undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#  undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
 
 #endif
 
@@ -913,6 +915,9 @@ struct AttributeMap {
 #  define MAX_VOLUME_STACK_SIZE __MAX_VOLUME_STACK_SIZE__
 #endif
 
+/* Nested dielectric media a path can be inside of at once, and the terminator of the list. */
+#define MAX_MEDIUM_STACK_SIZE 16  // NOLINT
+
 #define MAX_VOLUME_CLOSURE 8  // NOLINT
 /* Set the maximal resolution to be 128 (2^7) to limit traversing overhead. */
 #define VOLUME_OCTREE_MAX_DEPTH 7
@@ -1003,6 +1008,8 @@ enum ShaderRuntimeFlag {
 enum ShaderDataFlag {
   /* Surface is proven to contain only delta scattering, with no continuous evaluation. */
   SD_HAS_ONLY_DELTA_SURFACE = (1 << 0),
+  /* Material takes part in nested dielectrics, with a priority stored in __shaders. */
+  SD_HAS_NESTED_PRIORITY = (1 << 1),
   /* If the shader is wavelength-dependent. */
   SD_REQUIRES_WAVELENGTH = (1 << 12),
   /* If Light Path Node is present in the shader graph. */
@@ -1032,6 +1039,9 @@ enum ShaderDataFlag {
   /* Has bump mapping from the displacement socket. */
   SD_HAS_BUMP_FROM_DISPLACEMENT = (1 << 25),
   SD_HAS_BUMP = (SD_HAS_BUMP_FROM_DISPLACEMENT | SD_HAS_BUMP_FROM_SURFACE),
+  /* Surfaces which bound a medium: the volume stack and the nested dielectric media of a path
+   * are initialized from them. */
+  SD_HAS_MEDIUM = (SD_HAS_VOLUME | SD_HAS_NESTED_PRIORITY),
   /* Has true displacement. */
   SD_HAS_DISPLACEMENT = (1 << 26),
   /* Has constant emission (value stored in __shaders) */
@@ -1076,16 +1086,21 @@ enum ShaderDataObjectFlag : uint {
   SD_OBJECT_HAS_CORNER_NORMALS = (1u << 12),
   SD_OBJECT_COHERENT_DETECTOR = (1u << 13),
   SD_OBJECT_COHERENT_GLASS_POINT = (1u << 14),
+  /* Object has a material with a nested dielectric priority. */
+  SD_OBJECT_HAS_NESTED_PRIORITY = (1u << 15),
 
   /* object is using caustics */
   SD_OBJECT_CAUSTICS = (SD_OBJECT_CAUSTICS_CASTER | SD_OBJECT_CAUSTICS_RECEIVER),
+  /* Object bounds a medium, see SD_HAS_MEDIUM. */
+  SD_OBJECT_HAS_MEDIUM = (SD_OBJECT_HAS_VOLUME | SD_OBJECT_HAS_NESTED_PRIORITY),
 
   SD_OBJECT_FLAGS = (SD_OBJECT_HOLDOUT_MASK | SD_OBJECT_MOTION | SD_OBJECT_TRANSFORM_APPLIED |
                      SD_OBJECT_NEGATIVE_SCALE | SD_OBJECT_HAS_VOLUME |
                      SD_OBJECT_INTERSECTS_VOLUME | SD_OBJECT_SHADOW_CATCHER |
                      SD_OBJECT_HAS_VOLUME_ATTRIBUTES | SD_OBJECT_CAUSTICS |
                      SD_OBJECT_HAS_VOLUME_MOTION | SD_OBJECT_HAS_CORNER_NORMALS |
-                     SD_OBJECT_COHERENT_DETECTOR | SD_OBJECT_COHERENT_GLASS_POINT)
+                     SD_OBJECT_COHERENT_DETECTOR | SD_OBJECT_COHERENT_GLASS_POINT |
+                     SD_OBJECT_HAS_NESTED_PRIORITY)
 };
 
 struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
@@ -1163,6 +1178,14 @@ struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
   /* Random number for sampling the wavelength. */
   float rand_wavelength;
 #endif
+#ifdef __NESTED_DIELECTRICS__
+  /* Index of refraction of the medium on the outer side of this surface, set by the integrator
+   * from the media the path is inside of. 1 without nested dielectrics. */
+  float medium_ior;
+  /* Index of refraction of the interior of this surface as evaluated by its dielectric closures,
+   * 0 if the shader did not set up any. */
+  float interior_ior;
+#endif
 #ifdef __KERNEL_METAL__
   /* Reuse one spatial/product query across BSDF pdf and sample on the same ShaderData. */
   const ccl_global float *gpu_guiding_weights;
@@ -1238,6 +1261,17 @@ struct VolumeStack {
   int shader;
 };
 #endif
+
+/* Medium Stack
+ *
+ * Interior list of nested dielectrics: the objects with a nested priority that the current
+ * segment of the path is inside of. */
+struct MediumStack {
+  int object;
+  int shader;
+  /* Index of refraction evaluated where the path entered, 0 to use the one of the shader. */
+  float ior;
+};
 
 /* Struct to gather multiple nearby intersections. */
 struct LocalIntersection {
@@ -1466,6 +1500,7 @@ struct ccl_align(16) KernelData {
   uint max_closures;
   uint max_shaders;
   uint volume_stack_size;
+  uint medium_stack_size;
 
   /* Always dynamic data members. */
   KernelCamera cam;
@@ -1913,6 +1948,11 @@ struct KernelShader {
   /* 0: full SVM, 1: compact SVM, >= 2: fused image descriptor offset + 2. */
   int displacement_evaluator;
   float displacement_bound;
+  /* Nested dielectrics: 0 does not take part, otherwise the highest priority wins an overlap. */
+  int nested_priority;
+  /* Index of refraction of the interior where the path could not evaluate it. */
+  float nested_ior;
+  int pad1, pad2;
 };
 static_assert_align(KernelShader, 16);
 

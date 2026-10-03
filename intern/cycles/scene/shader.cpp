@@ -52,6 +52,7 @@ NODE_DEFINE(Shader)
               EMISSION_SAMPLING_AUTO);
 
   SOCKET_BOOLEAN(use_transparent_shadow, "Use Transparent Shadow", true);
+  SOCKET_INT(nested_priority, "Nested Priority", 0);
   SOCKET_BOOLEAN(use_bump_map_correction, "Bump Map Correction", true);
 
   static NodeEnum volume_sampling_method_enum;
@@ -427,6 +428,13 @@ void Shader::tag_update(Scene *scene)
 
   need_update_shadow_transparency = prev_has_surface_shadow_transparency;
 
+  if (nested_priority != prev_nested_priority) {
+    /* Objects are flagged as nested dielectric media. */
+    scene->geometry_manager->need_flags_update = true;
+    scene->object_manager->need_flags_update = true;
+    prev_nested_priority = nested_priority;
+  }
+
   if (has_volume != prev_has_volume || volume_step_rate != prev_volume_step_rate) {
     scene->geometry_manager->need_flags_update = true;
     scene->object_manager->need_flags_update = true;
@@ -660,6 +668,36 @@ void ShaderManager::device_update_displacement_bounds(DeviceScene *dscene,
   }
 }
 
+/* Index of refraction which the dielectric closures of a shader have for a constant input. Paths
+ * use the value their closures evaluate to wherever they shade the surface of a medium, this is
+ * for the media a camera or a light is inside of from the start. */
+static float shader_nested_ior(const Shader *shader)
+{
+  float principled_ior = 0.0f;
+  for (const ShaderNode *node : shader->graph->nodes) {
+    const bool is_principled = node->type == PrincipledBsdfNode::get_node_type();
+    if (!is_principled && node->type != GlassBsdfNode::get_node_type() &&
+        node->type != RefractionBsdfNode::get_node_type())
+    {
+      continue;
+    }
+    const ShaderInput *ior_input = const_cast<ShaderNode *>(node)->input("IOR");
+    if (ior_input == nullptr) {
+      continue;
+    }
+    const float ior = max(node->get_float(ior_input->socket_type), 1e-5f);
+    if (!is_principled) {
+      return ior;
+    }
+    if (principled_ior == 0.0f) {
+      principled_ior = ior;
+    }
+  }
+  /* A material without dielectric closures, like a volume, is a medium with the index of
+   * refraction of vacuum. */
+  return (principled_ior != 0.0f) ? principled_ior : 1.0f;
+}
+
 void ShaderManager::device_update_common(Device * /*device*/,
                                          DeviceScene *dscene,
                                          Scene *scene,
@@ -674,6 +712,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
 
   KernelShader *kshader = dscene->shaders.alloc(scene->shaders.size());
   bool has_transparent_shadow = false;
+  bool has_nested_dielectrics = false;
 
   for (Shader *shader : scene->shaders) {
     uint flag = 0;
@@ -766,6 +805,15 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (shader->has_dispersion || shader->has_spectral_transmission) {
       flag |= SD_REQUIRES_WAVELENGTH;
     }
+    if (shader->get_nested_priority() != 0) {
+      /* Shadow rays pass through the surfaces of a medium which another medium overrides, so
+       * they have to shade them like transparent surfaces. */
+      flag |= SD_HAS_NESTED_PRIORITY | SD_HAS_TRANSPARENT_SHADOW;
+      shader->nested_ior = shader_nested_ior(shader);
+      if (shader->reference_count()) {
+        has_nested_dielectrics = true;
+      }
+    }
 
     const uint32_t cryptomatte_id = util_murmur_hash3(
         shader->name.c_str(), shader->name.length(), 0);
@@ -786,6 +834,10 @@ void ShaderManager::device_update_common(Device * /*device*/,
     kshader->constant_emission[1] = shader->emission_estimate.y;
     kshader->constant_emission[2] = shader->emission_estimate.z;
     kshader->cryptomatte_id = util_hash_to_float(cryptomatte_id);
+    kshader->nested_priority = shader->get_nested_priority();
+    kshader->nested_ior = shader->nested_ior;
+    kshader->pad1 = 0;
+    kshader->pad2 = 0;
     kshader++;
 
     has_transparent_shadow |= (flag & SD_HAS_TRANSPARENT_SHADOW) != 0;
@@ -817,6 +869,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
   KernelIntegrator *kintegrator = &dscene->data.integrator;
   /* TODO(sergey): De-duplicate with flags set in integrator.cpp. */
   kintegrator->transparent_shadows = has_transparent_shadow;
+  kintegrator->use_nested_dielectrics = has_nested_dielectrics;
 
   /* film */
   KernelFilm *kfilm = &dscene->data.film;
@@ -992,6 +1045,11 @@ uint64_t ShaderManager::get_kernel_features(Scene *scene)
      * e.g. an Emission node would slip through the KERNEL_FEATURE_NODE_VOLUME check */
     if (shader->has_volume_connected) {
       kernel_features |= KERNEL_FEATURE_VOLUME;
+    }
+    if (shader->get_nested_priority() != 0) {
+      /* The media of a path are initialized and shadowed with the volume stack machinery. */
+      kernel_features |= KERNEL_FEATURE_NESTED_DIELECTRICS | KERNEL_FEATURE_VOLUME |
+                         KERNEL_FEATURE_TRANSPARENT;
     }
   }
 

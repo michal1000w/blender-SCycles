@@ -1075,7 +1075,9 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
   vector<Object *> volume_objects;
   bool has_volume_objects = false;
   for (Object *object : scene->objects) {
-    if (object->geometry->has_volume) {
+    /* Nested dielectric media are tracked like volumes: an object which intersects one may have
+     * to update the media of a path. */
+    if (object->geometry->has_volume || object->geometry->has_nested_priority) {
       /* If the bounds are not valid it is not always possible to calculate the volume step, and
        * the step size is not needed for the displacement. So, delay calculation of the volume
        * step size until the final bounds are known. */
@@ -1099,6 +1101,13 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
     }
     else {
       object_flag[object->index] &= ~(SD_OBJECT_HAS_VOLUME | SD_OBJECT_HAS_VOLUME_ATTRIBUTES);
+    }
+
+    if (object->geometry->has_nested_priority) {
+      object_flag[object->index] |= SD_OBJECT_HAS_NESTED_PRIORITY;
+    }
+    else {
+      object_flag[object->index] &= ~SD_OBJECT_HAS_NESTED_PRIORITY;
     }
 
     if (object->is_shadow_catcher) {

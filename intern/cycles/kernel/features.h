@@ -94,6 +94,10 @@ CCL_NAMESPACE_BEGIN
 #define KERNEL_FEATURE_COHERENT_SPECULAR (1ULL << 36ULL)
 #define KERNEL_FEATURE_POLARIZATION (1ULL << 37ULL)
 
+/* Nested dielectrics: materials with a nested priority, which track the media a path is inside
+ * of to resolve overlapping refractive objects. */
+#define KERNEL_FEATURE_NESTED_DIELECTRICS (1ULL << 38ULL)
+
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
 #define KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT \
@@ -147,6 +151,7 @@ CCL_NAMESPACE_BEGIN
 #define __SUBSURFACE__
 #define __TRANSPARENT_SHADOWS__
 #define __VOLUME__
+#define __NESTED_DIELECTRICS__
 
 #define __CAUSTICS_TRICKS__
 #define __CLAMP_SAMPLE__
@@ -213,6 +218,9 @@ CCL_NAMESPACE_BEGIN
 #    if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_TRANSPARENT)
 #      undef __TRANSPARENT_SHADOWS__
 #    endif
+#  endif
+#  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_NESTED_DIELECTRICS)
+#    undef __NESTED_DIELECTRICS__
 #  endif
 #  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_SUBSURFACE)
 #    undef __SUBSURFACE__

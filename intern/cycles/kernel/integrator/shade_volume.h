@@ -11,6 +11,7 @@
 
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/intersect_closest.h"
+#include "kernel/integrator/nested_dielectrics.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/shadow_linking.h"
 #include "kernel/integrator/state.h"
@@ -792,7 +793,15 @@ ccl_device bool bdpt_volume_connection_transmittance(KernelGlobals kg,
     }
     ShaderData boundary_sd;
     shader_setup_from_ray(kg, &boundary_sd, &ray, &isect);
-    if (!(boundary_sd.shader_flag & SD_HAS_ONLY_VOLUME)) {
+#    ifdef __NESTED_DIELECTRICS__
+    /* A surface inside a nested dielectric medium of higher priority is no blocker. The medium
+     * it may enter keeps the index of refraction of its shader, which only the interfaces after
+     * this segment would use. */
+    const bool nested_false = nested_dielectric_surface_setup(kg, state, &boundary_sd);
+#    else
+    const bool nested_false = false;
+#    endif
+    if (!(boundary_sd.shader_flag & SD_HAS_ONLY_VOLUME) && !nested_false) {
       /* A solved interface can be hit at the numerical end of a segment. All other
        * surfaces are blockers; never reinterpret glass as transparent shadow glass. */
       if (end_t - isect.t > 1.0e-5f) {
@@ -800,7 +809,7 @@ ccl_device bool bdpt_volume_connection_transmittance(KernelGlobals kg,
       }
       return true;
     }
-    volume_stack_enter_exit<false>(kg, state, &boundary_sd);
+    path_media_enter_exit<false>(kg, state, &boundary_sd);
     ray.tmin = intersection_t_offset(isect.t);
     ray.tmax = end_t;
     ray.self.object = isect.object;
@@ -2760,6 +2769,9 @@ ccl_device_forceinline void integrate_volume_direct_light(
 #  endif
 
   integrator_state_copy_volume_stack_to_shadow(kg, shadow_state, state);
+#  ifdef __NESTED_DIELECTRICS__
+  integrator_state_copy_medium_stack_to_shadow(kg, shadow_state, state);
+#  endif
 }
 
 #  ifdef __PHOTON_MAPPING__

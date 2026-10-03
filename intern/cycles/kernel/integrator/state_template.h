@@ -161,6 +161,17 @@ KERNEL_STRUCT_END_ARRAY(volume_stack,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE,
                         KERNEL_STRUCT_VOLUME_STACK_SIZE)
 
+/********************************** Medium Stack ******************************/
+
+/* Interior list of nested dielectrics. */
+KERNEL_STRUCT_BEGIN(medium_stack)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, int, object, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, int, shader, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_ARRAY_MEMBER(medium_stack, float, ior, KERNEL_FEATURE_NESTED_DIELECTRICS)
+KERNEL_STRUCT_END_ARRAY(medium_stack,
+                        KERNEL_STRUCT_MEDIUM_STACK_SIZE,
+                        KERNEL_STRUCT_MEDIUM_STACK_SIZE)
+
 /************************************ Path Guiding *****************************/
 #ifndef KERNEL_STRUCT_CPU_GUIDING_FEATURE
 #  define KERNEL_STRUCT_CPU_GUIDING_FEATURE KERNEL_FEATURE_PATH_GUIDING

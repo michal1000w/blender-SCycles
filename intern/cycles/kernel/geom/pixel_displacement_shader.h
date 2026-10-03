@@ -112,6 +112,10 @@ ccl_device_inline void pixel_displacement_setup_shader_data(KernelGlobals kg,
   sd->time = time;
   sd->ray_length = 0.0f;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = kernel_data_fetch(object_flag, object);
   sd->ray_P = zero_float3();
@@ -1390,6 +1394,10 @@ ccl_device_inline float pixel_displacement_context_scalar(
   sd->object_flag = ctx->object_flag;
   sd->lcg_state = 0;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   int offset = ctx->program_offset;
   const ccl_global auto &program = svm_node_get<SVMDisplacementImage>(kg, &offset);
   const float4 color = program.use_derivatives ?
