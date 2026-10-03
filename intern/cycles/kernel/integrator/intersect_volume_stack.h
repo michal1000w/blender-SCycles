@@ -96,6 +96,24 @@ ccl_device void integrator_volume_stack_update_for_subsurface(KernelGlobals kg,
 }
 
 #ifdef __VOLUME__
+/* What a surface which the probe ray of the volume stack enters encloses: the object, and for a
+ * nested dielectric object whose materials are media of their own its material as well. */
+ccl_device_forceinline int integrator_volume_stack_init_shader(
+    KernelGlobals kg, const ccl_private ShaderData *stack_sd)
+{
+#  ifdef __NESTED_DIELECTRICS__
+  if ((stack_sd->shader_flag & SD_HAS_NESTED_PRIORITY) &&
+      (stack_sd->object_flag & SD_OBJECT_NESTED_PER_SHADER) && nested_dielectrics_enabled(kg))
+  {
+    return stack_sd->shader & SHADER_MASK;
+  }
+#  else
+  (void)kg;
+  (void)stack_sd;
+#  endif
+  return SHADER_NONE;
+}
+
 /* The origin of the path is inside the object of `stack_sd`: add it to the volume stack, or to
  * the nested dielectric media if its material has a nested priority. The index of refraction of
  * such a medium is the one of its shader, as its surface was not shaded. */
@@ -110,7 +128,12 @@ ccl_device_inline void integrator_volume_stack_init_add(KernelGlobals kg,
   if ((stack_sd->shader_flag & SD_HAS_NESTED_PRIORITY) && nested_dielectrics_enabled(kg)) {
     for (int i = 0; i < *medium_index; ++i) {
       /* Don't add intersections twice. */
-      if (INTEGRATOR_STATE_ARRAY(state, medium_stack, i, object) == stack_sd->object) {
+      if (medium_same(INTEGRATOR_STATE_ARRAY(state, medium_stack, i, object),
+                      INTEGRATOR_STATE_ARRAY(state, medium_stack, i, shader),
+                      stack_sd->object,
+                      stack_sd->shader,
+                      (stack_sd->object_flag & SD_OBJECT_NESTED_PER_SHADER) != 0))
+      {
         return;
       }
     }
@@ -196,19 +219,21 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
   const uint num_hits = scene_intersect_volume(kg, &volume_ray, hits, max_hits, stack_visibility);
   if (num_hits > 0) {
     int enclosed_volumes[VOLUME_STACK_PROBE_MAX_HITS];
+    int enclosed_shaders[VOLUME_STACK_PROBE_MAX_HITS];
     Intersection *isect = hits;
 
     qsort(hits, num_hits, sizeof(Intersection), intersections_compare);
 
     for (uint hit = 0; hit < num_hits; ++hit, ++isect) {
       shader_setup_from_ray(kg, stack_sd, &volume_ray, isect);
+      const int enclosed_shader = integrator_volume_stack_init_shader(kg, stack_sd);
       if (stack_sd->runtime_flag & SR_BACKFACING) {
         bool need_add = true;
         for (int i = 0; i < enclosed_index && need_add; ++i) {
           /* If ray exited the volume and never entered to that volume
            * it means that camera is inside such a volume.
            */
-          if (enclosed_volumes[i] == stack_sd->object) {
+          if (enclosed_volumes[i] == stack_sd->object && enclosed_shaders[i] == enclosed_shader) {
             need_add = false;
           }
         }
@@ -221,13 +246,15 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
         /* If ray from camera enters the volume, this volume shouldn't
          * be added to the stack on exit.
          */
-        enclosed_volumes[enclosed_index++] = stack_sd->object;
+        enclosed_volumes[enclosed_index] = stack_sd->object;
+        enclosed_shaders[enclosed_index++] = enclosed_shader;
       }
     }
   }
 #  else
   /* CUDA does not support definition of a variable size arrays, so use the maximum possible. */
   int enclosed_volumes[VOLUME_STACK_PROBE_MAX_HITS];
+  int enclosed_shaders[VOLUME_STACK_PROBE_MAX_HITS];
   int step = 0;
 
   while (stack_index < volume_stack_size - 1 && enclosed_index < VOLUME_STACK_PROBE_MAX_HITS - 1 &&
@@ -239,6 +266,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
     }
 
     shader_setup_from_ray(kg, stack_sd, &volume_ray, &isect);
+    const int enclosed_shader = integrator_volume_stack_init_shader(kg, stack_sd);
     if (stack_sd->runtime_flag & SR_BACKFACING) {
       /* If ray exited the volume and never entered to that volume
        * it means that camera is inside such a volume.
@@ -248,7 +276,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
         /* If ray exited the volume and never entered to that volume
          * it means that camera is inside such a volume.
          */
-        if (enclosed_volumes[i] == stack_sd->object) {
+        if (enclosed_volumes[i] == stack_sd->object && enclosed_shaders[i] == enclosed_shader) {
           need_add = false;
         }
       }
@@ -261,7 +289,8 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
       /* If ray from camera enters the volume, this volume shouldn't
        * be added to the stack on exit.
        */
-      enclosed_volumes[enclosed_index++] = stack_sd->object;
+      enclosed_volumes[enclosed_index] = stack_sd->object;
+      enclosed_shaders[enclosed_index++] = enclosed_shader;
     }
 
     /* Move ray forward. */

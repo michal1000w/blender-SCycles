@@ -118,6 +118,12 @@ ccl_device_inline void pixel_displacement_setup_shader_data(KernelGlobals kg,
 #endif
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = kernel_data_fetch(object_flag, object);
+#ifdef __NESTED_DIELECTRICS__
+  if (!(sd->object_flag & SD_OBJECT_HAS_NESTED_PRIORITY)) {
+    /* The material only is a nested dielectric on the objects which are media. */
+    sd->shader_flag &= ~SD_HAS_NESTED_PRIORITY;
+  }
+#endif
   sd->ray_P = zero_float3();
   sd->ray_dP = 0.0f;
 

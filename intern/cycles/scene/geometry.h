@@ -120,6 +120,12 @@ class Geometry : public Node {
   bool has_volume;         /* Set in the device_update_flags(). */
   /* Some material has a nested dielectric priority. Set in the device_update_flags(). */
   bool has_nested_priority = false;
+  /* Volume enclosed by the surface of a closed mesh with outward normals, zero for any other
+   * geometry. Cached for automatic nested dielectrics until the geometry is modified. */
+  float nested_closed_volume = 0.0f;
+  /* Materials, as bits by index in the used shaders, whose faces are a closed surface. */
+  uint64_t nested_closed_shaders = 0;
+  bool nested_closed_volume_valid = false;
   bool has_surface_bssrdf; /* Set in the device_update_flags(). */
   bool use_pixel_displacement;
   float pixel_displacement_max_distance;

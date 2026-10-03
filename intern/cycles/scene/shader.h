@@ -114,6 +114,28 @@ class Shader : public Node {
    * paths which start inside of it without shading its surface. */
   float nested_ior = 1.0f;
   int prev_nested_priority = 0;
+  /* Automatic nested dielectrics: the surface refracts, so that closed objects with this
+   * material can be media without a priority. Set by the shader manager. */
+  bool nested_candidate = false;
+  /* Some object is a medium by this material without a priority. Set by the object manager,
+   * which knows the geometry and the bounds of the objects. */
+  bool nested_auto_active = false;
+
+  /* The surface has a refractive closure. */
+  bool has_surface_refraction() const;
+  /* Surfaces with this material on medium objects take part in nested dielectrics. */
+  bool is_nested_medium() const
+  {
+    return nested_priority != 0 || (nested_candidate && nested_auto_active);
+  }
+  /* Shadow rays shade the surface instead of being blocked by it. */
+  bool has_transparent_shadow() const
+  {
+    /* Shadow rays pass through the surfaces of a medium which another medium overrides, so
+     * they have to shade them like transparent surfaces. */
+    return (has_surface_transparent && use_transparent_shadow) || has_volume ||
+           is_nested_medium();
+  }
 
   /* information about shader after compiling */
   bool has_surface;

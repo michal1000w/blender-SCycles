@@ -134,6 +134,12 @@ ccl_device_inline
   }
 
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
+#ifdef __NESTED_DIELECTRICS__
+  if (!(sd->object_flag & SD_OBJECT_HAS_NESTED_PRIORITY)) {
+    /* The material only is a nested dielectric on the objects which are media. */
+    sd->shader_flag &= ~SD_HAS_NESTED_PRIORITY;
+  }
+#endif
 
   /* backfacing test */
   const bool backfacing = (dot(sd->Ng, sd->wi) < 0.0f);
@@ -209,6 +215,12 @@ ccl_device_inline void shader_setup_from_sample(KernelGlobals kg,
   sd->object_flag = 0;
   if (sd->object != OBJECT_NONE) {
     sd->object_flag |= kernel_data_fetch(object_flag, sd->object);
+#ifdef __NESTED_DIELECTRICS__
+    if (!(sd->object_flag & SD_OBJECT_HAS_NESTED_PRIORITY)) {
+      /* The material only is a nested dielectric on the objects which are media. */
+      sd->shader_flag &= ~SD_HAS_NESTED_PRIORITY;
+    }
+#endif
 
 #ifdef __OBJECT_MOTION__
     shader_setup_object_transforms(kg, sd, time);
@@ -361,6 +373,12 @@ ccl_device void shader_setup_from_curve(KernelGlobals kg,
   /* Object */
   sd->object = object;
   sd->object_flag = kernel_data_fetch(object_flag, sd->object);
+#ifdef __NESTED_DIELECTRICS__
+  if (!(sd->object_flag & SD_OBJECT_HAS_NESTED_PRIORITY)) {
+    /* The material only is a nested dielectric on the objects which are media. */
+    sd->shader_flag &= ~SD_HAS_NESTED_PRIORITY;
+  }
+#endif
 #  ifdef __OBJECT_MOTION__
   shader_setup_object_transforms(kg, sd, sd->time);
 #  endif

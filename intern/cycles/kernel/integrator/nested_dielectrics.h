@@ -20,9 +20,19 @@ CCL_NAMESPACE_BEGIN
  * any other surface (a true intersection) the index of refraction on the outer side is the one
  * of the highest priority medium around it instead of 1.
  *
- * Media are ordered by priority and then by object index. The second key makes the order of two
- * media with the same priority independent of the direction of the path, which light and camera
- * subpaths of the bidirectional integrators need to agree on.
+ * Media are ordered by priority, then by the nesting rank of their object and then by object
+ * index. The rank orders media of the same priority, and with it media without any priority that
+ * take part automatically, from their geometry: the object which encloses the smaller volume
+ * has the higher rank, so an object inside another one always exists, as do ice in a drink and
+ * a bubble in ice. Unlike the order in which a path entered the media, used by Waechter and
+ * Raab, "Automatic Handling of Materials in Nested Volumes" (Ray Tracing Gems, 2019), this order
+ * does not depend on the direction of the path, which light and camera subpaths of the
+ * bidirectional integrators need to agree on.
+ *
+ * An object is one medium, whatever materials its surface has. Only where every material of
+ * the object is a closed surface of its own, like a glass and its drink in one mesh, each of
+ * them is a medium. They share the rank of the object, so among them the one which the path
+ * entered last exists, which is right wherever one of them contains another.
  *
  * The volume of a medium follows the same rule: the volume stack only contains the volume of
  * the highest priority medium, besides the volumes of materials without a priority. */
@@ -74,11 +84,6 @@ ccl_device_forceinline void medium_stack_write(IntegratorGenericState state,
   }
 }
 
-ccl_device_forceinline int medium_priority(KernelGlobals kg, const int shader)
-{
-  return kernel_data_fetch(shaders, (shader & SHADER_MASK)).nested_priority;
-}
-
 /* Index of refraction of a medium in the list: the one evaluated where the path entered it, or
  * the constant of its shader where the path never shaded its surface. */
 ccl_device_forceinline float medium_ior(KernelGlobals kg, const ccl_private MediumStack &entry)
@@ -87,13 +92,37 @@ ccl_device_forceinline float medium_ior(KernelGlobals kg, const ccl_private Medi
                               kernel_data_fetch(shaders, (entry.shader & SHADER_MASK)).nested_ior;
 }
 
-/* Strict total order of media. */
-ccl_device_forceinline bool medium_overrides(const int priority_a,
+/* Order of a medium among the ones of the same priority: its priority and the nesting rank of
+ * its object in one key. */
+ccl_device_forceinline uint medium_order(KernelGlobals kg, const int shader, const int object)
+{
+  const uint priority = uint(kernel_data_fetch(shaders, (shader & SHADER_MASK)).nested_priority);
+  const uint rank = kernel_data_fetch(object_flag, object) >> SD_OBJECT_NESTED_RANK_SHIFT;
+  return (priority << (32 - SD_OBJECT_NESTED_RANK_SHIFT)) | rank;
+}
+
+/* Strict total order of the media of different objects. */
+ccl_device_forceinline bool medium_overrides(const uint order_a,
                                              const int object_a,
-                                             const int priority_b,
+                                             const uint order_b,
                                              const int object_b)
 {
-  return (priority_a > priority_b) || (priority_a == priority_b && object_a > object_b);
+  return (order_a > order_b) || (order_a == order_b && object_a > object_b);
+}
+
+/* Every material of the object is a medium of its own. */
+ccl_device_forceinline bool medium_per_shader(KernelGlobals kg, const int object)
+{
+  return (kernel_data_fetch(object_flag, object) & SD_OBJECT_NESTED_PER_SHADER) != 0;
+}
+
+ccl_device_forceinline bool medium_same(const int object_a,
+                                        const int shader_a,
+                                        const int object_b,
+                                        const int shader_b,
+                                        const bool per_shader)
+{
+  return object_a == object_b && (!per_shader || ((shader_a ^ shader_b) & SHADER_MASK) == 0);
 }
 
 /* Media without the plumbing of an integrator state, for manifold walks. */
@@ -111,20 +140,29 @@ struct NestedDielectricHit {
 
 /* Fold one medium of the list into the classification of a hit on `object`. */
 struct NestedDielectricScan {
+  /* Instances of the medium itself in the list, and the position of the last one. */
+  bool per_shader;
   int self_count;
+  int self_index;
+  /* The medium of highest order among the others, and its position. */
   bool has_other;
-  int other_priority;
+  uint other_order;
   int other_object;
+  int other_index;
   float other_ior;
 };
 
-ccl_device_forceinline NestedDielectricScan nested_dielectric_scan_begin()
+ccl_device_forceinline NestedDielectricScan nested_dielectric_scan_begin(KernelGlobals kg,
+                                                                         const int object)
 {
   NestedDielectricScan scan;
+  scan.per_shader = medium_per_shader(kg, object);
   scan.self_count = 0;
+  scan.self_index = -1;
   scan.has_other = false;
-  scan.other_priority = 0;
+  scan.other_order = 0;
   scan.other_object = OBJECT_NONE;
+  scan.other_index = -1;
   scan.other_ior = 1.0f;
   return scan;
 }
@@ -132,19 +170,25 @@ ccl_device_forceinline NestedDielectricScan nested_dielectric_scan_begin()
 ccl_device_forceinline void nested_dielectric_scan_entry(KernelGlobals kg,
                                                          ccl_private NestedDielectricScan &scan,
                                                          const ccl_private MediumStack &entry,
-                                                         const int object)
+                                                         const int index,
+                                                         const int object,
+                                                         const int shader)
 {
-  if (entry.object == object) {
+  if (medium_same(entry.object, entry.shader, object, shader, scan.per_shader)) {
     scan.self_count++;
+    scan.self_index = index;
     return;
   }
-  const int priority = medium_priority(kg, entry.shader);
+  const uint order = medium_order(kg, entry.shader, entry.object);
+  /* Media of one object are in the order the path entered them. */
   if (!scan.has_other ||
-      medium_overrides(priority, entry.object, scan.other_priority, scan.other_object))
+      medium_overrides(order, entry.object, scan.other_order, scan.other_object) ||
+      (order == scan.other_order && entry.object == scan.other_object))
   {
     scan.has_other = true;
-    scan.other_priority = priority;
+    scan.other_order = order;
     scan.other_object = entry.object;
+    scan.other_index = index;
     scan.other_ior = medium_ior(kg, entry);
   }
 }
@@ -157,11 +201,14 @@ ccl_device_forceinline NestedDielectricHit nested_dielectric_scan_end(
     const bool backfacing)
 {
   NestedDielectricHit hit;
-  /* A medium of higher order around this surface replaces it. */
-  const bool overridden = scan.has_other && medium_overrides(scan.other_priority,
-                                                             scan.other_object,
-                                                             medium_priority(kg, shader),
-                                                             object);
+  /* A medium of higher order around this surface replaces it. Another medium of the same
+   * object does if the path entered it later, which it cannot have where it enters this one. */
+  const uint order = medium_order(kg, shader, object);
+  const bool overridden = scan.has_other &&
+                          ((scan.other_object == object && scan.other_order == order) ?
+                               (backfacing && scan.other_index > scan.self_index) :
+                               medium_overrides(
+                                   scan.other_order, scan.other_object, order, object));
   /* Surfaces inside the object itself, where a mesh intersects itself or instances of the list
    * got out of balance: only the outermost surface is a boundary of the medium. */
   const bool interior = backfacing ? (scan.self_count > 1) : (scan.self_count > 0);
@@ -178,13 +225,13 @@ ccl_device_inline NestedDielectricHit nested_dielectric_hit(KernelGlobals kg,
                                                             const int shader,
                                                             const bool backfacing)
 {
-  NestedDielectricScan scan = nested_dielectric_scan_begin();
+  NestedDielectricScan scan = nested_dielectric_scan_begin(kg, object);
   for (int i = 0;; i++) {
     const MediumStack entry = medium_stack_read<shadow>(state, i);
     if (entry.shader == SHADER_NONE) {
       break;
     }
-    nested_dielectric_scan_entry(kg, scan, entry, object);
+    nested_dielectric_scan_entry(kg, scan, entry, i, object, shader);
   }
   return nested_dielectric_scan_end(kg, scan, object, shader, backfacing);
 }
@@ -195,9 +242,9 @@ ccl_device_inline NestedDielectricHit nested_dielectric_hit(KernelGlobals kg,
                                                             const int shader,
                                                             const bool backfacing)
 {
-  NestedDielectricScan scan = nested_dielectric_scan_begin();
+  NestedDielectricScan scan = nested_dielectric_scan_begin(kg, object);
   for (int i = 0; i < list->size; i++) {
-    nested_dielectric_scan_entry(kg, scan, list->entry[i], object);
+    nested_dielectric_scan_entry(kg, scan, list->entry[i], i, object, shader);
   }
   return nested_dielectric_scan_end(kg, scan, object, shader, backfacing);
 }
@@ -209,16 +256,18 @@ ccl_device_inline bool medium_stack_top(KernelGlobals kg,
                                         ccl_private MediumStack *top)
 {
   bool found = false;
-  int top_priority = 0;
+  uint top_order = 0;
   for (int i = 0;; i++) {
     const MediumStack entry = medium_stack_read<shadow>(state, i);
     if (entry.shader == SHADER_NONE) {
       break;
     }
-    const int priority = medium_priority(kg, entry.shader);
-    if (!found || medium_overrides(priority, entry.object, top_priority, top->object)) {
+    const uint order = medium_order(kg, entry.shader, entry.object);
+    if (!found || medium_overrides(order, entry.object, top_order, top->object) ||
+        (order == top_order && entry.object == top->object))
+    {
       found = true;
-      top_priority = priority;
+      top_order = order;
       *top = entry;
     }
   }
@@ -239,6 +288,7 @@ ccl_device_inline void medium_stack_enter_exit(KernelGlobals kg,
   if (backfacing) {
     /* Remove the most recent instance, keeping the order of the others. A path which leaves a
      * medium it never entered has nothing to remove. */
+    const bool per_shader = medium_per_shader(kg, object);
     int last = -1;
     int size = 0;
     for (;; size++) {
@@ -246,7 +296,7 @@ ccl_device_inline void medium_stack_enter_exit(KernelGlobals kg,
       if (entry.shader == SHADER_NONE) {
         break;
       }
-      if (entry.object == object) {
+      if (medium_same(entry.object, entry.shader, object, shader, per_shader)) {
         last = size;
       }
     }
@@ -283,9 +333,10 @@ ccl_device_inline void medium_list_enter_exit(KernelGlobals kg,
                                               const float ior)
 {
   if (backfacing) {
+    const bool per_shader = medium_per_shader(kg, object);
     int last = -1;
     for (int i = 0; i < list->size; i++) {
-      if (list->entry[i].object == object) {
+      if (medium_same(list->entry[i].object, list->entry[i].shader, object, shader, per_shader)) {
         last = i;
       }
     }

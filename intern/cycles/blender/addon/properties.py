@@ -714,6 +714,18 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
+    use_auto_nested_dielectrics: BoolProperty(
+        name="Automatic Nested Dielectrics",
+        description=(
+            "Resolve closed refractive objects which overlap or contain each other automatically: "
+            "the object which encloses the smaller volume exists where they overlap, and "
+            "refraction between them uses the index of refraction of both. Materials with a "
+            "Nested Priority override this order. Open meshes and objects which overlap no other "
+            "refractive object are not affected"
+        ),
+        default=True,
+    )
+
     use_bidirectional_path_tracing: BoolProperty(
         name="Bidirectional Path Tracing",
         description="Trace light and camera subpaths and connect them with multiple importance sampling (CPU and Metal GPU)",
@@ -1495,9 +1507,11 @@ class CyclesMaterialSettings(bpy.types.PropertyGroup):
     nested_priority: IntProperty(
         name="Nested Priority",
         description=(
-            "Priority of the object as a nested dielectric. Where objects with a priority overlap, "
-            "only the one with the highest priority exists, and refraction between them uses the "
-            "index of refraction of both. 0 does not take part and is always an interface with air"
+            "Priority of the object as a nested dielectric. Where objects overlap, only the one "
+            "with the highest priority exists, and refraction between them uses the index of "
+            "refraction of both. Objects of the same priority are ordered automatically, the one "
+            "which encloses the smaller volume first. 0 only takes part with Automatic Nested "
+            "Dielectrics of the render settings, as a closed refractive object"
         ),
         min=0, max=1000,
         default=0,

@@ -517,6 +517,11 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     const bool prev_has_volume = geom->has_volume;
     geom->has_volume = false;
     geom->has_nested_priority = false;
+    if (geom->is_modified() && geom->nested_closed_volume_valid) {
+      /* The mesh may have been closed or opened, see ObjectManager::update_nested_media(). */
+      geom->nested_closed_volume_valid = false;
+      scene->object_manager->need_flags_update = true;
+    }
 
     update_attribute_realloc_flags(device_update_flags, geom->attributes);
 

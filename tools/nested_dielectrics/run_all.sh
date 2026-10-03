@@ -43,8 +43,8 @@ for path in files:
     finite = bool(np.isfinite(pixels).all())
     bad += not finite
     print('NESTED_STRESS %-24s mean %.5f %s' % (path.split('/')[-1], pixels.mean(), 'finite' if finite else 'NOT FINITE FAILED'))
-if len(files) != 5:
-    print('NESTED_STRESS %d of 5 scenes rendered FAILED' % len(files))
+if len(files) != 9:
+    print('NESTED_STRESS %d of 9 scenes rendered FAILED' % len(files))
     bad += 1
 sys.exit(1 if bad else 0)
 " 2>&1 | grep NESTED_STRESS | tee -a "$OUT/summary.txt"

@@ -1008,7 +1008,8 @@ enum ShaderRuntimeFlag {
 enum ShaderDataFlag {
   /* Surface is proven to contain only delta scattering, with no continuous evaluation. */
   SD_HAS_ONLY_DELTA_SURFACE = (1 << 0),
-  /* Material takes part in nested dielectrics, with a priority stored in __shaders. */
+  /* Material takes part in nested dielectrics on the objects that are media, with a priority
+   * stored in __shaders. Cleared in ShaderData for any other object. */
   SD_HAS_NESTED_PRIORITY = (1 << 1),
   /* If the shader is wavelength-dependent. */
   SD_REQUIRES_WAVELENGTH = (1 << 12),
@@ -1086,8 +1087,12 @@ enum ShaderDataObjectFlag : uint {
   SD_OBJECT_HAS_CORNER_NORMALS = (1u << 12),
   SD_OBJECT_COHERENT_DETECTOR = (1u << 13),
   SD_OBJECT_COHERENT_GLASS_POINT = (1u << 14),
-  /* Object has a material with a nested dielectric priority. */
+  /* Object is a nested dielectric medium: it has a material with a nested priority, or it takes
+   * part automatically. Its nesting rank is in the bits from SD_OBJECT_NESTED_RANK_SHIFT. */
   SD_OBJECT_HAS_NESTED_PRIORITY = (1u << 15),
+  /* Every material of the object is a medium of its own, as each one is a closed surface.
+   * Otherwise the object is one medium, whatever materials its surface has. */
+  SD_OBJECT_NESTED_PER_SHADER = (1u << 16),
 
   /* object is using caustics */
   SD_OBJECT_CAUSTICS = (SD_OBJECT_CAUSTICS_CASTER | SD_OBJECT_CAUSTICS_RECEIVER),
@@ -1100,8 +1105,16 @@ enum ShaderDataObjectFlag : uint {
                      SD_OBJECT_HAS_VOLUME_ATTRIBUTES | SD_OBJECT_CAUSTICS |
                      SD_OBJECT_HAS_VOLUME_MOTION | SD_OBJECT_HAS_CORNER_NORMALS |
                      SD_OBJECT_COHERENT_DETECTOR | SD_OBJECT_COHERENT_GLASS_POINT |
-                     SD_OBJECT_HAS_NESTED_PRIORITY)
+                     SD_OBJECT_HAS_NESTED_PRIORITY | SD_OBJECT_NESTED_PER_SHADER)
 };
+
+/* The bits of the object flags above the flags are the nesting rank of a nested dielectric medium, which
+ * orders media of the same priority: the object that encloses the smaller volume has the higher
+ * rank. */
+#define SD_OBJECT_NESTED_RANK_SHIFT 17
+#define SD_OBJECT_NESTED_RANK_MAX 0x7FFFu
+/* Priorities share a 32 bit key with the rank. */
+#define NESTED_PRIORITY_MAX 0xFFFF
 
 struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
   /* position */
