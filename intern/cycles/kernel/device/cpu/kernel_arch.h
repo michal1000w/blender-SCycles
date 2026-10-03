@@ -45,6 +45,8 @@ void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_light_generate)(
     const int batch_samples);
 void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_cache_order)(
     const ThreadKernelGlobalsCPU *ccl_restrict kg);
+int KERNEL_FUNCTION_FULL_NAME(integrator_vcm_map_build)(
+    const ThreadKernelGlobalsCPU *ccl_restrict kg);
 void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_sensor_connect)(
     const ThreadKernelGlobalsCPU *ccl_restrict kg,
     IntegratorStateCPU *state,

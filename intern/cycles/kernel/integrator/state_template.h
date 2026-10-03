@@ -53,6 +53,7 @@ KERNEL_STRUCT_MEMBER(path, float, mis_ray_pdf, KERNEL_FEATURE_PATH_TRACING)
 /* Logarithms of recursive MIS terms; negative infinity denotes an empty sum. */
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vcm, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vc, KERNEL_FEATURE_BDPT)
+KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vm, KERNEL_FEATURE_BDPT)
 /* Completed surface stages, retained while a reciprocal shader waits for image tiles. */
 KERNEL_STRUCT_MEMBER(path, uint, bdpt_surface_stage, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, int, bdpt_volume_bounce, KERNEL_FEATURE_BDPT)

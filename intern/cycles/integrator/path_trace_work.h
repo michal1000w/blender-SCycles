@@ -22,14 +22,37 @@ CCL_NAMESPACE_BEGIN
 
 class BufferParams;
 class Device;
+struct KernelIntegrator;
 class DeviceScene;
 class Film;
 class PathTraceDisplay;
 class RenderBuffers;
 
-/* Whether bidirectional path tracing is active for the scene's camera. Other cameras render with
- * the regular path tracer, matching bdpt_camera_supported() in the kernel. */
+/* Whether the bidirectional light pass is active for the scene's camera. Other cameras render
+ * with the regular path tracer, matching bdpt_recursion_supported() in the kernel. */
 bool path_trace_use_bidirectional(const DeviceScene *device_scene);
+
+/* Vertex merging, shared by the CPU and GPU light passes. */
+
+/* Upper bound of the memory of one merge map. */
+constexpr size_t VERTEX_MERGING_MAX_MEMORY = size_t(384) * 1024 * 1024;
+
+/* Vertices that one light subpath can keep for merging: one per bounce, and a few more for the
+ * surfaces it passes with a transparent closure after storing a vertex. */
+uint vertex_merging_path_slots(const KernelIntegrator &integrator);
+
+struct VertexMergingRadius {
+  /* Merge radius of the map built for the sample `iteration`. */
+  float radius;
+  /* Number of light subpaths that store their vertices. */
+  uint light_paths;
+  /* Subpaths times the area of the merge disk: the density of merging relative to a connection
+   * in the MIS weights, see vcm_mis_vm_factor() in the kernel. */
+  float eta;
+};
+VertexMergingRadius vertex_merging_radius(const KernelIntegrator &integrator,
+                                          const int iteration,
+                                          const uint light_paths);
 
 class PathTraceWork {
  public:

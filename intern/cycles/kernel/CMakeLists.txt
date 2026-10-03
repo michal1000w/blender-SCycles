@@ -220,6 +220,7 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/bidirectional.h
   integrator/bidirectional_transport.h
   integrator/bidirectional_volume.h
+  integrator/vertex_merging.h
   integrator/shade_background.h
   integrator/shade_light.h
   integrator/shade_shadow.h

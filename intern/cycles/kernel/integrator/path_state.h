@@ -66,9 +66,13 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   if (kernel_data.integrator.use_bidirectional_path_tracing) {
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 0;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_volume_bounce) = 0;
-    INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_VOLUME_SENSOR;
+    /* Light subpaths are connected to the sensor through media only with connections. */
+    if (kernel_data.integrator.bdpt_use_connections) {
+      INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_BDPT_VOLUME_SENSOR;
+    }
   }
   INTEGRATOR_STATE_WRITE(state, path, min_ray_pdf) = FLT_MAX;
   INTEGRATOR_STATE_WRITE(state, path, continuation_probability) = 1.0f;

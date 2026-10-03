@@ -327,6 +327,40 @@ void PathTraceWorkCPU::alloc_bidirectional_path_tracing()
   transport_state_.bdpt_cache_start_sample = 0;
   transport_state_.bdpt_light_path_count = light_paths;
   transport_state_.bdpt_light_path_sample_ratio = float(light_paths);
+
+  if (integrator.use_vertex_merging) {
+    alloc_vertex_merging(light_paths);
+  }
+}
+
+void PathTraceWorkCPU::alloc_vertex_merging(const uint light_paths)
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+
+  /* Every subpath owns the slots of the vertices it can store. Bound the memory of the map by
+   * the number of subpaths that store theirs: merging with fewer is noisier, not darker. */
+  const uint path_slots = vertex_merging_path_slots(integrator);
+  const size_t slot_size = sizeof(KernelPhoton) + sizeof(KernelVCMVertex) + sizeof(uint8_t);
+  vcm_path_capacity_ = uint(min(
+      size_t(light_paths), max(VERTEX_MERGING_MAX_MEMORY / (slot_size * path_slots), size_t(1))));
+  const uint capacity = vcm_path_capacity_ * path_slots;
+  const uint hash_size = max(2048u, next_power_of_two(capacity / 2));
+
+  photons_.resize(capacity);
+  photon_valid_.resize(capacity);
+  vcm_vertices_.resize(capacity);
+  photon_hash_.resize(hash_size);
+  std::fill(photon_valid_.begin(), photon_valid_.end(), uint8_t(0));
+
+  transport_state_.photons = photons_.data();
+  transport_state_.photon_hash = photon_hash_.data();
+  transport_state_.photon_stored = &photon_stored_;
+  transport_state_.photon_valid = photon_valid_.data();
+  transport_state_.vcm_vertices = vcm_vertices_.data();
+  transport_state_.photon_hash_size = hash_size;
+  transport_state_.photon_capacity = capacity;
+  transport_state_.vcm_path_slots = path_slots;
+  transport_state_.vcm_cache_slots = capacity;
 }
 
 void PathTraceWorkCPU::update_bidirectional_light_cache(const int start_sample,
@@ -358,6 +392,16 @@ void PathTraceWorkCPU::update_bidirectional_light_cache(const int start_sample,
   transport_state_.bdpt_buffer_offset = effective_buffer_params_.offset;
   transport_state_.bdpt_buffer_stride = effective_buffer_params_.stride;
 
+  if (integrator.use_vertex_merging && transport_state_.photon_capacity != 0) {
+    const VertexMergingRadius merging = vertex_merging_radius(
+        integrator, iteration, min(paths_per_cache, vcm_path_capacity_));
+    transport_state_.photon_iteration = iteration;
+    transport_state_.photon_radius = merging.radius;
+    transport_state_.vcm_light_path_count = merging.light_paths;
+    transport_state_.vcm_eta = merging.eta;
+    std::fill(photon_hash_.begin(), photon_hash_.end(), 0u);
+  }
+
   const int num_light_paths = int(paths_per_cache);
   std::fill(bdpt_vertex_count_.begin(), bdpt_vertex_count_.end(), 0u);
   parallel_for_light_paths(
@@ -367,6 +411,17 @@ void PathTraceWorkCPU::update_bidirectional_light_cache(const int start_sample,
             kg, state, light_path_index, iteration, batch_samples);
       });
   if (is_cancel_requested()) {
+    return;
+  }
+
+  if (transport_state_.vcm_eta > 0.0f) {
+    photon_stored_ = uint(kernels_.integrator_vcm_map_build(&kernel_thread_globals_->front()));
+    LOG_DEBUG << "Vertex merging: " << photon_stored_ << " light vertices of "
+              << transport_state_.vcm_light_path_count << " subpaths at radius "
+              << transport_state_.photon_radius;
+  }
+  if (!integrator.bdpt_use_connections) {
+    /* The light subpaths only provide the vertices to merge with. */
     return;
   }
 

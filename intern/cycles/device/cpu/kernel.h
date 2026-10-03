@@ -40,6 +40,7 @@ class CPUKernels {
                              const int iteration)>
       integrator_photon_emit;
   CPUKernelFunction<int (*)(const ThreadKernelGlobalsCPU *kg)> integrator_photon_map_build;
+  CPUKernelFunction<int (*)(const ThreadKernelGlobalsCPU *kg)> integrator_vcm_map_build;
   CPUKernelFunction<void (*)(const ThreadKernelGlobalsCPU *kg,
                              IntegratorStateCPU *state,
                              const int light_path_index,

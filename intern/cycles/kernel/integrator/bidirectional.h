@@ -59,10 +59,59 @@ ccl_device_inline bool bdpt_camera_supported(KernelGlobals kg)
           kernel_data.cam.aperturesize == 0.0f && kernel_data.cam.num_motion_steps == 0);
 }
 
+/* Whether light subpaths are connected to camera vertices and to the sensor. Without, the
+ * bidirectional pass only provides the vertices that camera paths merge with. */
+ccl_device_inline bool bdpt_connections_enabled(KernelGlobals kg)
+{
+  return kernel_data.integrator.bdpt_use_connections && bdpt_camera_supported(kg);
+}
+
+/* Vertex merging: camera vertices gather the light subpath vertices around them. */
+ccl_device_inline bool vcm_merging_enabled(KernelGlobals kg)
+{
+  return kernel_data.integrator.use_vertex_merging && kernel_integrator_state.vcm_eta > 0.0f;
+}
+
+/* Merging does not need to invert the camera, so its recursive MIS runs for every camera. */
+ccl_device_inline bool bdpt_recursion_supported(KernelGlobals kg)
+{
+  return bdpt_camera_supported(kg) || kernel_data.integrator.use_vertex_merging;
+}
+
+/* MIS factors of merging relative to a connection and the reverse: eta is the number of light
+ * subpaths a camera vertex merges with times the area of the merge disk. Empty sums when merging
+ * is off, which leaves every weight as it is without. */
+ccl_device_inline BDPTMISWeight vcm_mis_vm_factor(KernelGlobals kg)
+{
+  return vcm_merging_enabled(kg) ? BDPTMISWeight(kernel_integrator_state.vcm_eta) :
+                                   BDPTMISWeight(0.0f);
+}
+
+ccl_device_inline BDPTMISWeight vcm_mis_vc_factor(KernelGlobals kg)
+{
+  return vcm_merging_enabled(kg) ? BDPTMISWeight(1.0f) / kernel_integrator_state.vcm_eta :
+                                   BDPTMISWeight(0.0f);
+}
+
+/* Diagnostic of the merging estimator on its own (CYCLES_VCM_MERGE_ONLY): every path is sampled
+ * by merging at its first vertex from the camera that is not a delta event, with unit weight.
+ * Other strategies only keep the paths without such a vertex. The result is progressive photon
+ * mapping, which converges to the same image when the estimator is normalized correctly. */
+ccl_device_inline bool vcm_merge_only(KernelGlobals kg)
+{
+  return kernel_data.integrator.vcm_merge_only && vcm_merging_enabled(kg);
+}
+
+/* Whether the camera path has not scattered at anything but delta events yet. */
+ccl_device_inline bool vcm_camera_path_is_specular(ConstIntegratorState state)
+{
+  return INTEGRATOR_STATE(state, path, bdpt_d_vm) == -INFINITY;
+}
+
 ccl_device_inline bool bdpt_enabled_for_surface_path(KernelGlobals kg, ConstIntegratorState state)
 {
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-  return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_camera_supported(kg) &&
+  return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_recursion_supported(kg) &&
          !(path_flag & (PATH_RAY_SHADOW_CATCHER_HIT | PATH_RAY_SHADOW_CATCHER_PASS |
                         PATH_RAY_BDPT_UNSUPPORTED));
 }
@@ -77,7 +126,7 @@ ccl_device_inline bool bdpt_enabled_for_emission(KernelGlobals kg, ConstIntegrat
     return true;
   }
   const uint32_t flag = INTEGRATOR_STATE(state, path, flag);
-  return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_camera_supported(kg) &&
+  return kernel_data.integrator.use_bidirectional_path_tracing && bdpt_recursion_supported(kg) &&
          !(flag & (PATH_RAY_SHADOW_CATCHER_HIT | PATH_RAY_SHADOW_CATCHER_PASS)) &&
          (flag & PATH_RAY_BDPT_UNSUPPORTED) && INTEGRATOR_STATE(state, path, bounce) == 1 &&
          INTEGRATOR_STATE(state, path, volume_bounce) == 1;
@@ -344,7 +393,8 @@ ccl_device_inline float bdpt_spot_emission_direction_pdf(
 /* A delta event removes its local NEE alternative (d_vcm = 0), but earlier
  * connectible vertices can retain light-path alternatives in d_vc. Pure delta
  * camera prefixes have both terms zero and still receive unit weight. */
-ccl_device_inline_transport float bdpt_emission_mis_weight_infinite(IntegratorState state,
+ccl_device_inline_transport float bdpt_emission_mis_weight_infinite(KernelGlobals kg,
+                                                                    IntegratorState state,
                                                                     const float direct_pdf_w,
                                                                     const float position_pdf,
                                                                     const float selection_ratio)
@@ -352,6 +402,9 @@ ccl_device_inline_transport float bdpt_emission_mis_weight_infinite(IntegratorSt
   if (INTEGRATOR_STATE(state, path, bounce) == 0)
   {
     return 1.0f;
+  }
+  if (vcm_merge_only(kg) && INTEGRATOR_STATE(state, path, volume_bounce) == 0) {
+    return vcm_camera_path_is_specular(state) ? 1.0f : 0.0f;
   }
   const float emission_pdf_w = direct_pdf_w * position_pdf;
   const BDPTMISWeight w_camera =
@@ -368,6 +421,9 @@ ccl_device_inline_transport float bdpt_emission_mis_weight_surface(
   if (INTEGRATOR_STATE(state, path, bounce) == 0)
   {
     return 1.0f;
+  }
+  if (vcm_merge_only(kg) && INTEGRATOR_STATE(state, path, volume_bounce) == 0) {
+    return vcm_camera_path_is_specular(state) ? 1.0f : 0.0f;
   }
 
   const bool front = (sd->shader_flag & SD_MIS_FRONT) != 0;
@@ -412,6 +468,9 @@ ccl_device_inline_transport float bdpt_emission_mis_weight_lamp(
   if (INTEGRATOR_STATE(state, path, bounce) == 0)
   {
     return 1.0f;
+  }
+  if (vcm_merge_only(kg) && INTEGRATOR_STATE(state, path, volume_bounce) == 0) {
+    return vcm_camera_path_is_specular(state) ? 1.0f : 0.0f;
   }
 
   float area = 0.0f;
@@ -530,6 +589,22 @@ ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
   return pdf;
 }
 
+/* Strategies that reach the current camera vertex from the light side, relative to the density
+ * of the light subpath that ends at it: merging at the vertex, a connection to it and, through
+ * dVC and the reverse density of the vertex, everything further along the camera path. */
+ccl_device_inline_transport BDPTMISWeight bdpt_camera_vertex_alternatives(KernelGlobals kg,
+                                                                          ConstIntegratorState state,
+                                                                          const float reverse_pdf)
+{
+  BDPTMISWeight alternatives = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
+                               reverse_pdf;
+  if (bdpt_connections_enabled(kg)) {
+    alternatives = alternatives +
+                   BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm));
+  }
+  return alternatives + vcm_mis_vm_factor(kg);
+}
+
 /* Balance-heuristic weight for the next-event strategy in the presence of light tracing and
  * vertex connections. This is Georgiev's recursive form of Veach MIS (SmallVCM eqs. 44-45).
  * The current implementation evaluates the exact emission density for triangle and area lights;
@@ -541,6 +616,9 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
                                                       const ccl_private LightSample *ls,
                                                       const float bsdf_pdf)
 {
+  if (vcm_merge_only(kg)) {
+    return 0.0f;
+  }
   const float direct_pdf = bdpt_safe_pdf(ls->pdf);
   BDPTMISWeight w_light = BDPTMISWeight(bsdf_pdf) / direct_pdf;
 
@@ -577,9 +655,7 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
     const float emission_selection_ratio = kernel_data.integrator.distribution_pdf_lights /
                                            bdpt_safe_pdf(ls->pdf_selection);
     w_camera = BDPTMISWeight(emission_selection_ratio) * position_pdf * cos_camera *
-               (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
-                BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
-                    reverse_pdf);
+               bdpt_camera_vertex_alternatives(kg, state, reverse_pdf);
   }
   else if (ls->type == LIGHT_POINT || ls->type == LIGHT_SPOT) {
     const ccl_global KernelLight *klight = &kernel_data_fetch(lights, ls->prim);
@@ -603,9 +679,7 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
       const float reverse_pdf = bdpt_reverse_pdf(kg, state, sd, ls->D);
       const float cos_camera = max(fabsf(dot(sd->Ng, ls->D)), 1.0e-8f);
       w_camera = BDPTMISWeight(emission_pdf_w) * cos_camera / direct_pdf *
-                 (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
-                  BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
-                      reverse_pdf);
+                 bdpt_camera_vertex_alternatives(kg, state, reverse_pdf);
     }
   }
 
@@ -614,10 +688,7 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
     const float cos_camera = max(fabsf(dot(sd->Ng, ls->D)), 1.0e-8f);
     const BDPTMISWeight emission_to_direct = BDPTMISWeight(emission_position_pdf) *
                                              emission_side_pdf * cos_camera / M_PI_F / direct_pdf;
-    w_camera = emission_to_direct *
-               (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
-                BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) *
-                    reverse_pdf);
+    w_camera = emission_to_direct * bdpt_camera_vertex_alternatives(kg, state, reverse_pdf);
   }
 
   return (BDPTMISWeight(1.0f) + w_light + w_camera).inverse();
@@ -655,7 +726,12 @@ ccl_device_inline_transport void bdpt_recursive_mis_before_measure_conversion(
   BDPTMISWeight d_vcm = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm));
   BDPTMISWeight d_vc = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
 
-  if (INTEGRATOR_STATE(state, path, bounce) == 0 && d_vcm == 0.0f) {
+  if (INTEGRATOR_STATE(state, path, bounce) == 0 && !bdpt_connections_enabled(kg)) {
+    /* No light subpath is connected to the sensor: nothing competes for the first vertex. */
+    d_vcm = 0.0f;
+    d_vc = 0.0f;
+  }
+  else if (INTEGRATOR_STATE(state, path, bounce) == 0 && d_vcm == 0.0f) {
     float inverse_camera_pdf_w = 0.0f;
     if (kernel_data.cam.type == CAMERA_PERSPECTIVE) {
       Transform camera_to_world = kernel_data.cam.cameratoworld;
@@ -766,6 +842,18 @@ ccl_device_inline_transport float bdpt_volume_nee_mis_weight(
   BDPTMISWeight d_vc;
   bdpt_recursive_mis_before_measure_conversion(kg, state, sd, &d_vcm, &d_vc);
   d_vcm *= sqr(max(sd->ray_length, 1.0e-10f));
+  if (kernel_data.integrator.use_vertex_merging && INTEGRATOR_STATE(state, path, bounce) != 0) {
+    /* A light subpath ends at its first medium vertex and surface vertices are not connected
+     * to medium vertices: after a surface, only the camera path samples a path through this
+     * vertex. Counting the strategies of the surface recursion here loses their share.
+     * Bidirectional path tracing without merging keeps its weights as they were. */
+    d_vcm = 0.0f;
+    d_vc = 0.0f;
+  }
+  else if (!bdpt_connections_enabled(kg)) {
+    /* No light subpath is connected to the sensor. */
+    d_vcm = 0.0f;
+  }
   sd->P = original_P;
   sd->ray_length = original_ray_length;
 
@@ -845,6 +933,9 @@ ccl_device_inline_transport void bdpt_recursive_mis_after_hit(KernelGlobals kg,
 
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) =
+      (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vm)) / cos_fixed)
+          .encoded();
 }
 
 ccl_device_inline_transport void bdpt_recursive_mis_undo_transparent_hit(
@@ -857,9 +948,14 @@ ccl_device_inline_transport void bdpt_recursive_mis_undo_transparent_hit(
   if (INTEGRATOR_STATE(state, path, bounce) == 0) {
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = -INFINITY;
   }
   else {
     const float cosine = max(fabsf(dot(sd->Ng, sd->wi)), 1.0e-8f);
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(
+                                                          state, path, bdpt_d_vm)) *
+                                                      BDPTMISWeight(cosine))
+                                                         .encoded();
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) =
         (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) *
          (BDPTMISWeight(cosine) / sqr(max(sd->ray_length, 1.0e-10f))))
@@ -871,32 +967,37 @@ ccl_device_inline_transport void bdpt_recursive_mis_undo_transparent_hit(
   }
 }
 
-ccl_device_inline_transport void bdpt_recursive_mis_after_scatter(IntegratorState state,
+/* `mergeable` is whether a light subpath vertex can be merged with the vertex that scatters: not
+ * in a medium. */
+ccl_device_inline_transport void bdpt_recursive_mis_after_scatter(KernelGlobals kg,
+                                                                  IntegratorState state,
                                                                   const int label,
                                                                   const float cos_out,
                                                                   const float forward_pdf,
-                                                                  const float reverse_pdf)
+                                                                  const float reverse_pdf,
+                                                                  const bool mergeable = true)
 {
-  BDPTMISWeight d_vcm = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm));
-  BDPTMISWeight d_vc = BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc));
-
+  const float3 previous = make_float3(INTEGRATOR_STATE(state, path, bdpt_d_vcm),
+                                      INTEGRATOR_STATE(state, path, bdpt_d_vc),
+                                      INTEGRATOR_STATE(state, path, bdpt_d_vm));
+  float3 next;
   if (label & LABEL_SINGULAR) {
-    const float2 next = BDPTMISWeight::Log::scatter_delta(
-        make_float2(d_vcm.encoded(), d_vc.encoded()), cos_out, forward_pdf, reverse_pdf);
-    d_vcm = BDPTMISWeight::from_encoded(next.x);
-    d_vc = BDPTMISWeight::from_encoded(next.y);
+    next = BDPTMISWeight::Log::scatter_delta_vcm(previous, cos_out, forward_pdf, reverse_pdf);
   }
   else {
-    const float2 next = BDPTMISWeight::Log::scatter(make_float2(d_vcm.encoded(), d_vc.encoded()),
-                                                    cos_out,
-                                                    bdpt_safe_pdf(forward_pdf),
-                                                    reverse_pdf);
-    d_vcm = BDPTMISWeight::from_encoded(next.x);
-    d_vc = BDPTMISWeight::from_encoded(next.y);
+    /* A camera vertex is sampled from the light side only by a connection. */
+    next = BDPTMISWeight::Log::scatter_vcm(previous,
+                                           cos_out,
+                                           bdpt_safe_pdf(forward_pdf),
+                                           reverse_pdf,
+                                           bdpt_connections_enabled(kg) ? 1.0f : 0.0f,
+                                           mergeable ? vcm_mis_vm_factor(kg).encoded() : -INFINITY,
+                                           vcm_mis_vc_factor(kg).encoded());
   }
 
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
-  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = next.x;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = next.y;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = next.z;
 }
 
 /* A cached vertex on a nested dielectric keeps the index of refraction of the medium around it,
@@ -1046,6 +1147,113 @@ ccl_device_inline void bdpt_reservoir_store_light_vertex(KernelGlobals kg,
         stored_vertex->path_length & 0xffu, *selection_count, stored_vertex->path_length >> 20u);
   }
 }
+
+/* Photon map slot of the `stored`-th vertex that a light subpath keeps for merging. */
+ccl_device_inline uint vcm_vertex_slot(KernelGlobals kg,
+                                       const uint cache,
+                                       const uint light_path_index,
+                                       const uint stored)
+{
+  return cache * kernel_integrator_state.vcm_cache_slots +
+         light_path_index * kernel_integrator_state.vcm_path_slots + stored;
+}
+
+/* Hash key of a merge vertex: the caches of a batch share one grid. */
+ccl_device_inline uint vcm_hash_bucket(KernelGlobals kg,
+                                       const int3 cell,
+                                       const float time,
+                                       const uint cache)
+{
+  return photon_hash_cell(cell,
+                          photon_time_bin(kg, time) + int(cache) * 8,
+                          kernel_integrator_state.photon_hash_size);
+}
+
+/* Keep a light subpath vertex for merging: camera vertices gather the records around them. The
+ * subpath owns a fixed range of slots, so that no allocation is shared between paths and the map
+ * of the CPU does not depend on thread scheduling. */
+ccl_device_inline void vcm_store_light_vertex(KernelGlobals kg,
+                                              const ccl_private ShaderData *sd,
+                                              const ccl_private Ray *ray,
+                                              const Spectrum throughput,
+                                              const int emitter_object,
+                                              const int emitter_distribution,
+                                              const BDPTMISWeight d_vcm,
+                                              const BDPTMISWeight d_vc,
+                                              const BDPTMISWeight d_vm,
+                                              const uint path_length,
+                                              const uint flag,
+                                              const float wavelength_rand,
+                                              const uint cache,
+                                              const uint light_path_index,
+                                              ccl_private uint *stored)
+{
+  if (light_path_index >= kernel_integrator_state.vcm_light_path_count ||
+      *stored >= kernel_integrator_state.vcm_path_slots)
+  {
+    return;
+  }
+  const uint slot = vcm_vertex_slot(kg, cache, light_path_index, *stored);
+  if (slot >= kernel_integrator_state.photon_capacity) {
+    return;
+  }
+  *stored += 1u;
+
+  ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[slot];
+  photon->P = sd->P;
+  photon->power = throughput;
+  photon->emitter_object = emitter_object;
+  photon->direction = packed_normal(ray->D).value;
+  photon->normal = packed_normal(sd->Ng).value;
+  photon->time_wavelength = photon_pack_time_wavelength(
+      ray->time, wavelength_rand, (flag & PATH_RAY_SPECTRAL) != 0u);
+  photon->receiver_object = sd->object;
+
+  ccl_global KernelVCMVertex *merge_vertex = &kernel_integrator_state.vcm_vertices[slot];
+  merge_vertex->d_vcm = d_vcm.encoded();
+  merge_vertex->d_vc = d_vc.encoded();
+  merge_vertex->d_vm = d_vm.encoded();
+  merge_vertex->path_length = path_length;
+  merge_vertex->emitter_P = ray->P;
+  merge_vertex->emitter_distribution = emitter_distribution;
+
+#ifdef __KERNEL_GPU__
+  const uint bucket = vcm_hash_bucket(
+      kg, photon_cell(sd->P, kernel_integrator_state.photon_radius), ray->time, cache);
+  photon->next = atomic_exchange_uint32(&kernel_integrator_state.photon_hash[bucket], slot + 1u);
+#else
+  /* The host links the hash chains in slot order, see integrator_vcm_map_build(). */
+  photon->next = 0u;
+  kernel_integrator_state.photon_valid[slot] = 1;
+#endif
+}
+
+#ifndef __KERNEL_GPU__
+/* Link the merge vertices of all light subpaths into the hash chains, in slot order, and return
+ * their number. The hash heads must be zero. */
+ccl_device uint integrator_vcm_map_build(KernelGlobals kg)
+{
+  uint stored = 0;
+  const uint slots = min(kernel_integrator_state.photon_capacity,
+                         kernel_integrator_state.bdpt_cache_count *
+                             kernel_integrator_state.vcm_cache_slots);
+  for (uint slot = 0; slot < slots; slot++) {
+    if (!kernel_integrator_state.photon_valid[slot]) {
+      continue;
+    }
+    ccl_global KernelPhoton *photon = &kernel_integrator_state.photons[slot];
+    const uint bucket = vcm_hash_bucket(
+        kg,
+        photon_cell(photon->P, kernel_integrator_state.photon_radius),
+        photon_unpack_time(photon->time_wavelength),
+        slot / kernel_integrator_state.vcm_cache_slots);
+    photon->next = kernel_integrator_state.photon_hash[bucket];
+    kernel_integrator_state.photon_hash[bucket] = slot + 1u;
+    stored++;
+  }
+  return stored;
+}
+#endif
 
 /* Reconstruct a cached light vertex. Keeping this in one helper ensures the cache connection and
  * the light-tracing sensor connection evaluate exactly the same Cycles shader closures. */
@@ -1870,16 +2078,30 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
                                  light_sd->object,
                                  volume_vertex,
                                  selection_dt) : 1.0f;
+  /* A surface vertex can also be merged with the camera vertex next to it. */
   const BDPTMISWeight w_light = (BDPTMISWeight(camera_pdf_area) / light_path_sample_ratio) *
                                 (BDPTMISWeight::from_encoded(light_vertex->d_vcm) *
                                      selection_ratio +
-                                 BDPTMISWeight::from_encoded(light_vertex->d_vc) * reverse_pdf);
+                                 BDPTMISWeight::from_encoded(light_vertex->d_vc) * reverse_pdf +
+                                 (volume_vertex ? BDPTMISWeight(0.0f) : vcm_mis_vm_factor(kg)));
   /* A refracted medium sensor connection replaces the matching camera strategy.
    * Its prefix is replayed at camera medium vertices before suppressing anything.
    * Ordinary straight sensor connections retain their existing MIS partition. */
-  const float mis_weight = (volume_vertex && manifold_connection) ?
-                               1.0f :
-                               (BDPTMISWeight(1.0f) + w_light).inverse();
+  float mis_weight = (volume_vertex && manifold_connection) ?
+                         1.0f :
+                         (BDPTMISWeight(1.0f) + w_light).inverse();
+  if (kernel_data.integrator.use_vertex_merging && volume_vertex && !manifold_connection &&
+      bdpt_vertex_path_length(light_vertex) > 2u)
+  {
+    /* The camera path leaves the recursion at its first medium vertex and samples the rest of
+     * such a path with the weights of the regular path tracer, which sum to one. The light
+     * subpath only adds what that cannot sample: a delta emitter behind a delta event. Without
+     * merging the weight stays as it was. */
+    if (light_vertex->u != 0.0f) {
+      return;
+    }
+    mis_weight = 1.0f;
+  }
 
   /* Transpose the reciprocal camera evaluation in geometric projected-area measure.
    * One cached map serves a camera batch, so its splat represents every sample in that batch. */
@@ -1997,8 +2219,21 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   const uint cache = storage_path_index / paths_per_cache;
   const uint light_path_index = storage_path_index % paths_per_cache;
   const uint iteration = start_iteration + cache;
+  const bool use_connections = bdpt_connections_enabled(kg);
+  const bool use_merging = vcm_merging_enabled(kg);
   kernel_integrator_state.bdpt_vertex_indices[storage_path_index] = ~0u;
-  if (!bdpt_camera_supported(kg)) {
+#ifndef __KERNEL_GPU__
+  if (use_merging && light_path_index < kernel_integrator_state.vcm_light_path_count) {
+    /* Forget the vertices that the previous map had in the slots of this subpath. */
+    for (uint i = 0; i < kernel_integrator_state.vcm_path_slots; i++) {
+      const uint slot = vcm_vertex_slot(kg, cache, light_path_index, i);
+      if (slot < kernel_integrator_state.photon_capacity) {
+        kernel_integrator_state.photon_valid[slot] = 0;
+      }
+    }
+  }
+#endif
+  if (!use_connections && !use_merging) {
     return;
   }
   uint rng = lcg_init(
@@ -2015,6 +2250,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 #endif
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = 0.0f;
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = -INFINITY;
 
   Ray ray ccl_optional_struct_init;
   Spectrum throughput;
@@ -2071,8 +2307,14 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                            0.0f :
                            BDPTMISWeight(is_finite_emitter ? emission_cosine : 1.0f) /
                                bdpt_safe_pdf(emission_pdf);
+  /* Relative to merging at the first vertex: the camera path that reaches the emitter. */
+  BDPTMISWeight d_vm = d_vc * vcm_mis_vc_factor(kg);
+  const float vm_factor = vcm_mis_vm_factor(kg).encoded();
+  const float vc_factor = vcm_mis_vc_factor(kg).encoded();
+  uint vcm_stored = 0u;
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
+  INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = d_vm.encoded();
 
 #ifdef __VOLUME__
   if (kernel_data.integrator.use_volumes || kernel_data.integrator.use_nested_dielectrics) {
@@ -2093,6 +2335,14 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       light_path_index, iteration, uint(kernel_data.integrator.seed) ^ 0x72657376u));
   uint reservoir_slot = UINT_MAX;
   uint selection_count = 0u;
+  /* Whether a camera path samples the paths of this subpath by itself: it reaches the emitter,
+   * or next event estimation connects to it from the first vertex. See the sensor connection of
+   * medium vertices. */
+  bool camera_samples_subpath = !is_delta_emitter &&
+                                (emitter_distribution < 0 ||
+                                 kernel_data_fetch(light_distribution, emitter_distribution).prim >=
+                                     0 ||
+                                 (emitter_shader_flags & SHADER_USE_MIS));
   for (int bounce = 0; bounce < kernel_data.integrator.bdpt_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
@@ -2129,7 +2379,10 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
          * immediately below because repeated free-flight strategy densities are not represented
          * by the compact recursion; camera paths retain full multiple scattering after their
          * first collision. */
-        bdpt_reservoir_store_light_vertex(kg,
+        /* A medium vertex has no texture coordinates: keep the flag in their place. */
+        volume_sd.u = camera_samples_subpath ? 1.0f : 0.0f;
+        if (use_connections) {
+          bdpt_reservoir_store_light_vertex(kg,
                                           &volume_sd,
                                           &ray,
                                           throughput,
@@ -2149,6 +2402,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                           &reservoir_slot,
                                           &selection_count,
                                           storage_path_index);
+        }
 
         return;
       }
@@ -2238,6 +2492,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 
     const BDPTMISWeight d_vcm_before_hit = d_vcm;
     const BDPTMISWeight d_vc_before_hit = d_vc;
+    const BDPTMISWeight d_vm_before_hit = d_vm;
     const float cos_fixed = max(fabsf(dot(sd.Ng, sd.wi)), 1.0e-8f);
     if (bounce == 0 && !is_finite_emitter) {
       /* Infinite emitters sample a launch disk perpendicular to the ray. Its position density is
@@ -2249,8 +2504,29 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       d_vcm = d_vcm * sqr(max(sd.ray_length, 1.0e-10f)) / cos_fixed;
     }
     d_vc /= cos_fixed;
+    d_vm /= cos_fixed;
 
-    if ((sd.runtime_flag & SR_BSDF_HAS_EVAL) &&
+    if (use_merging && (sd.runtime_flag & SR_BSDF_HAS_EVAL) &&
+        !(sd.object_flag & SD_OBJECT_SHADOW_CATCHER))
+    {
+      vcm_store_light_vertex(kg,
+                             &sd,
+                             &ray,
+                             throughput,
+                             emitter_object,
+                             emitter_distribution,
+                             d_vcm,
+                             d_vc,
+                             d_vm,
+                             uint(bounce + 2),
+                             INTEGRATOR_STATE(state, path, flag),
+                             light_wavelength_rand,
+                             cache,
+                             light_path_index,
+                             &vcm_stored);
+    }
+
+    if (use_connections && (sd.runtime_flag & SR_BSDF_HAS_EVAL) &&
         !(sd.object_flag & SD_OBJECT_SHADOW_CATCHER))
     {
       bdpt_reservoir_store_light_vertex(kg,
@@ -2472,6 +2748,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       }
       d_vcm = d_vcm_before_hit;
       d_vc = d_vc_before_hit;
+      d_vm = d_vm_before_hit;
       /* Keep the emitter/previous-scattering origin so the next area conversion
        * uses the complete edge length across all null surfaces. */
       ray.D = normalize(wo);
@@ -2486,14 +2763,21 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     }
 
     const float cos_out = max(fabsf(dot(sd.Ng, normalize(wo))), 1.0e-8f);
+    if (bounce == 0 && !(label & LABEL_SINGULAR)) {
+      camera_samples_subpath = true;
+    }
+    const float3 d_previous = make_float3(d_vcm.encoded(), d_vc.encoded(), d_vm.encoded());
     if (label & LABEL_SINGULAR) {
-      const float2 next = BDPTMISWeight::Log::scatter_delta(
-          make_float2(d_vcm.encoded(), d_vc.encoded()), cos_out, mis_pdf, reverse_pdf);
+      const float3 next = BDPTMISWeight::Log::scatter_delta_vcm(
+          d_previous, cos_out, mis_pdf, reverse_pdf);
       d_vcm = BDPTMISWeight::from_encoded(next.x);
       d_vc = BDPTMISWeight::from_encoded(next.y);
+      d_vm = BDPTMISWeight::from_encoded(next.z);
     }
     else {
-      const float selection_ratio = bounce == 0 ?
+      /* The camera path samples this vertex and reaches the rest of the subpath with next event
+       * estimation at the first vertex, and with a connection at any other. */
+      const float selection_ratio = bounce != 0 ? (use_connections ? 1.0f : 0.0f) :
           bdpt_light_selection_ratio(kg,
                                      emitter_distribution,
                                      ray.P,
@@ -2502,14 +2786,17 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
                                      sd.P,
                                      dot(sd.N, wo) >= 0.0f ? sd.N : -sd.N,
                                      sd.runtime_flag,
-                                     sd.object) : 1.0f;
-      const float2 next = BDPTMISWeight::Log::scatter(make_float2(d_vcm.encoded(), d_vc.encoded()),
-                                                      cos_out,
-                                                      bdpt_safe_pdf(mis_pdf),
-                                                      reverse_pdf,
-                                                      selection_ratio);
+                                     sd.object);
+      const float3 next = BDPTMISWeight::Log::scatter_vcm(d_previous,
+                                                          cos_out,
+                                                          bdpt_safe_pdf(mis_pdf),
+                                                          reverse_pdf,
+                                                          selection_ratio,
+                                                          vm_factor,
+                                                          vc_factor);
       d_vcm = BDPTMISWeight::from_encoded(next.x);
       d_vc = BDPTMISWeight::from_encoded(next.y);
+      d_vm = BDPTMISWeight::from_encoded(next.z);
     }
 
     path_state_next(kg, state, label, sd.runtime_flag);
@@ -2568,7 +2855,9 @@ ccl_device void integrator_bdpt_sensor_connect(KernelGlobals kg,
                                                const uint batch_samples,
                                                ccl_global float *render_buffer)
 {
-  if (!kernel_integrator_state.bdpt_vertex_count || !kernel_integrator_state.bdpt_vertices) {
+  if (!kernel_integrator_state.bdpt_vertex_count || !kernel_integrator_state.bdpt_vertices ||
+      !bdpt_connections_enabled(kg))
+  {
     return;
   }
   const uint paths_per_cache = kernel_integrator_state.bdpt_light_path_count;

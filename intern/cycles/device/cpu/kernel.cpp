@@ -22,6 +22,7 @@ CPUKernels::CPUKernels()
       REGISTER_KERNEL(integrator_megakernel),
       REGISTER_KERNEL(integrator_photon_emit),
       REGISTER_KERNEL(integrator_photon_map_build),
+      REGISTER_KERNEL(integrator_vcm_map_build),
       REGISTER_KERNEL(integrator_bdpt_light_generate),
       REGISTER_KERNEL(integrator_bdpt_cache_order),
       REGISTER_KERNEL(integrator_bdpt_sensor_connect),

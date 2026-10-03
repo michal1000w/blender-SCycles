@@ -1482,6 +1482,14 @@ context.film_write_denoising_features_surface(nullptr, state, sd, render_buffer)
 return 0;
 CCL_METAL_SURFACE_STAGE_END
 
+CCL_METAL_SURFACE_STAGE_BEGIN(8)
+#  ifdef __BDPT__
+return context.vcm_merge(nullptr, state, sd, render_buffer) ? 0 : 1;
+#  else
+return 0;
+#  endif
+CCL_METAL_SURFACE_STAGE_END
+
 #  undef CCL_METAL_SURFACE_STAGE_BEGIN
 #  undef CCL_METAL_SURFACE_STAGE_END
 #endif /* __KERNEL_METAL_VISIBLE_SHADING__ */

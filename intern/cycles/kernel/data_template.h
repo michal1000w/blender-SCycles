@@ -216,6 +216,19 @@ KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, bdpt_max_bounces)
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, bdpt_update_samples)
+/* Vertex connection and merging. Merging runs on the light subpaths of the bidirectional pass,
+ * which is active without its connection strategies when only merging is enabled. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_vertex_merging)
+KERNEL_STRUCT_MEMBER(integrator, int, bdpt_use_connections)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, vcm_merge_max)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, vcm_radius)
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, vcm_radius_alpha)
+/* Diagnostic: render with merging alone, like progressive photon mapping. */
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, int, vcm_merge_only)
 /* Progressive surface photon mapping. The map itself is render-working memory and its pointers
  * live in IntegratorStateGPU; these values are scene-level controls shared by emission/gather. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_photon_mapping)

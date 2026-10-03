@@ -23,6 +23,7 @@ struct OSLGlobals;
 struct IntegratorQueueCounter;
 struct KernelPhoton;
 struct KernelBDPTVertex;
+struct KernelVCMVertex;
 struct KernelPolarizationState;
 struct CoherentPathHistory;
 
@@ -42,6 +43,7 @@ struct KernelTransportStateCPU {
    * record of path `i` lives in slot `i` and the host links hash chains in path order. This keeps
    * the photon map, and therefore the render, independent of thread scheduling. */
   uint8_t *photon_valid = nullptr;
+  KernelVCMVertex *vcm_vertices = nullptr;
 
   KernelBDPTVertex *bdpt_vertices = nullptr;
   CoherentPathHistory *bdpt_coherent_history = nullptr;
@@ -70,6 +72,11 @@ struct KernelTransportStateCPU {
   int bdpt_buffer_height = 0;
   int bdpt_buffer_offset = 0;
   int bdpt_buffer_stride = 0;
+
+  uint vcm_path_slots = 0;
+  uint vcm_light_path_count = 0;
+  uint vcm_cache_slots = 0;
+  float vcm_eta = 0.0f;
 };
 
 /* On the CPU, we pass along the struct KernelGlobals to nearly everywhere in
