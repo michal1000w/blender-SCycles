@@ -24,6 +24,11 @@ bool path_trace_use_bidirectional(const DeviceScene *device_scene)
     return false;
   }
 
+  if (device_scene->data.integrator.use_vertex_merging) {
+    /* Merging does not invert the camera, see bdpt_recursion_supported(). */
+    return true;
+  }
+
   const KernelCamera &camera = device_scene->data.cam;
   const CameraType camera_type = CameraType(camera.type);
   if (camera.interocular_offset != 0.0f || camera_type == CAMERA_CUSTOM) {
@@ -32,6 +37,31 @@ bool path_trace_use_bidirectional(const DeviceScene *device_scene)
   return camera_type == CAMERA_PERSPECTIVE ||
          ((camera_type == CAMERA_PANORAMA || camera_type == CAMERA_ORTHOGRAPHIC) &&
           camera.aperturesize == 0.0f && camera.num_motion_steps == 0);
+}
+
+uint vertex_merging_path_slots(const KernelIntegrator &integrator)
+{
+  return uint(integrator.bdpt_max_bounces) + 4u;
+}
+
+VertexMergingRadius vertex_merging_radius(const KernelIntegrator &integrator,
+                                          const int iteration,
+                                          const uint light_paths)
+{
+  /* Progressive radius reduction of Georgiev et al.: the variance of merging stays bounded while
+   * its blur vanishes. Without a radius, 0.3% of the radius of the scene. */
+  const float initial_radius = integrator.vcm_radius > 0.0f ?
+                                   integrator.vcm_radius :
+                                   0.003f * integrator.photon_scene.w;
+  VertexMergingRadius result;
+  result.radius = max(
+      initial_radius * powf(float(iteration + 1), 0.5f * (integrator.vcm_radius_alpha - 1.0f)),
+      1.0e-6f);
+  result.light_paths = light_paths;
+  /* A camera vertex only merges with the subpaths of its time bin, and counts each as many. */
+  result.eta = M_PI_F * sqr(result.radius) * float(light_paths) /
+               float(max(integrator.photon_time_bins, 1));
+  return result;
 }
 
 unique_ptr<PathTraceWork> PathTraceWork::create(Device *device,

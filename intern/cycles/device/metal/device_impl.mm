@@ -536,6 +536,8 @@ string MetalDevice::preprocess_source(MetalPipelineType pso_type,
       };
       if (!(transport_features & KERNEL_FEATURE_BDPT)) {
         disable_switch("use_bidirectional_path_tracing");
+        disable_switch("use_vertex_merging");
+        disable_switch("bdpt_use_connections");
       }
       if (!(transport_features & KERNEL_FEATURE_PHOTON_MAPPING)) {
         disable_switch("use_photon_mapping");
@@ -811,6 +813,8 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
        * intersection entry point. Do not let them pull the large BDPT/photon call graphs into
        * displaced intersection specialization or fragment its cache. */
       specialization_data.integrator.use_bidirectional_path_tracing = 0;
+      specialization_data.integrator.use_vertex_merging = 0;
+      specialization_data.integrator.bdpt_use_connections = 0;
       specialization_data.integrator.use_photon_mapping = 0;
     }
     bool next_member_is_specialized = true;

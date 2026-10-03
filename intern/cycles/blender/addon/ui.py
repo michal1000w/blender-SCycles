@@ -844,6 +844,43 @@ class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
             box.label(text="Photon Mapping is ignored while BDPT is enabled", icon='INFO')
 
 
+class CYCLES_RENDER_PT_light_paths_vertex_merging(CyclesButtonsPanel, Panel):
+    bl_label = "Vertex Connection and Merging"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths"
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.cycles, "use_vertex_merging", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cscene = context.scene.cycles
+        device_supported = use_light_cache_transport(context)
+        layout.active = cscene.use_vertex_merging and device_supported
+
+        if not device_supported:
+            box = layout.box()
+            box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
+
+        col = layout.column(align=True)
+        col.prop(cscene, "vcm_radius")
+        col.prop(cscene, "vcm_radius_alpha")
+        col.prop(cscene, "vcm_merge_max")
+
+        # Merging uses the light paths of the bidirectional pass.
+        col = layout.column(align=True)
+        col.prop(cscene, "bdpt_light_paths")
+        col.prop(cscene, "bdpt_max_bounces")
+        col.prop(cscene, "bdpt_update_samples")
+
+        if cscene.use_vertex_merging and cscene.use_photon_mapping:
+            box = layout.box()
+            box.label(text="Photon Mapping is ignored while merging is enabled", icon='INFO')
+
+
 class CYCLES_RENDER_PT_diffraction(CyclesButtonsPanel, Panel):
     bl_label = "Diffraction"
     bl_options = {'DEFAULT_CLOSED'}
@@ -2843,6 +2880,7 @@ classes = (
     CYCLES_RENDER_PT_light_paths_clamping,
     CYCLES_RENDER_PT_light_paths_caustics,
     CYCLES_RENDER_PT_light_paths_bidirectional,
+    CYCLES_RENDER_PT_light_paths_vertex_merging,
     CYCLES_RENDER_PT_diffraction,
     CYCLES_RENDER_PT_light_paths_coherent_specular,
     CYCLES_RENDER_PT_light_paths_photon_mapping,

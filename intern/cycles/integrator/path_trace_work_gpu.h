@@ -57,6 +57,9 @@ class PathTraceWorkGPU : public PathTraceWork {
   void alloc_integrator_sorting();
   void alloc_integrator_path_split();
   void alloc_photon_mapping();
+  /* Photon map of the light subpath vertices for vertex merging, of `light_paths` subpaths in
+   * each of `cache_capacity` caches. */
+  void alloc_vertex_merging(const uint light_paths, const uint cache_capacity);
   void enqueue_photon_mapping(int start_sample);
   void alloc_bidirectional_path_tracing();
   void enqueue_bidirectional_light_paths(int start_sample, int batch_samples);
@@ -167,6 +170,9 @@ class PathTraceWorkGPU : public PathTraceWork {
   device_only_memory<KernelPhoton> photons_;
   device_only_memory<uint> photon_hash_;
   device_vector<uint> photon_stored_;
+  /* Vertex merging keeps its light subpath vertices in the photon map, with these MIS terms. */
+  device_only_memory<KernelVCMVertex> vcm_vertices_;
+  uint vcm_path_capacity_ = 0;
 
   /* Optional Metal bidirectional light-vertex cache. */
   device_only_memory<KernelBDPTVertex> bdpt_vertices_;

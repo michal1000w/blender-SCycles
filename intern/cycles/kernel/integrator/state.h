@@ -226,6 +226,8 @@ struct IntegratorStateGPU {
   ccl_global KernelPhoton *photons;
   ccl_global uint *photon_hash;
   ccl_global uint *photon_stored;
+  /* Vertex merging: MIS terms of the light subpath vertices stored in the photon map. */
+  ccl_global KernelVCMVertex *vcm_vertices;
 
   /* Metal bidirectional light-vertex cache. */
   ccl_global KernelBDPTVertex *bdpt_vertices;
@@ -277,6 +279,15 @@ struct IntegratorStateGPU {
   int bdpt_buffer_height;
   int bdpt_buffer_offset;
   int bdpt_buffer_stride;
+
+  /* Vertex merging. Light subpath `i` of a cache stores its vertices in the photon map slots
+   * `[i * vcm_path_slots, (i + 1) * vcm_path_slots)`, and only the first `vcm_light_path_count`
+   * subpaths of a cache store any. `vcm_eta` is the number of those subpaths times the area of
+   * the merge disk, zero while merging is off. */
+  uint vcm_path_slots;
+  uint vcm_light_path_count;
+  uint vcm_cache_slots;
+  float vcm_eta;
 };
 
 /* Abstraction

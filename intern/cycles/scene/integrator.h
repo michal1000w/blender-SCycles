@@ -41,6 +41,8 @@ class Integrator : public Node {
   NODE_DECLARE
 
   bool use_photon_mapping_on_device(const Device *device) const;
+  /* Whether the bidirectional light pass runs: for bidirectional path tracing, and to provide
+   * the light subpath vertices of vertex merging to the regular path tracer. */
   bool use_bidirectional_path_tracing_on_device(const Device *device) const;
 
   NODE_SOCKET_API(int, min_bounce)
@@ -97,6 +99,11 @@ class Integrator : public Node {
   NODE_SOCKET_API(int, bdpt_reference_pixels)
   NODE_SOCKET_API(int, bdpt_max_bounces)
   NODE_SOCKET_API(int, bdpt_update_samples)
+
+  NODE_SOCKET_API(bool, use_vertex_merging)
+  NODE_SOCKET_API(float, vcm_radius)
+  NODE_SOCKET_API(float, vcm_radius_alpha)
+  NODE_SOCKET_API(int, vcm_merge_max)
 
   NODE_SOCKET_API(bool, use_photon_mapping)
   NODE_SOCKET_API(int, photon_count)

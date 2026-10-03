@@ -115,3 +115,6 @@ scripts/modules/_bpy_internal/assets/remote_library/*_openapi.py linguist-genera
 
 # Small authored optical-constant tables are source fixtures, not LFS assets.
 /tests/scenes/diffraction/optical_constants/*.csv -filter -diff -merge text
+
+# Small generated VCM test scenes are stored in git directly; GitHub rejects new LFS objects on a public fork.
+/tests/vcm/*.blend -filter -diff -merge -text

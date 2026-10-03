@@ -59,12 +59,13 @@ static bool device_supports_transport_features(const Device *device)
 bool Integrator::use_photon_mapping_on_device(const Device *device) const
 {
   return get_use_photon_mapping() && !get_use_bidirectional_path_tracing() &&
-         device_supports_transport_features(device);
+         !get_use_vertex_merging() && device_supports_transport_features(device);
 }
 
 bool Integrator::use_bidirectional_path_tracing_on_device(const Device *device) const
 {
-  return get_use_bidirectional_path_tracing() && device_supports_transport_features(device);
+  return (get_use_bidirectional_path_tracing() || get_use_vertex_merging()) &&
+         device_supports_transport_features(device);
 }
 
 static bool photon_input_is_varying(ShaderNode *node, const char *name)
@@ -254,6 +255,11 @@ NODE_DEFINE(Integrator)
   SOCKET_INT(bdpt_reference_pixels, "BDPT Reference Pixels", 1);
   SOCKET_INT(bdpt_max_bounces, "BDPT Max Bounces", 8);
   SOCKET_INT(bdpt_update_samples, "BDPT Update Samples", 8);
+
+  SOCKET_BOOLEAN(use_vertex_merging, "Vertex Connection and Merging", false);
+  SOCKET_FLOAT(vcm_radius, "Merge Radius", 0.0f);
+  SOCKET_FLOAT(vcm_radius_alpha, "Merge Radius Reduction", 0.75f);
+  SOCKET_INT(vcm_merge_max, "Merge Maximum", 16);
 
   SOCKET_BOOLEAN(use_photon_mapping, "Photon Mapping", false);
   SOCKET_INT(photon_count, "Photon Count", 65536);
@@ -454,6 +460,22 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
   kintegrator->bdpt_reference_pixels = max(bdpt_reference_pixels, 1);
   kintegrator->bdpt_max_bounces = clamp(bdpt_max_bounces, 1, 64);
   kintegrator->bdpt_update_samples = clamp(bdpt_update_samples, 1, 1024);
+  /* Vertex connection and merging. In the regular path tracer the bidirectional pass only
+   * provides the light subpath vertices to merge with, its connections stay off. */
+  kintegrator->use_vertex_merging = kintegrator->use_bidirectional_path_tracing &&
+                                    use_vertex_merging;
+  kintegrator->bdpt_use_connections = kintegrator->use_bidirectional_path_tracing &&
+                                      use_bidirectional_path_tracing;
+  kintegrator->vcm_radius = max(vcm_radius, 0.0f);
+  kintegrator->vcm_radius_alpha = clamp(vcm_radius_alpha, 0.0f, 1.0f);
+  kintegrator->vcm_merge_max = clamp(vcm_merge_max, 1, 1024);
+  kintegrator->vcm_merge_only = kintegrator->use_vertex_merging &&
+                                !kintegrator->bdpt_use_connections &&
+                                getenv("CYCLES_VCM_MERGE_ONLY") != nullptr;
+  if (kintegrator->use_vertex_merging) {
+    /* Merging samples the caustics that manifold next event estimation would add again. */
+    kintegrator->use_caustics = false;
+  }
 
   kintegrator->use_photon_mapping = use_photon_mapping_on_device(device);
   if (kintegrator->use_photon_mapping) {
@@ -728,7 +750,7 @@ uint64_t Integrator::get_kernel_features() const
     kernel_features |= KERNEL_FEATURE_LIGHT_TREE;
   }
 
-  if (get_use_bidirectional_path_tracing()) {
+  if (get_use_bidirectional_path_tracing() || get_use_vertex_merging()) {
     /* BDPT sensor connections use the manifold solver for specular chains between a cached light
      * vertex and the camera. This is intrinsic bidirectional transport and does not require the
      * user-facing shadow-caustics caster/receiver annotations. */

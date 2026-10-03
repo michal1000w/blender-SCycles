@@ -151,6 +151,17 @@ void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_cache_order)(const ThreadKernelGl
 #endif
 }
 
+int KERNEL_FUNCTION_FULL_NAME(integrator_vcm_map_build)(const ThreadKernelGlobalsCPU *kg)
+{
+#ifdef KERNEL_STUB
+  STUB_ASSERT(KERNEL_ARCH, integrator_vcm_map_build);
+  (void)kg;
+  return 0;
+#else
+  return int(integrator_vcm_map_build(kg));
+#endif
+}
+
 void KERNEL_FUNCTION_FULL_NAME(integrator_bdpt_sensor_connect)(const ThreadKernelGlobalsCPU *kg,
                                                                IntegratorStateCPU *state,
                                                                const int vertex_index,

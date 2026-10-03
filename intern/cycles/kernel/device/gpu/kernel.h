@@ -41,6 +41,7 @@
 #  include "kernel/integrator/bidirectional.h"
 #  include "kernel/integrator/guiding_gpu.h"
 #  include "kernel/integrator/photon_mapping.h"
+#  include "kernel/integrator/vertex_merging.h"
 #endif
 #include "kernel/integrator/intersect_dedicated_light.h"
 #include "kernel/integrator/intersect_mnee.h"

@@ -3119,7 +3119,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = d_vcm.encoded();
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
     /* The primary camera has no preceding scattering strategy. */
-    bdpt_recursive_mis_after_scatter(state, label, 1.0f, phase_pdf, 0.0f);
+    bdpt_recursive_mis_after_scatter(kg, state, label, 1.0f, phase_pdf, 0.0f, false);
   }
 #  endif
 

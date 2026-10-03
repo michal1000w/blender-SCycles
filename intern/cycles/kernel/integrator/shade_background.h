@@ -162,6 +162,7 @@ ccl_device_inline ShaderEvalResult integrate_background(
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights *
                                  background_light_pdf(kg, ray_P, ray_D);
       mis_weight = bdpt_emission_mis_weight_infinite(
+          kg,
           state,
           direct_pdf_w,
           bdpt_infinite_position_pdf(kg, ray_P, -ray_D),
@@ -275,6 +276,7 @@ ccl_device_inline ShaderEvalResult integrate_sun_lights(
       const float3 ray_P = INTEGRATOR_STATE(state, ray, P);
       const float direct_pdf_w = kernel_data.integrator.distribution_pdf_lights * light_eval.pdf;
       mis_weight = bdpt_emission_mis_weight_infinite(
+          kg,
           state,
           direct_pdf_w,
           bdpt_infinite_position_pdf(kg, ray_P, ray_D),
