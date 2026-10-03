@@ -201,7 +201,7 @@ ccl_device_inline bool subsurface_scatter(KernelGlobals kg, IntegratorState stat
 
 #  ifdef __VOLUME__
   /* Update volume stack if needed. */
-  if (kernel_data.integrator.use_volumes) {
+  if (kernel_data.integrator.use_volumes || kernel_data.integrator.use_nested_dielectrics) {
     const int object = ss_isect.hits[0].object;
     const uint object_flag = kernel_data_fetch(object_flag, object);
 

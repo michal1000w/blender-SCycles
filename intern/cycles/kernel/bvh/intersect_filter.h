@@ -292,7 +292,7 @@ ccl_device_forceinline bool bvh_volume_anyhit_triangle_filter(
   }
 #endif
 
-  if ((kernel_data_fetch(object_flag, object) & SD_OBJECT_HAS_VOLUME) == 0) {
+  if ((kernel_data_fetch(object_flag, object) & SD_OBJECT_HAS_MEDIUM) == 0) {
     return true;
   }
 
@@ -302,7 +302,7 @@ ccl_device_forceinline bool bvh_volume_anyhit_triangle_filter(
 
   const int shader = kernel_data_fetch(tri_shader, prim);
   const int shader_flag = kernel_data_fetch(shaders, (shader & SHADER_MASK)).flags;
-  if (!(shader_flag & SD_HAS_VOLUME)) {
+  if (!(shader_flag & SD_HAS_MEDIUM)) {
     return true;
   }
 

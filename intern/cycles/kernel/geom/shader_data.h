@@ -63,6 +63,10 @@ ccl_device_inline
   sd->object_flag = kernel_data_fetch(object_flag, sd->object);
   sd->prim = isect->prim;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   sd->shader_flag = 0;
 #ifdef __KERNEL_METAL__
   sd->gpu_guiding_flags = 0;
@@ -197,6 +201,10 @@ ccl_device_inline void shader_setup_from_sample(KernelGlobals kg,
   sd->time = time;
   sd->ray_length = t;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = 0;
   if (sd->object != OBJECT_NONE) {
@@ -344,6 +352,10 @@ ccl_device void shader_setup_from_curve(KernelGlobals kg,
   /* Shader */
   sd->shader = kernel_data_fetch(curves, prim).shader_id;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
 
   /* Object */
@@ -424,6 +436,10 @@ ccl_device_inline void shader_setup_from_background(KernelGlobals kg,
   sd->wi = -ray_D;
   sd->shader = kernel_data.background.surface_shader;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   sd->shader_flag = kernel_data_fetch(shaders, (sd->shader & SHADER_MASK)).flags;
   sd->object_flag = 0;
   sd->time = ray_time;
@@ -466,6 +482,10 @@ ccl_device_inline void shader_setup_from_volume(ccl_private ShaderData *ccl_rest
   sd->wi = -ray->D;
   sd->shader = SHADER_NONE;
   sd->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd->medium_ior = 1.0f;
+  sd->interior_ior = 0.0f;
+#endif
   sd->shader_flag = 0;
   sd->object_flag = 0;
   sd->time = ray->time;

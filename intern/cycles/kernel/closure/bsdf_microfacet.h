@@ -377,6 +377,69 @@ ccl_device_inline float bsdf_glass_ior(ccl_private ShaderData *sd, float ior, co
 #endif
 }
 
+/* Nested dielectrics
+ *
+ * The closures of a dielectric describe its interface with vacuum, from the index of refraction
+ * of its interior. A material with a nested priority may lie inside another medium, which is
+ * the same interface with the interior index divided by the one of that medium. */
+
+ccl_device_forceinline bool bsdf_nested_dielectric(const ccl_private ShaderData *sd)
+{
+#ifdef __NESTED_DIELECTRICS__
+  return (sd->shader_flag & SD_HAS_NESTED_PRIORITY) != 0;
+#else
+  (void)sd;
+  return false;
+#endif
+}
+
+/* Index of refraction of the interior relative to the medium around the surface, for a material
+ * with a nested priority. Stores the absolute one for the media list of the path. A dispersive
+ * interior is evaluated at the wavelength of the path, and `inv_abbe` cleared: the medium around
+ * it was stored at that wavelength as well, so the ratio must not be dispersed again. */
+ccl_device_inline float bsdf_nested_relative_ior(ccl_private ShaderData *sd,
+                                                 float ior,
+                                                 ccl_private float *inv_abbe = nullptr)
+{
+#ifdef __NESTED_DIELECTRICS__
+#  ifdef __SPECTRAL__
+  if (inv_abbe && *inv_abbe != 0.0f && (sd->shader_flag & SD_REQUIRES_WAVELENGTH)) {
+    sd->runtime_flag |= SR_BSDF_HAS_DISPERSION;
+    ior = dielectric_ior_at_wavelength(ior, *inv_abbe, sample_wavelength(sd->rand_wavelength));
+    *inv_abbe = 0.0f;
+  }
+#  else
+  (void)inv_abbe;
+#  endif
+  sd->interior_ior = ior;
+  return ior / sd->medium_ior;
+#else
+  (void)sd;
+  (void)inv_abbe;
+  return ior;
+#endif
+}
+
+/* A thin film sits on the outer side of the surface, so its index is relative to the medium
+ * around it as well. */
+ccl_device_forceinline float bsdf_nested_relative_film_ior(const ccl_private ShaderData *sd,
+                                                           const float film_ior)
+{
+#ifdef __NESTED_DIELECTRICS__
+  return (sd->shader_flag & SD_HAS_NESTED_PRIORITY) ? film_ior / sd->medium_ior : film_ior;
+#else
+  (void)sd;
+  return film_ior;
+#endif
+}
+
+/* Both sides of the interface have the same index: there is no interface, whatever its
+ * roughness. Microfacet refraction is singular there, the surface is transparent instead. */
+ccl_device_forceinline bool bsdf_nested_index_matched(const float relative_ior)
+{
+  return fabsf(relative_ior - 1.0f) < 1e-4f;
+}
+
 /* Computes Fresnel reflectance and transmittance of the Generalized Schlick Model. */
 ccl_device_forceinline FresnelCoeff
 generalized_schlick_fresnel(KernelGlobals kg,

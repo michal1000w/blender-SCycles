@@ -1471,6 +1471,11 @@ class CyclesCustomCameraSettings(bpy.types.PropertyGroup):
         del bpy.types.Camera.cycles_custom
 
 
+def update_material(self, context):
+    # Settings stored on the material do not tag it for the render engine by themselves.
+    self.id_data.update_tag()
+
+
 class CyclesMaterialSettings(bpy.types.PropertyGroup):
     __slots__ = ()
 
@@ -1486,6 +1491,17 @@ class CyclesMaterialSettings(bpy.types.PropertyGroup):
         name="Bump Map Correction",
         description="Apply corrections to solve shadow terminator artifacts caused by bump mapping",
         default=True,
+    )
+    nested_priority: IntProperty(
+        name="Nested Priority",
+        description=(
+            "Priority of the object as a nested dielectric. Where objects with a priority overlap, "
+            "only the one with the highest priority exists, and refraction between them uses the "
+            "index of refraction of both. 0 does not take part and is always an interface with air"
+        ),
+        min=0, max=1000,
+        default=0,
+        update=update_material,
     )
     volume_sampling: EnumProperty(
         name="Volume Sampling",

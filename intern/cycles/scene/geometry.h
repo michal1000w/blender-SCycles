@@ -118,6 +118,8 @@ class Geometry : public Node {
 
   /* Shader Properties */
   bool has_volume;         /* Set in the device_update_flags(). */
+  /* Some material has a nested dielectric priority. Set in the device_update_flags(). */
+  bool has_nested_priority = false;
   bool has_surface_bssrdf; /* Set in the device_update_flags(). */
   bool use_pixel_displacement;
   float pixel_displacement_max_distance;

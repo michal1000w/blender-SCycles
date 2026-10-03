@@ -495,6 +495,10 @@ ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
 #ifdef __SPECTRAL__
   reverse_sd.rand_wavelength = sd->rand_wavelength;
 #endif
+#ifdef __NESTED_DIELECTRICS__
+  /* The same interface seen from the other side. */
+  reverse_sd.medium_ior = sd->medium_ior;
+#endif
   const PathRayVisibility visibility = path_state_ray_visibility(state);
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, &reverse_sd, nullptr, visibility, INTEGRATOR_STATE(state, path, flag));
@@ -895,6 +899,39 @@ ccl_device_inline_transport void bdpt_recursive_mis_after_scatter(IntegratorStat
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
 }
 
+/* A cached vertex on a nested dielectric keeps the index of refraction of the medium around it,
+ * which the path that connects to it cannot know: 16 bit fixed point in the upper half of the
+ * light group field, exact for the 1.0 of a surface outside any medium. */
+ccl_device_inline int bdpt_pack_light_group_medium(const int light_group, const float medium_ior)
+{
+  const uint quantized = uint(clamp(medium_ior * 8192.0f + 0.5f, 0.0f, 65535.0f));
+  return int((uint(light_group) & 0xffffu) | (quantized << 16u));
+}
+
+ccl_device_inline int bdpt_vertex_light_group(const int packed_light_group)
+{
+  const int group = int(uint(packed_light_group) & 0xffffu);
+  return (group & 0x8000) ? group - 0x10000 : group;
+}
+
+ccl_device_inline float bdpt_vertex_medium_ior(const int packed_light_group)
+{
+  return float(uint(packed_light_group) >> 16u) * (1.0f / 8192.0f);
+}
+
+/* Shader data of a cached vertex is rebuilt from its primitive, restore what the light subpath
+ * knew about the media around it. */
+ccl_device_inline void bdpt_vertex_restore_medium(const int packed_light_group,
+                                                  ccl_private ShaderData *light_sd)
+{
+#ifdef __NESTED_DIELECTRICS__
+  light_sd->medium_ior = bdpt_vertex_medium_ior(packed_light_group);
+#else
+  (void)packed_light_group;
+  (void)light_sd;
+#endif
+}
+
 ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stored_vertex,
                                               const ccl_private ShaderData *sd,
                                               const ccl_private Ray *ray,
@@ -924,7 +961,11 @@ ccl_device_inline void bdpt_fill_light_vertex(ccl_private KernelBDPTVertex *stor
   stored_vertex->emitter_object = emitter_object;
   stored_vertex->emitter_distribution = emitter_distribution;
   stored_vertex->emitter_P = ray->P;
-  stored_vertex->light_group = light_group;
+#ifdef __NESTED_DIELECTRICS__
+  stored_vertex->light_group = bdpt_pack_light_group_medium(light_group, sd->medium_ior);
+#else
+  stored_vertex->light_group = bdpt_pack_light_group_medium(light_group, 1.0f);
+#endif
   stored_vertex->d_vcm = d_vcm.encoded();
   stored_vertex->d_vc = d_vc.encoded();
   stored_vertex->path_length = bdpt_pack_vertex_support(
@@ -1058,6 +1099,7 @@ ccl_device_inline bool bdpt_setup_light_vertex(KernelGlobals kg,
 #ifdef __SPECTRAL__
   light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #endif
+  bdpt_vertex_restore_medium(light_vertex->light_group, light_sd);
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
   if (light_sd->runtime_flag & SR_CACHE_MISS) {
@@ -1523,9 +1565,37 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
     sensor_target.object = light_vertex->object;
     sensor_target.prim = volume_vertex ? PRIM_NONE : light_vertex->prim;
     sensor_target.shader = light_sd->shader;
-    sensor_target.group = light_vertex->light_group;
+    sensor_target.group = bdpt_vertex_light_group(light_vertex->light_group);
     sensor_target.type = LIGHT_TRIANGLE;
     sensor_target.emitter_id = EMITTER_NONE;
+
+#  ifdef __NESTED_DIELECTRICS__
+    if (nested_dielectrics_enabled(kg)) {
+      /* The chain starts at the camera, inside the nested dielectric media around it. This
+       * state last held the media of another connection. */
+      if (kernel_data.cam.is_inside_volume) {
+        Ray camera_ray ccl_optional_struct_init;
+        camera_ray.P = sensor_P;
+        camera_ray.D = direction;
+        camera_ray.tmin = 0.0f;
+        camera_ray.tmax = FLT_MAX;
+        camera_ray.time = camera_sd->time;
+        camera_ray.self.object = OBJECT_NONE;
+        camera_ray.self.prim = PRIM_NONE;
+        camera_ray.self.light_object = OBJECT_NONE;
+        camera_ray.self.light_prim = PRIM_NONE;
+#    ifdef __RAY_DIFFERENTIALS__
+        camera_ray.dP = differential_zero_compact();
+        camera_ray.dD = differential_zero_compact();
+#    endif
+        integrator_state_write_ray(state, &camera_ray);
+        integrator_volume_stack_init(kg, state, PATH_RAY_VISIBILITY_CAMERA);
+      }
+      else {
+        integrator_state_medium_stack_clear(kg, state);
+      }
+    }
+#  endif
 
     ShaderDataCausticsStorage manifold_sd_storage;
     ccl_private ShaderData *manifold_sd = AS_SHADER_DATA(&manifold_sd_storage);
@@ -1704,6 +1774,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
 #ifdef __SPECTRAL__
     light_sd->rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #endif
+    bdpt_vertex_restore_medium(light_vertex->light_group, light_sd);
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(kg,
                                                           state,
                                                           light_sd,
@@ -1858,7 +1929,9 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
 #endif
 
 #ifdef __VOLUME__
-  if (!volume_vertex && kernel_data.integrator.use_volumes) {
+  if (!volume_vertex &&
+      (kernel_data.integrator.use_volumes || kernel_data.integrator.use_nested_dielectrics))
+  {
     /* Dedicated sensor work reuses path storage and does not inherit the cached
      * light path's medium stack. A surface can itself lie inside another object's
      * volume. Reconstruct at the outgoing, offset shadow origin so interfaces
@@ -1872,6 +1945,9 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
       kg, state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_SHADOW, false);
 #ifdef __VOLUME__
   integrator_state_copy_volume_stack_to_shadow(kg, shadow_state, state);
+#endif
+#ifdef __NESTED_DIELECTRICS__
+  integrator_state_copy_medium_stack_to_shadow(kg, shadow_state, state);
 #endif
   integrator_state_write_shadow_ray(shadow_state, &shadow_ray);
   integrator_state_write_shadow_ray_self(shadow_state, &shadow_ray);
@@ -1891,7 +1967,7 @@ ccl_device_inline void bdpt_connect_light_vertex_to_camera(
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, bounce) =
       bdpt_vertex_path_length(light_vertex) - 2u;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, throughput) = contribution;
-  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = light_vertex->light_group + 1;
+  INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, lightgroup) = bdpt_vertex_light_group(light_vertex->light_group) + 1;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, visibility) = PATH_RAY_VISIBILITY_CAMERA;
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, flag) = volume_vertex ?
                                                                 PATH_RAY_VOLUME_PASS :
@@ -1999,7 +2075,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = d_vc.encoded();
 
 #ifdef __VOLUME__
-  if (kernel_data.integrator.use_volumes) {
+  if (kernel_data.integrator.use_volumes || kernel_data.integrator.use_nested_dielectrics) {
     INTEGRATOR_STATE_WRITE(state, ray, P) = ray.P;
     INTEGRATOR_STATE_WRITE(state, ray, D) = ray.D;
     INTEGRATOR_STATE_WRITE(state, ray, tmin) = ray.tmin;
@@ -2087,6 +2163,25 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
 #ifdef __SPECTRAL__
     shader_setup_wavelength(kg, &sd, state);
 #endif
+#ifdef __NESTED_DIELECTRICS__
+    {
+      const LightPathNestedHit nested_hit = light_path_nested_dielectric_hit(
+          kg, state, &sd, &ray, path_visibility);
+      if (nested_hit == LIGHT_PATH_NESTED_PASSED) {
+        /* Not a vertex of the subpath: the edge continues to the next surface, and the
+         * recurrence converts its measure with the distance from the unchanged ray origin. */
+        bounce--;
+        continue;
+      }
+      if (nested_hit == LIGHT_PATH_NESTED_CACHE_MISS) {
+        kernel_integrator_state.queue_counter->cache_miss = true;
+        return;
+      }
+      if (nested_hit != LIGHT_PATH_NESTED_TRUE) {
+        break;
+      }
+    }
+#endif
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
         kg, state, &sd, nullptr, path_visibility, INTEGRATOR_STATE(state, path, flag));
     if (sd.runtime_flag & SR_CACHE_MISS) {
@@ -2118,7 +2213,7 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
       if (!path_state_volume_next(state)) {
         break;
       }
-      volume_stack_enter_exit<false>(kg, state, &sd);
+      path_media_enter_exit<false>(kg, state, &sd);
       ray.tmin = intersection_t_offset(sd.ray_length);
       ray.tmax = FLT_MAX;
       ray.self.prim = sd.prim;
@@ -2183,6 +2278,12 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     }
 
     if (float(bounce) >= emitter_max_bounces) {
+      break;
+    }
+
+    /* A surface without scattering closures, an emitter for example, ends the subpath. Picking
+     * from it would return a closure that an earlier shader evaluation left in this memory. */
+    if (!(sd.runtime_flag & (SR_BSDF | SR_BSSRDF))) {
       break;
     }
 
@@ -2412,11 +2513,9 @@ ccl_device void integrator_bdpt_light_generate(KernelGlobals kg,
     }
 
     path_state_next(kg, state, label, sd.runtime_flag);
-#ifdef __VOLUME__
     if (label & LABEL_TRANSMIT) {
-      volume_stack_enter_exit<false>(kg, state, &sd);
+      path_media_enter_exit<false>(kg, state, &sd);
     }
-#endif
 
     ray.P = ray_offset(sd.P, dot(sd.Ng, wo) >= 0.0f ? sd.Ng : -sd.Ng);
     ray.tmin = 0.0f;

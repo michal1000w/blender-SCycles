@@ -286,6 +286,8 @@ class Scene : public NodeOwner {
 
   /* Get size of a volume stack needed to render this scene. */
   int get_volume_stack_size() const;
+  /* Size of the list of nested dielectric media of a path. */
+  int get_medium_stack_size() const;
 
   bool load_kernels(Progress &progress);
 };

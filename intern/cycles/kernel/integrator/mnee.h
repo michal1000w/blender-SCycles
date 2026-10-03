@@ -10,6 +10,8 @@
 #include "kernel/geom/shader_data.h"
 #include "kernel/geom/triangle.h"
 
+#include "kernel/integrator/nested_dielectrics.h"
+
 #include "kernel/light/sample.h"
 #include "kernel/sample/manifold.h"
 
@@ -81,6 +83,10 @@ struct ManifoldVertex {
   float eta;
   ccl_private ShaderClosure *bsdf;
   float2 n_offset;
+#ifdef __NESTED_DIELECTRICS__
+  /* Index of refraction of the nested dielectric medium around the interface. */
+  float medium_ior;
+#endif
 
   /* constraint and its derivative matrices */
   float2 constraint;
@@ -134,6 +140,10 @@ ccl_device_inline void mnee_setup_manifold_vertex(KernelGlobals kg,
 
   sd_vtx->type = isect->type;
   sd_vtx->runtime_flag = 0;
+#ifdef __NESTED_DIELECTRICS__
+  sd_vtx->medium_ior = 1.0f;
+  sd_vtx->interior_ior = 0.0f;
+#endif
   sd_vtx->shader_flag = 0;
   sd_vtx->object_flag = kernel_data_fetch(object_flag, sd_vtx->object);
 
@@ -532,6 +542,9 @@ ccl_device_inline bool mnee_newton_solver(KernelGlobals kg,
       tv.p = mv.p;
       tv.dp_du = mv.dp_du;
       tv.dp_dv = mv.dp_dv;
+#ifdef __NESTED_DIELECTRICS__
+      tv.medium_ior = mv.medium_ior;
+#endif
 
       /* Setup corrected manifold vertex. */
       mnee_setup_manifold_vertex(
@@ -875,6 +888,9 @@ ccl_device_inline ShaderEvalResult mnee_path_contribution(KernelGlobals kg,
                              sd->time,
                              false,
                              false);
+#ifdef __NESTED_DIELECTRICS__
+    sd_mnee->medium_ior = v.medium_ior;
+#endif
 
     /* Set bounce info in case a light path node is used in the refractive interface
      * shader graph. */
@@ -1031,6 +1047,30 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
 
   int vertex_count = 0;
   bool has_spectral_transport = false;
+
+#ifdef __NESTED_DIELECTRICS__
+  /* Nested dielectrics: the chain crosses the surfaces of media like a path does, so it keeps
+   * its own list of the media it is inside of, starting with the ones around the receiver. */
+  const bool nested = nested_dielectrics_enabled(kg);
+  MediumList media;
+  media.size = 0;
+  if (nested) {
+    medium_list_from_state(state, &media);
+    /* A camera endpoint of a sensor connection is no surface. */
+    if (sd->object != OBJECT_NONE && (sd->shader_flag & SD_HAS_NESTED_PRIORITY) &&
+        dot(sd->Ng, probe_ray.D) < 0.0f)
+    {
+      /* The chain starts through the receiver itself. */
+      medium_list_enter_exit(kg,
+                             &media,
+                             sd->object,
+                             sd->shader,
+                             (sd->runtime_flag & SR_BACKFACING) != 0,
+                             sd->interior_ior);
+    }
+  }
+#endif
+
   for (int isect_count = 0; isect_count < MNEE_MAX_INTERSECTION_COUNT; isect_count++) {
     const bool hit = scene_intersect(kg, &probe_ray, PATH_RAY_VISIBILITY_TRANSMIT, &probe_isect);
     if (!hit) {
@@ -1038,6 +1078,22 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
     }
 
     const uint object_flags = intersection_get_object_flags(kg, &probe_isect);
+#ifdef __NESTED_DIELECTRICS__
+    if (nested && (object_flags & SD_OBJECT_HAS_NESTED_PRIORITY) &&
+        !(consider_all_refractive || (object_flags & SD_OBJECT_CAUSTICS_CASTER)))
+    {
+      /* A medium which is no caustic caster still changes the media of the chain. */
+      shader_setup_from_ray(kg, sd_mnee, &probe_ray, &probe_isect);
+      if (sd_mnee->shader_flag & SD_HAS_NESTED_PRIORITY) {
+        medium_list_enter_exit(kg,
+                               &media,
+                               sd_mnee->object,
+                               sd_mnee->shader,
+                               (sd_mnee->runtime_flag & SR_BACKFACING) != 0,
+                               0.0f);
+      }
+    }
+#endif
     if (consider_all_refractive || (object_flags & SD_OBJECT_CAUSTICS_CASTER)) {
 
       /* Do we have enough slots. */
@@ -1072,12 +1128,60 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
         continue;
       }
 
+#ifdef __NESTED_DIELECTRICS__
+      const bool nested_surface = nested && (sd_mnee->shader_flag & SD_HAS_NESTED_PRIORITY);
+      const bool nested_backfacing = (sd_mnee->runtime_flag & SR_BACKFACING) != 0;
+      bool nested_false = false;
+      if (nested_surface) {
+        const NestedDielectricHit nested_hit = nested_dielectric_hit(
+            kg, &media, sd_mnee->object, sd_mnee->shader, nested_backfacing);
+        sd_mnee->medium_ior = nested_hit.medium_ior;
+        nested_false = nested_hit.is_false;
+      }
+      const float nested_medium_ior = sd_mnee->medium_ior;
+      if (nested_false && nested_backfacing) {
+        /* A surface inside a medium of higher priority is no interface. Leaving its medium
+         * needs no shading. */
+        medium_list_enter_exit(
+            kg, &media, sd_mnee->object, sd_mnee->shader, nested_backfacing, 0.0f);
+        vertex_count--;
+        probe_ray.self.object = probe_isect.object;
+        probe_ray.self.prim = probe_isect.prim;
+        probe_ray.tmin = intersection_t_offset(probe_isect.t);
+        continue;
+      }
+#endif
+
       /* Last bool argument is the MNEE flag (for TINY_MAX_CLOSURE cap in kernel_shader.h). */
       surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
           kg, state, sd_mnee, nullptr, PATH_RAY_VISIBILITY_DIFFUSE, PATH_RAY_FLAG_NONE, true);
       if (sd_mnee->runtime_flag & SR_CACHE_MISS) {
         return SHADER_EVAL_CACHE_MISS;
       }
+
+#ifdef __NESTED_DIELECTRICS__
+      const float nested_interior_ior = sd_mnee->interior_ior;
+      if (nested_surface) {
+        /* The chain refracts through every interface it keeps. */
+        medium_list_enter_exit(kg,
+                               &media,
+                               sd_mnee->object,
+                               sd_mnee->shader,
+                               nested_backfacing,
+                               nested_interior_ior);
+        if (nested_false || (nested_interior_ior > 0.0f &&
+                             bsdf_nested_index_matched(nested_interior_ior / nested_medium_ior)))
+        {
+          /* No interface: overridden by a medium of higher priority, or the same index of
+           * refraction on both sides. */
+          vertex_count--;
+          probe_ray.self.object = probe_isect.object;
+          probe_ray.self.prim = probe_isect.prim;
+          probe_ray.tmin = intersection_t_offset(probe_isect.t);
+          continue;
+        }
+      }
+#endif
 
 #if defined(__KERNEL_ONEAPI__)
       /* FIXME: Temporary workaround for a bug in the oneAPI + Embree backend that sometimes sets
@@ -1138,6 +1242,9 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
 
           /* Setup differential geometry on vertex. */
           mnee_setup_manifold_vertex(kg, &mv, bsdf, eta, h, &probe_ray, &probe_isect, sd_mnee);
+#ifdef __NESTED_DIELECTRICS__
+          mv.medium_ior = nested_medium_ior;
+#endif
           break;
         }
       }

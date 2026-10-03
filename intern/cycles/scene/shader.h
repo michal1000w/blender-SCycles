@@ -80,6 +80,9 @@ class Shader : public Node {
   /* sampling */
   NODE_SOCKET_API(EmissionSampling, emission_sampling_method)
   NODE_SOCKET_API(bool, use_transparent_shadow)
+  /* Nested dielectrics: 0 does not take part, otherwise the object with the highest priority
+   * replaces the others where they overlap. */
+  NODE_SOCKET_API(int, nested_priority)
   NODE_SOCKET_API(bool, use_bump_map_correction)
   NODE_SOCKET_API(VolumeSampling, volume_sampling_method)
   NODE_SOCKET_API(int, volume_interpolation_method)
@@ -106,6 +109,11 @@ class Shader : public Node {
    * Therefore, has_volume_connected stores whether some volume sub-tree
    * was connected before optimization. */
   bool has_volume_connected;
+
+  /* Index of refraction of the interior of a material with a nested priority, for the media of
+   * paths which start inside of it without shading its surface. */
+  float nested_ior = 1.0f;
+  int prev_nested_priority = 0;
 
   /* information about shader after compiling */
   bool has_surface;

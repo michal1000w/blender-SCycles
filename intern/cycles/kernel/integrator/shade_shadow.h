@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/integrator/guiding.h"
+#include "kernel/integrator/nested_dielectrics.h"
 #include "kernel/integrator/shade_volume.h"
 #include "kernel/integrator/surface_shader.h"
 #include "kernel/integrator/volume_stack.h"
@@ -106,6 +107,28 @@ ccl_device_inline TransparentShadowEvalResult integrate_transparent_surface_shad
 
   shader_setup_from_ray(kg, shadow_sd, &ray, &isect);
 
+#  ifdef __NESTED_DIELECTRICS__
+  /* Nested dielectrics: a surface inside a medium of higher priority does not exist, and the
+   * transparency of any other depends on the medium around it. */
+  if ((shadow_sd->shader_flag & SD_HAS_NESTED_PRIORITY) && nested_dielectrics_enabled(kg)) {
+    const NestedDielectricHit nested_hit = nested_dielectric_hit<true>(
+        kg,
+        state,
+        shadow_sd->object,
+        shadow_sd->shader,
+        (shadow_sd->runtime_flag & SR_BACKFACING) != 0);
+    if (nested_hit.is_false) {
+      INTEGRATOR_STATE_WRITE(state, shadow_path, volume_bounds_bounce) += 1;
+      if (INTEGRATOR_STATE(state, shadow_path, volume_bounds_bounce) > VOLUME_BOUNDS_MAX) {
+        return TRANSPARENT_SHADOW_EVAL_OPAQUE;
+      }
+      path_media_enter_exit<true>(kg, state, shadow_sd);
+      return TRANSPARENT_SHADOW_EVAL_CONTINUE;
+    }
+    shadow_sd->medium_ior = nested_hit.medium_ior;
+  }
+#  endif
+
   /* Evaluate shader. */
   if (!(shadow_sd->shader_flag & SD_HAS_ONLY_VOLUME)) {
     surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE_SHADOW>(
@@ -124,10 +147,8 @@ ccl_device_inline TransparentShadowEvalResult integrate_transparent_surface_shad
     }
   }
 
-#  ifdef __VOLUME__
-  /* Exit/enter volume. */
-  volume_stack_enter_exit<true>(kg, state, shadow_sd);
-#  endif
+  /* Exit/enter volumes and nested dielectric media. */
+  path_media_enter_exit<true>(kg, state, shadow_sd);
 
   /* Disable transparent shadows for ray portals */
   if (shadow_sd->runtime_flag & SR_RAY_PORTAL) {
