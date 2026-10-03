@@ -32,9 +32,13 @@ for (config, scene), data in sorted(times.items()):
 
 print()
 print("Cost of using the feature (after build): nested scene against its counterpart")
-pairs = [("drink_nested", "drink_overlap")]
+pairs = [("drink_nested", "drink_overlap"), ("drink_auto", "drink_overlap"),
+         ("showcase_auto", "showcase_off")]
 pairs += [(name.replace("_reference", "_nested"), name)
           for (_, name) in times if name.endswith("_reference")]
+pairs += [(name.replace("_reference", "_auto"), name)
+          for (_, name) in times if name.endswith("_reference")]
+pairs += [(name, name.replace("_auto", "_nested")) for (_, name) in times if name.endswith("_auto")]
 for config in sorted({config for config, _ in times}):
     for nested, other in sorted(set(pairs)):
         a = median(times.get((config, nested), {}).get("after", []))

@@ -8,6 +8,13 @@ geometry that was cut by hand and single interfaces whose shader has the relativ
 refraction. Both must converge to the same image. Reference scenes do not use the setting, so
 they also render in builds without nested dielectrics.
 
+Most pairs exist in two more kinds, which must match the same reference. `<name>_auto` has no
+priorities at all and relies on Automatic Nested Dielectrics of the render settings: closed
+refractive objects which overlap are media, the one which encloses the smaller volume first.
+`<name>_equal` gives every medium the same priority with the automatic setting off, where the
+same order decides. Reference scenes switch the automatic setting off, as they fake the media
+with relative indices of refraction on overlapping objects.
+
 Demo scenes (`drink_*`, `rod_*`, `spheres_*`) show the look; `drink_gap` and `drink_overlap` are
 the two usual ways to model a drink without priorities.
 
@@ -31,6 +38,11 @@ import bpy
 IOR_GLASS = 1.5
 IOR_WATER = 1.33
 IOR_ICE = 1.31
+
+# How the scene being built resolves its media: "nested" by the priorities of the builder,
+# "reference" not at all, "auto" without priorities by Automatic Nested Dielectrics, "equal" with
+# the same priority for all media.
+KIND = "nested"
 
 
 def parse_args():
@@ -95,6 +107,10 @@ def new_scene(args, camera_location=(0.0, -6.0, 2.2), look_at=(0.0, 0.0, 0.9), l
         cycles.photon_count = 65536
     cycles.use_guiding = args.guiding
     cycles.shading_system = args.osl and args.device == "CPU"
+    if hasattr(cycles, "use_auto_nested_dielectrics"):
+        cycles.use_auto_nested_dielectrics = KIND == "auto"
+    elif KIND == "auto":
+        raise SystemExit("This build has no automatic nested dielectrics")
 
     world = bpy.data.worlds.new("World")
     world.use_nodes = True
@@ -145,6 +161,10 @@ def new_material(name):
 
 
 def set_priority(mat, priority):
+    if KIND == "auto":
+        return
+    if priority and KIND == "equal":
+        priority = 1
     if priority:
         if not hasattr(mat.cycles, "nested_priority"):
             raise SystemExit("This build has no nested dielectrics (Material > Nested Priority)")
@@ -402,8 +422,9 @@ def scene_feature_only(args, nested):
                    radius=0.2, segments=16)
     else:
         # Behind the backdrop, inside the bounds of the scene.
-        add_sphere("Unrelated", dielectric("Unrelated", IOR_GLASS, 1), location=(0.0, 4.6, 0.3),
-                   radius=0.2, segments=16)
+        mat = dielectric("Unrelated", IOR_GLASS)
+        mat.cycles.nested_priority = 1
+        add_sphere("Unrelated", mat, location=(0.0, 4.6, 0.3), radius=0.2, segments=16)
 
 
 def scene_principled_shell(args, nested):
@@ -419,12 +440,18 @@ def scene_principled_shell(args, nested):
                                        color=(1.0, 0.85, 0.8, 1)), radius=0.7)
 
 
-def scene_overlap(args, nested):
+def scene_overlap(args, nested, small=False):
     """A glass block and a water block which overlap: the faces of the water inside the glass
-    are false intersections, the face of the glass inside the water an interface of both."""
+    are false intersections, the face of the glass inside the water an interface of both.
+    With `small` the glass block encloses less volume than the water, so that it also is the
+    one which exists in the overlap without priorities."""
     stage(args, camera_location=(3.5, -5.5, 2.6), look_at=(0.0, 0.0, 0.7))
-    glass_min, glass_max = (-1.2, -0.7, 0.02), (0.1, 0.7, 1.42)
-    water_min, water_max = (-0.2, -0.4, 0.32), (1.2, 0.4, 1.12)
+    if small:
+        glass_min, glass_max = (-0.8, -0.45, 0.02), (0.1, 0.45, 1.22)
+        water_min, water_max = (-0.2, -0.4, 0.32), (1.6, 0.4, 1.12)
+    else:
+        glass_min, glass_max = (-1.2, -0.7, 0.02), (0.1, 0.7, 1.42)
+        water_min, water_max = (-0.2, -0.4, 0.32), (1.2, 0.4, 1.12)
     if nested:
         add_box("Glass", dielectric("Glass", IOR_GLASS, 2), glass_min, glass_max)
         add_box("Water", dielectric("Water", IOR_WATER, 1), water_min, water_max)
@@ -478,6 +505,114 @@ def scene_overlap(args, nested):
     mesh.update()
     add_object("Water", mesh, dielectric("Water", IOR_WATER))
     return glass
+
+
+def scene_overlap_small(args, nested):
+    return scene_overlap(args, nested, small=True)
+
+
+def scene_shell_swapped(args, nested):
+    """As `shell`, with the inner object created first: the order of the media must not depend
+    on the order of the objects."""
+    stage(args)
+    if nested:
+        add_sphere("Water", dielectric("Water", IOR_WATER, 2), radius=0.7)
+    else:
+        add_sphere("Water", dielectric("WaterInGlass", IOR_WATER / IOR_GLASS), radius=0.7)
+    add_sphere("Glass", dielectric("Glass", IOR_GLASS, 1 if nested else 0), radius=1.0)
+
+
+def scene_unwelded(args, nested):
+    """As `shell`, from meshes whose faces do not share vertices: closed by position only."""
+    scene_shell(args, nested)
+    for name in ("Glass", "Water"):
+        mesh = bpy.data.objects[name].data
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        bmesh.ops.split_edges(bm, edges=bm.edges)
+        bm.to_mesh(mesh)
+        bm.free()
+
+
+def scene_joined(args, nested):
+    """As `shell`, with both spheres in one object: each material is a closed surface, so each
+    is a medium, and the one a path entered last exists."""
+    scene_shell(args, nested)
+    if nested:
+        glass = bpy.data.objects["Glass"]
+        water = bpy.data.objects["Water"]
+        bpy.ops.object.select_all(action="DESELECT")
+        bpy.context.view_layer.objects.active = glass
+        glass.select_set(True)
+        water.select_set(True)
+        bpy.ops.object.join()
+
+
+def scene_two_materials(args, nested):
+    """As `shell`, with two materials on the faces of the glass sphere: neither is a closed
+    surface, so the sphere stays one medium which a path enters by one and leaves by the
+    other."""
+    scene_shell(args, nested)
+    glass = bpy.data.objects["Glass"]
+    other = bpy.data.materials["Glass"].copy()
+    other.name = "GlassTop"
+    glass.data.materials.append(other)
+    for polygon in glass.data.polygons:
+        polygon.material_index = 1 if polygon.center.z > 0.1 else 0
+
+
+def scene_instance(args, nested):
+    """Two objects of one mesh and material, one scaled down inside the other: the inner one is
+    an index matched medium, so only the outer sphere is visible."""
+    stage(args)
+    glass = add_sphere("Glass", dielectric("Glass", IOR_GLASS, 1 if nested else 0), radius=1.0)
+    if nested:
+        inner = bpy.data.objects.new("Inner", glass.data)
+        bpy.context.collection.objects.link(inner)
+        inner.location = glass.location
+        inner.scale = (0.6, 0.6, 0.6)
+
+
+def scene_open(args, nested):
+    """Meshes which cannot be media automatically, in front of a glass sphere with a water core:
+    an open sheet of glass and a sphere with inward normals. A path that enters them never
+    leaves, so they must stay plain interfaces with air and the media behind them correct."""
+    stage(args)
+    add_sphere("Glass", dielectric("Glass", IOR_GLASS, 1 if nested else 0), radius=1.0)
+    if nested:
+        add_sphere("Water", dielectric("Water", IOR_WATER, 2), radius=0.7)
+    else:
+        add_sphere("Water", dielectric("WaterInGlass", IOR_WATER / IOR_GLASS), radius=0.7)
+    # Reaches into the bounds of the sphere, without a priority in any kind.
+    sheet_mat = dielectric("Sheet", 1.45)
+    sheet_mat.cycles.nested_priority = 0
+    bpy.ops.mesh.primitive_plane_add(size=1.6, location=(0.0, -0.9, 1.0),
+                                     rotation=(math.radians(70), 0.0, 0.0))
+    bpy.context.object.data.materials.append(sheet_mat)
+    add_sphere("Inverted", sheet_mat, location=(-1.3, -0.9, 0.45), radius=0.4, flip=True)
+
+
+def scene_mixed(args, nested):
+    """A water sphere without a priority inside a glass sphere with one: the priority wins over
+    the automatic order, so the water does not exist."""
+    stage(args)
+    add_sphere("Glass", dielectric("Glass", IOR_GLASS, 1 if nested else 0), radius=1.0)
+    if nested:
+        water = dielectric("Water", IOR_WATER, 0)
+        add_sphere("Water", water, radius=0.7)
+        bpy.data.materials["Glass"].cycles.nested_priority = 5
+        bpy.context.scene.cycles.use_auto_nested_dielectrics = True
+
+
+def scene_separate(args, nested):
+    """Refractive objects which do not touch, though the bounds of two of them overlap: the
+    automatic setting must not change the image."""
+    scene = stage(args)
+    add_sphere("A", dielectric("A", IOR_GLASS), location=(-0.75, 0.0, 0.8), radius=0.6)
+    add_sphere("B", dielectric("B", IOR_WATER), location=(0.25, 0.0, 1.5), radius=0.6)
+    add_sphere("C", dielectric("C", IOR_ICE, roughness=0.2), location=(1.3, 0.3, 0.5),
+               radius=0.45)
+    return scene
 
 
 def scene_matched(args, nested):
@@ -660,7 +795,8 @@ def scene_dispersion(args, nested):
     stage(args)
     add_sphere("Glass", dielectric("Glass", 1.6, 1 if nested else 0, principled=True,
                                    dispersion=0.6), radius=1.0)
-    add_sphere("Water", dielectric("Water", IOR_WATER, 2, principled=True), radius=0.7)
+    add_sphere("Water", dielectric("Water", IOR_WATER, 2 if nested else 0, principled=True),
+               radius=0.7)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -756,10 +892,92 @@ def scene_spheres(args, order):
     return scene
 
 
-def pair(builder):
-    return {"nested": lambda args: builder(args, True),
-            "reference": lambda args: builder(args, False)}
+def arc(radius, center_height, start_degrees, end_degrees, steps=24):
+    """Points of a circle about (0, center_height) in the (radius, height) plane."""
+    points = []
+    for step in range(steps + 1):
+        angle = math.radians(start_degrees + (end_degrees - start_degrees) * step / steps)
+        distance = radius * math.cos(angle)
+        points.append((distance if distance > 1e-6 * radius else 0.0,
+                       center_height + radius * math.sin(angle)))
+    return points
 
+
+def scene_showcase(args, mode="nested"):
+    """Three still lifes whose media have no priority at all: the tumbler of `drink`, a fish
+    bowl with water, marbles and bubbles, and a paperweight with a liquid core and bubbles."""
+    scene = scene_drink(args, mode)
+    for obj in bpy.data.objects:
+        if obj.name.split(".")[0].rstrip("0123456789") in ("Tumbler", "Drink", "Ice", "Bubble",
+                                                            "Straw"):
+            obj.location.x -= 2.0
+    camera = scene.camera
+    camera.location = (0.0, -9.0, 3.0)
+    camera.data.lens = 48.0
+    aim(camera, (0.0, 0.0, 0.95))
+    scene.render.resolution_x = args.resolution * 2
+
+    # Fish bowl: a spherical shell which is open at the top, with thickness.
+    center, outer, inner, rim, level = 0.9, 0.9, 0.84, 1.5, 1.2
+    top_outer = math.degrees(math.asin((rim - center) / outer))
+    top_inner = math.degrees(math.asin((rim - center) / inner))
+    add_revolved("Bowl", dielectric("BowlGlass", IOR_GLASS),
+                 arc(outer, center, -90, top_outer) + arc(inner, center, top_inner, -90))
+    grow = 0.02
+    top_water = math.degrees(math.asin((level - center) / (inner + grow)))
+    add_revolved("BowlWater", dielectric("BowlWater", IOR_WATER, absorption=(0.75, 0.9, 1.0, 1),
+                                         density=0.25),
+                 arc(inner + grow, center, -90, top_water) + [(0.0, level)])
+    for index, (location, color) in enumerate((((0.22, -0.1, 0.27), (1.0, 0.45, 0.3, 1)),
+                                               ((-0.2, 0.12, 0.25), (0.35, 0.8, 0.45, 1)),
+                                               ((0.0, -0.3, 0.2), (0.4, 0.55, 1.0, 1)))):
+        add_sphere(f"Marble{index}", dielectric(f"Marble{index}", 1.55, color=color),
+                   location=location, radius=0.13, segments=48)
+    air = dielectric("Air", 1.0)
+    for index, location in enumerate(((0.35, -0.2, 0.7), (-0.3, -0.35, 0.9), (0.1, 0.3, 1.0),
+                                      (-0.45, 0.1, 0.55), (0.42, 0.15, 1.05))):
+        add_sphere(f"BowlBubble{index}", air, location=location, radius=0.035 + 0.008 * index,
+                   segments=24)
+    # An ice cube floating across the surface of the water.
+    bpy.ops.mesh.primitive_cube_add(size=0.36, location=(-0.1, -0.15, 1.17),
+                                    rotation=(0.3, 0.5, 0.2))
+    bpy.context.object.name = "BowlIce"
+    bpy.context.object.data.materials.append(dielectric("BowlIce", IOR_ICE, roughness=0.03))
+
+    # Paperweight: a liquid core and bubbles inside solid glass.
+    add_sphere("Paperweight", dielectric("Crystal", 1.6), location=(1.95, 0.0, 0.62), radius=0.6)
+    add_sphere("Core", dielectric("Core", IOR_WATER, absorption=(0.9, 0.2, 0.35, 1), density=4.0),
+               location=(1.95, 0.0, 0.62), radius=0.3)
+    for index, location in enumerate(((2.2, -0.25, 0.85), (1.7, -0.3, 0.5), (2.05, -0.35, 0.35),
+                                      (1.75, -0.15, 0.95))):
+        add_sphere(f"CrystalBubble{index}", air, location=location, radius=0.03 + 0.01 * index,
+                   segments=24)
+    return scene
+
+
+def build(builder, kind, *arguments):
+    """Scene of one kind, see KIND."""
+    def function(args):
+        global KIND
+        KIND = kind
+        try:
+            return builder(args, *arguments)
+        finally:
+            KIND = "nested"
+    return function
+
+
+def pair(builder, kinds=("nested", "reference", "auto", "equal")):
+    return {kind: build(builder, kind, kind != "reference") for kind in kinds}
+
+
+# Kinds which a pair does not have: the larger block wins `overlap` and the unrelated medium of
+# `feature_only` needs a priority, `mixed` is about one priority among automatic media, and
+# `separate` has no media.
+SKIP_KINDS = {("overlap", "auto"), ("overlap", "equal"),
+              ("feature_only", "auto"), ("feature_only", "equal"),
+              ("mixed", "auto"), ("mixed", "equal"),
+              ("separate", "nested"), ("separate", "equal")}
 
 SCENES = {}
 for _name, _builder in (("shell", scene_shell),
@@ -774,8 +992,19 @@ for _name, _builder in (("shell", scene_shell),
                         ("matched_shadow", scene_matched_shadow),
                         ("bubble", scene_bubble),
                         ("camera_inside", scene_camera_inside),
-                        ("light_inside", scene_light_inside)):
+                        ("light_inside", scene_light_inside),
+                        ("overlap_small", scene_overlap_small),
+                        ("shell_swapped", scene_shell_swapped),
+                        ("unwelded", scene_unwelded),
+                        ("instance", scene_instance),
+                        ("joined", scene_joined),
+                        ("two_materials", scene_two_materials),
+                        ("open", scene_open),
+                        ("mixed", scene_mixed),
+                        ("separate", scene_separate)):
     for _kind, _function in pair(_builder).items():
+        if (_name, _kind) in SKIP_KINDS:
+            continue
         SCENES[f"{_name}_{_kind}"] = _function
 for _name, _builder in (("onion", scene_onion),
                         ("camera_inside_two", scene_camera_inside_two),
@@ -787,12 +1016,23 @@ SCENES.update({
     "stress_equal": lambda args: scene_stress(args, "equal"),
     "stress_open": lambda args: scene_stress(args, "open"),
     "stress_overflow": lambda args: scene_stress(args, "overflow"),
-    "legacy_stress": lambda args: scene_stress(args, "legacy"),
-    "legacy_stress_overflow": lambda args: scene_stress(args, "legacy_overflow"),
+    "legacy_stress": build(scene_stress, "reference", "legacy"),
+    "legacy_stress_overflow": build(scene_stress, "reference", "legacy_overflow"),
+    "stress_auto": build(scene_stress, "auto", "mixed"),
+    "stress_open_auto": build(scene_stress, "auto", "open"),
+    "stress_overflow_auto": build(scene_stress, "auto", "overflow"),
     "dispersion_nested": lambda args: scene_dispersion(args, True),
+    "dispersion_auto": build(scene_dispersion, "auto", True),
+    "showcase_auto": build(scene_showcase, "auto"),
+    "showcase_off": build(scene_showcase, "reference", "overlap"),
+    "drink_auto": build(scene_drink, "auto", "nested"),
+    "drink_equal": build(scene_drink, "equal", "nested"),
+    "rod_matched_auto": build(scene_rod, "auto", True),
+    "rod_water_auto": build(scene_rod, "auto", False),
+    "spheres_auto": build(scene_spheres, "auto", (1, 1, 1)),
     "drink_nested": lambda args: scene_drink(args, "nested"),
-    "drink_gap": lambda args: scene_drink(args, "gap"),
-    "drink_overlap": lambda args: scene_drink(args, "overlap"),
+    "drink_gap": build(scene_drink, "reference", "gap"),
+    "drink_overlap": build(scene_drink, "reference", "overlap"),
     "rod_matched": lambda args: scene_rod(args, True),
     "rod_water": lambda args: scene_rod(args, False),
     "spheres_123": lambda args: scene_spheres(args, (1, 2, 3)),
@@ -804,7 +1044,8 @@ EXTRA_PAIRS = ("onion", "camera_inside_two", "ice_volume")
 VALIDATION_PAIRS = ("shell", "rough_shell", "rough_inner", "rough_outer", "mnee_shell",
                     "feature_only",
                     "principled_shell", "overlap", "matched", "matched_shadow", "bubble",
-                    "camera_inside", "light_inside")
+                    "camera_inside", "light_inside", "overlap_small", "shell_swapped", "unwelded",
+                    "instance", "joined", "two_materials", "open", "mixed", "separate")
 
 
 def enable_device(args):
@@ -820,22 +1061,26 @@ def enable_device(args):
 def main():
     args = parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    kinds = ("nested", "reference", "auto", "equal")
     if args.scenes == "all":
         names = list(SCENES)
     elif args.scenes == "validation":
-        names = [f"{name}_{kind}" for name in VALIDATION_PAIRS for kind in ("nested", "reference")]
+        names = [f"{name}_{kind}" for name in VALIDATION_PAIRS for kind in kinds]
     elif args.scenes == "extra":
-        names = [f"{name}_{kind}" for name in EXTRA_PAIRS for kind in ("nested", "reference")]
+        names = [f"{name}_{kind}" for name in EXTRA_PAIRS for kind in kinds]
     elif args.scenes == "stress":
-        names = [name for name in SCENES if name.startswith("stress_")] + ["dispersion_nested"]
+        names = [name for name in SCENES if name.startswith("stress_")]
+        names += ["dispersion_nested", "dispersion_auto"]
     elif args.scenes == "references":
         names = [f"{name}_reference" for name in VALIDATION_PAIRS]
     elif args.scenes == "demo":
-        names = [name for name in SCENES if name.split("_")[0] in ("drink", "rod", "spheres")]
+        names = [name for name in SCENES if name.split("_")[0] in ("drink", "rod", "spheres", "showcase")]
     else:
         names = args.scenes.split(",")
     report = {}
     for name in names:
+        if name not in SCENES:
+            continue
         SCENES[name](args)
         enable_device(args)
         scene = bpy.context.scene

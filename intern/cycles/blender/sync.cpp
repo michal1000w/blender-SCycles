@@ -413,6 +413,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
 
   integrator->set_caustics_reflective(get_boolean(cscene, "caustics_reflective"));
   integrator->set_caustics_refractive(get_boolean(cscene, "caustics_refractive"));
+  integrator->set_use_auto_nested_dielectrics(get_boolean(cscene, "use_auto_nested_dielectrics"));
   integrator->set_filter_glossy(get_float(cscene, "blur_glossy"));
   integrator->set_use_bidirectional_path_tracing(
       get_boolean(cscene, "use_bidirectional_path_tracing"));

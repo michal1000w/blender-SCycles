@@ -242,6 +242,7 @@ NODE_DEFINE(Integrator)
 
   SOCKET_BOOLEAN(caustics_reflective, "Reflective Caustics", true);
   SOCKET_BOOLEAN(caustics_refractive, "Refractive Caustics", true);
+  SOCKET_BOOLEAN(use_auto_nested_dielectrics, "Automatic Nested Dielectrics", true);
   SOCKET_FLOAT(filter_glossy, "Filter Glossy", 1.0f);
 
   SOCKET_BOOLEAN(use_bidirectional_path_tracing, "Bidirectional Path Tracing", false);
@@ -417,9 +418,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
       continue;
     }
     /* keep this in sync with SD_HAS_TRANSPARENT_SHADOW in shader.cpp */
-    if ((shader->has_surface_transparent && shader->get_use_transparent_shadow()) ||
-        shader->has_volume || shader->get_nested_priority() != 0)
-    {
+    if (shader->has_transparent_shadow()) {
       kintegrator->transparent_shadows = true;
       break;
     }
@@ -704,6 +703,11 @@ void Integrator::tag_update(Scene *scene, const uint32_t flag)
   if (motion_blur_is_modified()) {
     scene->object_manager->tag_update(scene, ObjectManager::MOTION_BLUR_MODIFIED);
     scene->camera->tag_modified();
+  }
+
+  if (use_auto_nested_dielectrics_is_modified()) {
+    /* Which objects are media. */
+    scene->object_manager->need_flags_update = true;
   }
 
   if (volume_ray_marching_is_modified()) {
