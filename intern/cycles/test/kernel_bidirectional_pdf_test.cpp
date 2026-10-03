@@ -146,6 +146,223 @@ template<int Exponent> static void check_log_mis_range()
   EXPECT_NEAR(Log::weight(state.y, -INFINITY), .5, 5e-5);
 }
 
+/* Vertex connection and merging: the recursive terms dVCM, dVC and dVM must give every strategy
+ * the weight that the explicit densities of all strategies give it. With connections this is the
+ * estimator of Georgiev et al.; without, path tracing with next event estimation and merging.
+ *
+ * The path has the emitter vertex 0 and the surface vertices 1..n, the camera follows vertex n.
+ * `light_area[i]` and `camera_area[i]` are the densities with which a light and a camera subpath
+ * sample vertex i from its neighbor, `eta` is the number of merge candidates times the area of
+ * the merge disk. */
+static void test_vertex_merging_partition(const bool connections, const bool with_delta)
+{
+  using W = BDPTMISWeight;
+  constexpr int exponent = 2;
+  std::mt19937 rng(connections ? 912367 : 55021);
+  std::uniform_real_distribution<float> uniform(0.2f, 4.0f);
+  std::uniform_real_distribution<float> cosine(0.2f, 1.0f);
+  for (int trial = 0; trial < 4000; ++trial) {
+    const int n = 1 + trial % 6;
+    /* Index i of the per-edge values is the edge between the vertices i and i + 1, the last
+     * edge ends at the camera. */
+    std::vector<float> light_pdf(n + 1), camera_pdf(n + 1), cos_prev(n + 1), cos_next(n + 1);
+    std::vector<float> distance2(n + 1);
+    std::vector<bool> delta(n + 1, false);
+    for (int i = 0; i <= n; ++i) {
+      light_pdf[i] = uniform(rng);
+      camera_pdf[i] = uniform(rng);
+      cos_prev[i] = cosine(rng);
+      cos_next[i] = cosine(rng);
+      distance2[i] = uniform(rng);
+      delta[i] = with_delta && i > 0 && (rng() % 3 == 0);
+    }
+    const float emitter_area_pdf = uniform(rng);
+    const float nee_area_pdf = uniform(rng);
+    const float emission_direction_pdf = light_pdf[0];
+    const float camera_direction_pdf = uniform(rng);
+    const float light_samples = connections ? uniform(rng) * 50.0f : 0.0f;
+    const float eta = uniform(rng) * 0.05f;
+    const float selection_ratio = nee_area_pdf / emitter_area_pdf;
+
+    /* Density of vertex i as a light subpath and as a camera subpath samples it. */
+    std::vector<double> light_area(n + 1), camera_area(n + 1);
+    light_area[0] = emitter_area_pdf;
+    for (int i = 1; i <= n; ++i) {
+      light_area[i] = double(light_pdf[i - 1]) * cos_prev[i] / distance2[i - 1];
+    }
+    for (int i = 0; i < n; ++i) {
+      camera_area[i] = double(camera_pdf[i + 1]) * cos_next[i] / distance2[i];
+    }
+    camera_area[n] = double(camera_direction_pdf) * cos_next[n] / distance2[n];
+
+    /* Explicit density of every strategy. */
+    const auto powered = [](const double density) { return std::pow(density, exponent); };
+    const auto product = [&](const int light_vertices) {
+      double density = 1.0;
+      for (int i = 0; i <= n; ++i) {
+        density *= i < light_vertices ? light_area[i] : camera_area[i];
+      }
+      return density;
+    };
+    /* Strategy s < n + 2 connects a light subpath of s vertices; strategy n + 1 + j merges at
+     * vertex j. */
+    std::vector<double> probability(2 * n + 2, 0.0);
+    probability[0] = powered(product(0));
+    probability[1] = powered(product(1) * nee_area_pdf / emitter_area_pdf);
+    if (delta[1]) {
+      probability[1] = 0.0;
+    }
+    if (connections) {
+      for (int s = 2; s <= n; ++s) {
+        if (!delta[s - 1] && !delta[s]) {
+          probability[s] = powered(product(s));
+        }
+      }
+      if (!delta[n]) {
+        probability[n + 1] = powered(product(n + 1) * light_samples);
+      }
+    }
+    for (int j = 1; j <= n; ++j) {
+      if (!delta[j]) {
+        probability[n + 1 + j] = powered(product(j + 1) * camera_area[j] * eta);
+      }
+    }
+    double total = 0.0;
+    for (const double density : probability) {
+      total += density;
+    }
+
+    /* The recurrences of the light and the camera subpath. */
+    const float vm_factor = W(eta).encoded();
+    const float vc_factor = (W(1.0f) / eta).encoded();
+    std::vector<float3> light_terms(n + 1), camera_terms(n + 1);
+    {
+      W cm = W(emitter_area_pdf) / (emitter_area_pdf * emission_direction_pdf);
+      W vc = W(cos_next[0]) / (emitter_area_pdf * emission_direction_pdf);
+      W vm = vc * W::from_encoded(vc_factor);
+      for (int i = 1; i <= n; ++i) {
+        cm = cm * distance2[i - 1] / cos_prev[i];
+        vc /= cos_prev[i];
+        vm /= cos_prev[i];
+        const float3 hit = make_float3(cm.encoded(), vc.encoded(), vm.encoded());
+        light_terms[i] = hit;
+        const float3 next = delta[i] ?
+                                W::Log::scatter_delta_vcm(
+                                    hit, cos_next[i], light_pdf[i], camera_pdf[i]) :
+                                W::Log::scatter_vcm(hit,
+                                                    cos_next[i],
+                                                    light_pdf[i],
+                                                    camera_pdf[i],
+                                                    i == 1 ? selection_ratio :
+                                                             (connections ? 1.0f : 0.0f),
+                                                    vm_factor,
+                                                    vc_factor);
+        cm = W::from_encoded(next.x);
+        vc = W::from_encoded(next.y);
+        vm = W::from_encoded(next.z);
+      }
+    }
+    {
+      W cm = connections ? W(light_samples) / camera_direction_pdf : W(0.0f);
+      W vc = W(0.0f);
+      W vm = W(0.0f);
+      for (int i = n; i >= 0; --i) {
+        cm = cm * distance2[i] / cos_next[i];
+        vc /= cos_next[i];
+        vm /= cos_next[i];
+        const float3 hit = make_float3(cm.encoded(), vc.encoded(), vm.encoded());
+        camera_terms[i] = hit;
+        if (i == 0) {
+          break;
+        }
+        const float3 next = delta[i] ?
+                                W::Log::scatter_delta_vcm(
+                                    hit, cos_prev[i], camera_pdf[i], light_pdf[i]) :
+                                W::Log::scatter_vcm(hit,
+                                                    cos_prev[i],
+                                                    camera_pdf[i],
+                                                    light_pdf[i],
+                                                    connections ? 1.0f : 0.0f,
+                                                    vm_factor,
+                                                    vc_factor);
+        cm = W::from_encoded(next.x);
+        vc = W::from_encoded(next.y);
+        vm = W::from_encoded(next.z);
+      }
+    }
+    const auto term = [](const float encoded) { return W::from_encoded(encoded); };
+    const W vm_term = W::from_encoded(vm_factor);
+    const W vc_term = W::from_encoded(vc_factor);
+    const float connection = connections ? 1.0f : 0.0f;
+    /* Alternatives that reach a vertex from the other side: a merge at it, a connection to it
+     * and all strategies further along, as the kernel sums them. */
+    const auto light_alternatives = [&](const int i) {
+      return vm_term + term(light_terms[i].x) * (i == 1 ? selection_ratio : connection) +
+             term(light_terms[i].y) * camera_pdf[i];
+    };
+    const auto camera_alternatives = [&](const int i) {
+      return vm_term + term(camera_terms[i].x) * connection +
+             term(camera_terms[i].y) * light_pdf[i];
+    };
+
+    double sum = 0.0;
+    for (int strategy = 0; strategy < int(probability.size()); ++strategy) {
+      if (probability[strategy] == 0.0) {
+        continue;
+      }
+      W alternatives;
+      if (strategy == 0) {
+        /* The camera path reaches the emitter. */
+        alternatives = W(nee_area_pdf) * term(camera_terms[0].x) +
+                       W(emitter_area_pdf * emission_direction_pdf) * term(camera_terms[0].y);
+      }
+      else if (strategy == 1) {
+        /* Next event estimation at vertex 1. */
+        alternatives = W(float(camera_area[0])) / nee_area_pdf +
+                       W(float(emitter_area_pdf * light_area[1])) / nee_area_pdf *
+                           camera_alternatives(1);
+      }
+      else if (strategy <= n) {
+        /* Connection of the light vertex s - 1 and the camera vertex s. */
+        const int s = strategy;
+        alternatives = W(float(camera_area[s - 1])) * light_alternatives(s - 1) +
+                       W(float(light_area[s])) * camera_alternatives(s);
+      }
+      else if (strategy == n + 1) {
+        /* Connection of the light vertex n to the sensor. */
+        alternatives = W(float(camera_area[n])) / light_samples * light_alternatives(n);
+      }
+      else {
+        /* Merge at vertex j. */
+        const int j = strategy - n - 1;
+        alternatives = term(light_terms[j].x) * (j == 1 ? selection_ratio : connection) *
+                           vc_term +
+                       term(light_terms[j].z) * camera_pdf[j] +
+                       term(camera_terms[j].x) * connection * vc_term +
+                       term(camera_terms[j].z) * light_pdf[j];
+      }
+      const double weight = (W(1.0f) + alternatives).inverse();
+      const double expected = probability[strategy] / total;
+      EXPECT_NEAR(weight, expected, 2.0e-4 + 2.0e-3 * expected)
+          << "strategy " << strategy << " of " << n << " vertices, trial " << trial;
+      sum += weight;
+    }
+    EXPECT_NEAR(sum, 1.0, 2.0e-3) << "trial " << trial;
+  }
+}
+
+TEST(BidirectionalPDF, VertexConnectionAndMergingPartition)
+{
+  test_vertex_merging_partition(true, false);
+  test_vertex_merging_partition(true, true);
+}
+
+TEST(BidirectionalPDF, PathTracingWithMergingPartition)
+{
+  test_vertex_merging_partition(false, false);
+  test_vertex_merging_partition(false, true);
+}
+
 TEST(BidirectionalPDF, LogMISRecoversAfterExtremeIntermediateRatios)
 {
   check_log_mis_range<1>();

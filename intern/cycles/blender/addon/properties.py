@@ -810,6 +810,36 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=8,
     )
 
+    use_vertex_merging: BoolProperty(
+        name="Vertex Connection and Merging",
+        description="Merge camera paths with nearby vertices of light paths and combine the result with all other sampling strategies by multiple importance sampling. With bidirectional path tracing this is full vertex connection and merging; with path tracing, merging is combined with the regular path sampling. Renders caustics seen through or reflected by specular surfaces (CPU and Metal GPU)",
+        default=False,
+    )
+
+    vcm_radius: FloatProperty(
+        name="Merge Radius",
+        description="Initial world-space radius in which light path vertices are merged; smaller values are sharper but noisier. Zero uses 0.3% of the scene size",
+        min=0.0, soft_max=1.0,
+        default=0.0,
+        precision=4,
+        unit='LENGTH',
+    )
+
+    vcm_radius_alpha: FloatProperty(
+        name="Radius Reduction",
+        description="Rate at which the merge radius shrinks over the samples: 1 keeps the radius, lower values remove the blur of merging faster at the cost of more noise",
+        min=0.0, max=1.0,
+        default=0.75,
+    )
+
+    vcm_merge_max: IntProperty(
+        name="Merge Maximum",
+        description="Maximum number of nearby light path vertices evaluated at one shading point; dense neighborhoods are sampled without losing energy",
+        min=1, max=1024,
+        soft_max=64,
+        default=16,
+    )
+
     use_photon_mapping: BoolProperty(
         name="Photon Mapping",
         description="Use progressive photon density estimates for difficult surface and volume caustics (CPU and Metal GPU)",

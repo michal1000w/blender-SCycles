@@ -878,6 +878,8 @@ static MTLFunctionConstantValues *GetConstantValues(const KernelData *data = nul
   KernelData specialization_data = *data;
   if (pso_type == PSO_SPECIALIZED_INTERSECT) {
     specialization_data.integrator.use_bidirectional_path_tracing = 0;
+    specialization_data.integrator.use_vertex_merging = 0;
+    specialization_data.integrator.bdpt_use_connections = 0;
     specialization_data.integrator.use_photon_mapping = 0;
     data = &specialization_data;
   }

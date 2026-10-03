@@ -434,6 +434,10 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
       int(bdpt_reference_pixels > INT_MAX ? INT_MAX : bdpt_reference_pixels));
   integrator->set_bdpt_max_bounces(get_int(cscene, "bdpt_max_bounces"));
   integrator->set_bdpt_update_samples(get_int(cscene, "bdpt_update_samples"));
+  integrator->set_use_vertex_merging(get_boolean(cscene, "use_vertex_merging"));
+  integrator->set_vcm_radius(get_float(cscene, "vcm_radius"));
+  integrator->set_vcm_radius_alpha(get_float(cscene, "vcm_radius_alpha"));
+  integrator->set_vcm_merge_max(get_int(cscene, "vcm_merge_max"));
   integrator->set_use_photon_mapping(get_boolean(cscene, "use_photon_mapping"));
   integrator->set_photon_count(get_int(cscene, "photon_count"));
   integrator->set_photon_radius(get_float(cscene, "photon_radius"));
@@ -526,6 +530,7 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
    * even when the light-tree checkbox itself has not changed (e.g. viewport toggles). */
   if (integrator->use_light_tree_is_modified() ||
       integrator->use_bidirectional_path_tracing_is_modified() ||
+      integrator->use_vertex_merging_is_modified() ||
       integrator->use_photon_mapping_is_modified())
   {
     scene->light_manager->tag_update(scene, LightManager::UPDATE_ALL);

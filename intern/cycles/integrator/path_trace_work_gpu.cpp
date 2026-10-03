@@ -131,6 +131,7 @@ PathTraceWorkGPU::PathTraceWorkGPU(Device *device,
       photons_(device, "photon_map"),
       photon_hash_(device, "photon_hash"),
       photon_stored_(device, "photon_stored", MEM_READ_WRITE),
+      vcm_vertices_(device, "vcm_light_vertices"),
       bdpt_vertices_(device, "bdpt_light_vertices"),
       bdpt_coherent_history_(device, "bdpt_coherent_history"),
       bdpt_polarization_(device, "bdpt_polarization"),
@@ -697,6 +698,7 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
     integrator_state_gpu_.bdpt_cache_start_sample = 0;
     integrator_state_gpu_.bdpt_light_path_count = 0;
     integrator_state_gpu_.bdpt_light_path_sample_ratio = 0.0f;
+    alloc_vertex_merging(0, 0);
     return;
   }
 
@@ -771,10 +773,63 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
   integrator_state_gpu_.bdpt_cache_start_sample = 0;
   integrator_state_gpu_.bdpt_light_path_count = light_paths;
   integrator_state_gpu_.bdpt_light_path_sample_ratio = float(light_paths);
+  alloc_vertex_merging(light_paths, cache_capacity);
+}
+
+void PathTraceWorkGPU::alloc_vertex_merging(const uint light_paths, const uint cache_capacity)
+{
+  const KernelIntegrator &integrator = device_scene_->data.integrator;
+  integrator_state_gpu_.vcm_eta = 0.0f;
+  integrator_state_gpu_.vcm_light_path_count = 0;
+  if (!integrator.use_vertex_merging || light_paths == 0 || cache_capacity == 0) {
+    if (vcm_vertices_.device_pointer) {
+      /* The photon map was the one of merging: photon mapping is off whenever merging is on. */
+      vcm_vertices_.free();
+      photons_.free();
+      photon_hash_.free();
+      integrator_state_gpu_.photons = nullptr;
+      integrator_state_gpu_.photon_hash = nullptr;
+      integrator_state_gpu_.photon_hash_size = 0;
+      integrator_state_gpu_.photon_capacity = 0;
+    }
+    integrator_state_gpu_.vcm_vertices = nullptr;
+    integrator_state_gpu_.vcm_path_slots = 0;
+    integrator_state_gpu_.vcm_cache_slots = 0;
+    vcm_path_capacity_ = 0;
+    return;
+  }
+
+  /* Every subpath owns the slots of the vertices it can store. Bound the memory of the map by
+   * the number of subpaths that store theirs: merging with fewer is noisier, not darker. */
+  const uint path_slots = vertex_merging_path_slots(integrator);
+  const size_t slot_size = sizeof(KernelPhoton) + sizeof(KernelVCMVertex);
+  vcm_path_capacity_ = uint(
+      min(size_t(light_paths),
+          max(VERTEX_MERGING_MAX_MEMORY / (slot_size * path_slots * cache_capacity), size_t(1))));
+  const uint cache_slots = vcm_path_capacity_ * path_slots;
+  const uint capacity = cache_slots * cache_capacity;
+  const uint hash_size = max(2048u, next_power_of_two(capacity / 2));
+
+  photons_.alloc_to_device(capacity, false);
+  vcm_vertices_.alloc_to_device(capacity, false);
+  photon_hash_.alloc_to_device(hash_size, false);
+
+  integrator_state_gpu_.photons = (KernelPhoton *)photons_.device_pointer;
+  integrator_state_gpu_.photon_hash = (uint *)photon_hash_.device_pointer;
+  integrator_state_gpu_.vcm_vertices = (KernelVCMVertex *)vcm_vertices_.device_pointer;
+  integrator_state_gpu_.photon_hash_size = hash_size;
+  integrator_state_gpu_.photon_capacity = capacity;
+  integrator_state_gpu_.photon_iteration = 0;
+  integrator_state_gpu_.vcm_path_slots = path_slots;
+  integrator_state_gpu_.vcm_cache_slots = cache_slots;
 }
 
 void PathTraceWorkGPU::alloc_photon_mapping()
 {
+  if (device_scene_->data.integrator.use_vertex_merging) {
+    /* The map holds the light subpath vertices, see alloc_vertex_merging(). */
+    return;
+  }
   if (!device_scene_->data.integrator.use_photon_mapping) {
     photons_.free();
     photon_hash_.free();
@@ -1184,6 +1239,17 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
   integrator_state_gpu_.bdpt_buffer_height = effective_buffer_params_.height;
   integrator_state_gpu_.bdpt_buffer_offset = effective_buffer_params_.offset;
   integrator_state_gpu_.bdpt_buffer_stride = effective_buffer_params_.stride;
+  const bool use_merging = device_scene_->data.integrator.use_vertex_merging &&
+                           integrator_state_gpu_.photon_capacity != 0;
+  if (use_merging) {
+    /* The caches of a batch belong to consecutive samples and share the radius of the first. */
+    const VertexMergingRadius merging = vertex_merging_radius(
+        device_scene_->data.integrator, iteration, min(paths_per_cache, vcm_path_capacity_));
+    integrator_state_gpu_.photon_iteration = iteration;
+    integrator_state_gpu_.photon_radius = merging.radius;
+    integrator_state_gpu_.vcm_light_path_count = merging.light_paths;
+    integrator_state_gpu_.vcm_eta = merging.eta;
+  }
   device_->const_copy_to(
       "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
   const DeviceKernelArguments generate_args(&num_light_paths, &iteration, &batch_samples);
@@ -1209,9 +1275,18 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
     /* Generation has no film/shadow side effects. Discard incomplete reservoirs and replay
      * the same light samples after loading requested tiles, before exposing the cache. */
     queue_->zero_to_device(bdpt_vertex_count_);
+    if (use_merging) {
+      /* Light generation links its merge vertices into the hash grid. */
+      queue_->zero_to_device(photon_hash_);
+    }
     queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE, num_light_paths, generate_args);
   } while (has_tiled_images && resolve_cache_misses("light generation"));
   if (device_->have_error()) {
+    return;
+  }
+  if (!device_scene_->data.integrator.bdpt_use_connections) {
+    /* The light subpaths only provide the vertices to merge with. */
+    queue_->synchronize();
     return;
   }
   const int order_threads = device_->info.type == DEVICE_METAL ? int(64 * cache_count) : 1;

@@ -91,6 +91,8 @@ class PathTraceWorkCPU : public PathTraceWork {
                                   const bool adaptive_sampling);
   void alloc_photon_mapping();
   void alloc_bidirectional_path_tracing();
+  /* Photon map of the light subpath vertices for vertex merging, of `light_paths` subpaths. */
+  void alloc_vertex_merging(const uint light_paths);
   /* Emit and link an independent photon map for the given render sample. */
   void update_photon_map(const int start_sample);
   /* Generate light subpaths for a batch of camera samples, and splat their camera connections. */
@@ -111,6 +113,9 @@ class PathTraceWorkCPU : public PathTraceWork {
   array<KernelPhoton> photons_;
   array<uint> photon_hash_;
   array<uint8_t> photon_valid_;
+  /* Vertex merging keeps its light subpath vertices in the photon map, with these MIS terms. */
+  array<KernelVCMVertex> vcm_vertices_;
+  uint vcm_path_capacity_ = 0;
   uint photon_stored_ = 0;
   array<KernelBDPTVertex> bdpt_vertices_;
   array<CoherentPathHistory> bdpt_coherent_history_;

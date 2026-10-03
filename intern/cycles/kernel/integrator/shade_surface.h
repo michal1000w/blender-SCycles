@@ -24,6 +24,7 @@
 #if defined(__BDPT__) && !defined(__KERNEL_METAL__)
 /* Light-cache transport. The Metal kernels include it once, ahead of all shading kernels. */
 #  include "kernel/integrator/bidirectional.h"
+#  include "kernel/integrator/vertex_merging.h"
 #  include "kernel/integrator/guiding_gpu.h"
 #endif
 
@@ -619,7 +620,8 @@ ccl_device_forceinline_transport bool integrate_surface_bidirectional(
     ccl_attr_maybe_unused const ccl_private RNGState *rng_state)
 {
   if (!bdpt_enabled_for_surface_path(kg, state) || !(sd->runtime_flag & SR_BSDF_HAS_EVAL) ||
-      !kernel_integrator_state.bdpt_vertices || !kernel_integrator_state.bdpt_vertex_count)
+      !kernel_integrator_state.bdpt_vertices || !kernel_integrator_state.bdpt_vertex_count ||
+      !bdpt_connections_enabled(kg))
   {
     return false;
   }
@@ -802,14 +804,14 @@ ccl_device_forceinline_transport bool integrate_surface_bidirectional(
                                  light_sd.N,
                                  light_sd.runtime_flag,
                                  light_sd.object) : 1.0f;
+  /* Either end of the connection can also be merged with the vertex next to it. */
   const BDPTMISWeight w_light =
       BDPTMISWeight(camera_pdf_area) *
       (BDPTMISWeight::from_encoded(light_vertex->d_vcm) * selection_ratio +
-       BDPTMISWeight::from_encoded(light_vertex->d_vc) * light_reverse_pdf);
-  const BDPTMISWeight w_camera =
-      BDPTMISWeight(light_pdf_area) *
-      (BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vcm)) +
-       BDPTMISWeight::from_encoded(INTEGRATOR_STATE(state, path, bdpt_d_vc)) * camera_reverse_pdf);
+       BDPTMISWeight::from_encoded(light_vertex->d_vc) * light_reverse_pdf +
+       vcm_mis_vm_factor(kg));
+  const BDPTMISWeight w_camera = BDPTMISWeight(light_pdf_area) *
+                                 bdpt_camera_vertex_alternatives(kg, state, camera_reverse_pdf);
   /* Reservoir subsampling estimates the sum over all connectible light-path vertices.
    * Its inverse inclusion probability belongs in the contribution below. The recursive MIS
    * partition still describes those complete strategies, as do NEE and sensor connections.
@@ -1121,7 +1123,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #ifdef __BDPT__
   if (update_bdpt_mis) {
     const float cos_out = max(fabsf(dot(sd->Ng, normalize(bsdf_wo))), 1.0e-8f);
-    bdpt_recursive_mis_after_scatter(state, label, cos_out, mis_pdf, reverse_pdf);
+    bdpt_recursive_mis_after_scatter(kg, state, label, cos_out, mis_pdf, reverse_pdf);
   }
 #endif
 
@@ -1366,6 +1368,7 @@ enum MetalSurfaceStage {
   METAL_SURFACE_STAGE_EMISSION = 5,
   METAL_SURFACE_STAGE_DATA_PASSES = 6,
   METAL_SURFACE_STAGE_DENOISING_FEATURES = 7,
+  METAL_SURFACE_STAGE_VERTEX_MERGING = 8,
 };
 
 ccl_device_inline int integrate_surface_stage(const MetalSurfaceStage stage,
@@ -1434,7 +1437,8 @@ ccl_device int integrate_surface(KernelGlobals kg,
   ccl_attr_maybe_unused constexpr bool staged_bdpt = false;
   constexpr uint surface_stage = 0;
 #endif
-  /* 0: initial shading, 1: direct light pending, 2: connection pending, 3: scatter pending.
+  /* 0: initial shading, 1: vertex merging pending, 2: direct light pending, 3: connection
+   * pending, 4: scatter pending.
    * Texture retries reconstruct closures but never repeat completed film or shadow writes. */
 
 #ifdef __NESTED_DIELECTRICS__
@@ -1600,8 +1604,30 @@ ccl_device int integrate_surface(KernelGlobals kg,
       guiding_write_debug_passes(kg, state, &sd, render_buffer);
     }
 #endif
+#ifdef __BDPT__
     if (surface_stage < 2) {
-      if (surface_stage == 0 && kernel_data.integrator.coherent_specular_enabled &&
+      /* Merge with the light subpath vertices around this vertex. */
+      if (kernel_data.integrator.use_vertex_merging) {
+#  ifdef __KERNEL_METAL_VISIBLE_SHADING__
+        const bool merged = integrate_surface_stage(METAL_SURFACE_STAGE_VERTEX_MERGING,
+                                                    state,
+                                                    &sd,
+                                                    nullptr,
+                                                    render_buffer) == 0;
+#  else
+        const bool merged = vcm_merge(kg, state, &sd, render_buffer);
+#  endif
+        if (!merged) {
+          return LABEL_CACHE_MISS;
+        }
+      }
+      if (staged_bdpt) {
+        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 2;
+      }
+    }
+#endif
+    if (surface_stage < 3) {
+      if (surface_stage <= 1 && kernel_data.integrator.coherent_specular_enabled &&
           (sd.object_flag & SD_OBJECT_COHERENT_DETECTOR))
       {
         /* Diagonals and signed pairs for declared coherent source paths are
@@ -1651,12 +1677,12 @@ ccl_device int integrate_surface(KernelGlobals kg,
       }
 #ifdef __BDPT__
       if (staged_bdpt) {
-        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 2;
+        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 3;
       }
 #endif
     }
 
-    if (surface_stage < 3) {
+    if (surface_stage < 4) {
 #ifdef __BDPT__
 #  ifdef __KERNEL_METAL_VISIBLE_SHADING__
       integrate_surface_stage(METAL_SURFACE_STAGE_BIDIRECTIONAL, state, &sd, &rng_state);
@@ -1681,7 +1707,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #endif
 #ifdef __BDPT__
       if (staged_bdpt) {
-        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 3;
+        INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 4;
       }
 #endif
     }

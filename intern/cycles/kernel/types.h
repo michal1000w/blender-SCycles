@@ -1811,6 +1811,23 @@ static_assert_align(KernelBDPTVertex, 16);
 static_assert(sizeof(KernelBDPTVertex) == 112,
               "KernelBDPTVertex includes the exact emitter endpoint");
 
+/* Recursive MIS terms of a light subpath vertex stored for vertex merging. The vertex itself is
+ * a KernelPhoton record in the same slot of the photon map. */
+struct ccl_align(16) KernelVCMVertex {
+  /* Logarithmic MIS terms; negative infinity represents an empty alternative sum. */
+  float d_vcm;
+  float d_vc;
+  float d_vm;
+  /* Number of path vertices up to and including this one, the emitter counts as the first. */
+  uint path_length;
+  /* Previous vertex and emission CDF entry of a first surface vertex, for the density with
+   * which next event estimation samples its emitter. */
+  packed_float3 emitter_P;
+  int emitter_distribution;
+};
+static_assert_align(KernelVCMVertex, 16);
+static_assert(sizeof(KernelVCMVertex) == 32, "KernelVCMVertex must remain a 32-byte record");
+
 /* Bounding box. */
 struct KernelBoundingBox {
   packed_float3 min;
