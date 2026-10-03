@@ -84,6 +84,8 @@ class Integrator : public Node {
 
   NODE_SOCKET_API(bool, caustics_reflective)
   NODE_SOCKET_API(bool, caustics_refractive)
+  /* Closed refractive objects which overlap are nested dielectric media without a priority. */
+  NODE_SOCKET_API(bool, use_auto_nested_dielectrics)
   NODE_SOCKET_API(float, filter_glossy)
 
   NODE_SOCKET_API(bool, use_bidirectional_path_tracing)

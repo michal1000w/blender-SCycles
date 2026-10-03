@@ -110,25 +110,39 @@ def main():
     sphere("Water", inner, 0.7)
     ior = inner.node_tree.nodes["Glass BSDF"].inputs["IOR"]
 
-    def set_nested(enabled):
-        outer.cycles.nested_priority = 1 if enabled else 0
-        inner.cycles.nested_priority = 2 if enabled else 0
-        ior.default_value = 1.33 if enabled else 1.33 / 1.5
+    water = bpy.data.objects["Water"]
 
+    def set_state(state):
+        """`priority`: media by priority. `fake`: no media, the relative index on the inner
+        sphere. `auto`: media by Automatic Nested Dielectrics. `apart`: the spheres do not
+        overlap, with the automatic setting on or off."""
+        priority = state == "priority"
+        outer.cycles.nested_priority = 1 if priority else 0
+        inner.cycles.nested_priority = 2 if priority else 0
+        ior.default_value = 1.33 / 1.5 if state == "fake" else 1.33
+        cycles.use_auto_nested_dielectrics = state in ("auto", "apart_auto")
+        water.location[0] = 3.0 if state.startswith("apart") else 0.0
+
+    # Renders of the same row must be the same image.
+    same = {"priority": "media", "fake": "media", "auto": "media",
+            "apart_auto": "apart", "apart_off": "apart"}
     failed = False
     reference = {}
-    for step, nested in enumerate((True, False, True, False, True)):
-        set_nested(nested)
+    for step, state in enumerate(("priority", "fake", "auto", "apart_auto", "apart_off", "auto",
+                                  "fake", "priority", "apart_off", "auto", "priority")):
+        set_state(state)
         pixels = render(scene)
-        if nested not in reference:
-            reference[nested] = pixels
-        difference = float(np.abs(pixels - reference[nested]).max())
-        across = float(np.abs(pixels - reference[True]).mean() / reference[True].mean())
+        reference.setdefault(state, pixels)
+        reference.setdefault(same[state], pixels)
+        difference = float(np.abs(pixels - reference[state]).max())
+        across = float(np.abs(pixels - reference[same[state]]).mean() /
+                       reference[same[state]].mean())
         ok = np.isfinite(pixels).all() and difference < 1e-3 and across < 2e-3
         failed |= not ok
-        print("NESTED_UPDATE step %d nested=%s mean=%.6f max difference to first of its kind=%.2e "
-              "relative difference to nested=%.2e %s" % (
-                  step, nested, pixels.mean(), difference, across, "ok" if ok else "FAILED"),
+        print("NESTED_UPDATE step %d %-10s mean=%.6f max difference to first of its kind=%.2e "
+              "relative difference to %s=%.2e %s" % (
+                  step, state, pixels.mean(), difference, same[state], across,
+                  "ok" if ok else "FAILED"),
               flush=True)
     if failed:
         sys.exit(1)

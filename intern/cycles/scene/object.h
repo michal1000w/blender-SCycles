@@ -82,6 +82,15 @@ class Object : public Node {
   /* Set during device update. */
   bool intersects_volume;
 
+  /* Nested dielectrics: the object is a medium, by a material with a nested priority or
+   * automatically, and its place in the order of media with the same priority. Set by the
+   * object manager when it updates the object flags. */
+  bool nested_medium = false;
+  int nested_rank = 0;
+  /* Every material of the object which is a medium is a closed surface, and a medium of its
+   * own. */
+  bool nested_per_shader = false;
+
   /* Specifies the position of the object in scene->objects and
    * in the device vectors. Gets set in device_update. */
   int index;
@@ -183,6 +192,12 @@ class ObjectManager {
                            Progress &progress,
                            bool bounds_valid = true);
   void device_update_geom_offsets(Device *device, DeviceScene *dscene, Scene *scene);
+
+  /* Nested dielectrics: find the objects which are media and their nesting rank. */
+  void update_nested_media(DeviceScene *dscene, Scene *scene);
+  /* Before any geometry is updated: could some objects be media automatically? Decides if the
+   * kernels need the feature, so it only may say no where update_nested_media() finds none. */
+  static bool auto_nested_media_possible(const Scene *scene);
 
   void device_free(Device *device, DeviceScene *dscene, bool force_free);
 

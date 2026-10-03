@@ -610,8 +610,7 @@ void Camera::device_update_volume(Device * /*device*/, DeviceScene *dscene, Scen
                    [&](const blocked_range<size_t> &r) {
                      for (size_t i = r.begin(); i != r.end(); i++) {
                        Object *object = scene->objects[i];
-                       if ((object->get_geometry()->has_volume ||
-                            object->get_geometry()->has_nested_priority) &&
+                       if ((object->get_geometry()->has_volume || object->nested_medium) &&
                            viewplane_boundbox.intersects(object->bounds))
                        {
                          /* TODO(sergey): Consider adding more grained check. */

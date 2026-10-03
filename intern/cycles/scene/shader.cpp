@@ -698,6 +698,31 @@ static float shader_nested_ior(const Shader *shader)
   return (principled_ior != 0.0f) ? principled_ior : 1.0f;
 }
 
+bool Shader::has_surface_refraction() const
+{
+  if (!graph) {
+    return false;
+  }
+  const ShaderInput *surface = graph->output()->input("Surface");
+  if (surface == nullptr || surface->link == nullptr) {
+    return false;
+  }
+  for (const ShaderNode *node : graph->nodes) {
+    if (node->type == GlassBsdfNode::get_node_type() ||
+        node->type == RefractionBsdfNode::get_node_type())
+    {
+      return true;
+    }
+    if (node->type == PrincipledBsdfNode::get_node_type()) {
+      const ShaderInput *weight = const_cast<ShaderNode *>(node)->input("Transmission Weight");
+      if (weight && (weight->link || node->get_float(weight->socket_type) > 0.0f)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void ShaderManager::device_update_common(Device * /*device*/,
                                          DeviceScene *dscene,
                                          Scene *scene,
@@ -738,7 +763,15 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (!is_zero(shader->emission_estimate)) {
       flag |= SD_HAS_EMISSION;
     }
-    if (shader->has_surface_transparent && shader->get_use_transparent_shadow()) {
+    /* Automatic nested dielectrics. Which objects are media depends on their geometry, which
+     * the object manager looks at when the candidates change. */
+    const bool nested_candidate = shader->get_nested_priority() == 0 &&
+                                  shader->has_surface_refraction();
+    if (nested_candidate != shader->nested_candidate) {
+      shader->nested_candidate = nested_candidate;
+      scene->object_manager->need_flags_update = true;
+    }
+    if (shader->has_transparent_shadow()) {
       flag |= SD_HAS_TRANSPARENT_SHADOW;
     }
     if (shader->has_surface_raytrace) {
@@ -805,11 +838,11 @@ void ShaderManager::device_update_common(Device * /*device*/,
     if (shader->has_dispersion || shader->has_spectral_transmission) {
       flag |= SD_REQUIRES_WAVELENGTH;
     }
-    if (shader->get_nested_priority() != 0) {
-      /* Shadow rays pass through the surfaces of a medium which another medium overrides, so
-       * they have to shade them like transparent surfaces. */
-      flag |= SD_HAS_NESTED_PRIORITY | SD_HAS_TRANSPARENT_SHADOW;
+    if (shader->get_nested_priority() != 0 || nested_candidate) {
       shader->nested_ior = shader_nested_ior(shader);
+    }
+    if (shader->is_nested_medium()) {
+      flag |= SD_HAS_NESTED_PRIORITY;
       if (shader->reference_count()) {
         has_nested_dielectrics = true;
       }
@@ -834,7 +867,7 @@ void ShaderManager::device_update_common(Device * /*device*/,
     kshader->constant_emission[1] = shader->emission_estimate.y;
     kshader->constant_emission[2] = shader->emission_estimate.z;
     kshader->cryptomatte_id = util_hash_to_float(cryptomatte_id);
-    kshader->nested_priority = shader->get_nested_priority();
+    kshader->nested_priority = clamp(shader->get_nested_priority(), 0, NESTED_PRIORITY_MAX);
     kshader->nested_ior = shader->nested_ior;
     kshader->pad1 = 0;
     kshader->pad2 = 0;

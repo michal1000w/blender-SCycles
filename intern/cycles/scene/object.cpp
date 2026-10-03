@@ -1038,6 +1038,413 @@ void ObjectManager::device_update(Device *device,
   }
 }
 
+/* Nested Dielectrics
+ *
+ * Objects are nested dielectric media by a material with a nested priority, or automatically:
+ * closed meshes with a refractive material which overlap another medium. Open meshes are left
+ * alone, as a path which enters one never leaves it again, and so are meshes with inward
+ * normals, whose surfaces already are interfaces seen from the inside. An object which overlaps
+ * nothing has the same interface with air as without the feature, so it is not tracked. */
+
+static uint64_t nested_hash_mix(uint64_t h)
+{
+  h ^= h >> 33;
+  h *= 0xff51afd7ed558ccdull;
+  h ^= h >> 33;
+  h *= 0xc4ceb9fe1a85ec53ull;
+  h ^= h >> 33;
+  return h;
+}
+
+static uint64_t nested_hash_position(const float3 P)
+{
+  /* Vertices are the same by position, so that meshes which do not share vertices between
+   * faces can be closed too. Add zero to turn -0 into +0. */
+  const float x = P.x + 0.0f;
+  const float y = P.y + 0.0f;
+  const float z = P.z + 0.0f;
+  uint32_t bits[3];
+  memcpy(&bits[0], &x, sizeof(float));
+  memcpy(&bits[1], &y, sizeof(float));
+  memcpy(&bits[2], &z, sizeof(float));
+  return nested_hash_mix(nested_hash_mix((uint64_t(bits[0]) << 32) | bits[1]) ^
+                         (uint64_t(bits[2]) * 0x9e3779b97f4a7c15ull));
+}
+
+/* Volume enclosed by a mesh if its surface is closed and its normals point outwards, otherwise
+ * zero. Also finds the materials whose faces are a closed surface by themselves, like the
+ * shells of a glass and its drink in one mesh.
+ *
+ * A surface is closed when every edge is used as often in one direction as in the other. This
+ * is tested without storing the edges: every use adds or subtracts a hash of the edge, and the
+ * sums of two independent hashes only are zero if all uses cancel (up to a chance of 2^-128). */
+static float nested_mesh_closed_volume(const Mesh *mesh, uint64_t &closed_shaders)
+{
+  closed_shaders = 0;
+  const size_t num_triangles = mesh->num_triangles();
+  const size_t num_verts = mesh->num_verts();
+  if (num_triangles < 4 || num_verts < 4) {
+    return 0.0f;
+  }
+  const packed_float3 *verts = mesh->get_position();
+
+  BoundBox bounds = BoundBox::empty;
+  vector<uint64_t> vert_hash(num_verts);
+  for (size_t i = 0; i < num_verts; i++) {
+    const float3 P = verts[i];
+    if (!isfinite_safe(P)) {
+      return 0.0f;
+    }
+    bounds.grow(P);
+    vert_hash[i] = nested_hash_position(P);
+  }
+  const float3 center = bounds.center();
+
+  /* Sums of the mesh, and of the faces of each of its first materials. */
+  const int num_slots = 64;
+  const array<int> &triangle_shader = mesh->get_shader();
+  const bool use_slots = triangle_shader.size() == num_triangles;
+  uint64_t slot_sum_a[num_slots] = {0};
+  uint64_t slot_sum_b[num_slots] = {0};
+  uint64_t used_slots = 0;
+
+  uint64_t sum_a = 0;
+  uint64_t sum_b = 0;
+  double volume = 0.0;
+  for (size_t i = 0; i < num_triangles; i++) {
+    const Mesh::Triangle triangle = mesh->get_triangle(i);
+    const int slot = use_slots ? triangle_shader[i] : 0;
+    const bool has_slot = slot >= 0 && slot < num_slots;
+    if (has_slot) {
+      used_slots |= uint64_t(1) << slot;
+    }
+    for (int j = 0; j < 3; j++) {
+      const uint64_t h0 = vert_hash[triangle.v[j]];
+      const uint64_t h1 = vert_hash[triangle.v[(j + 1) % 3]];
+      if (h0 == h1) {
+        continue;
+      }
+      const uint64_t lo = min(h0, h1);
+      const uint64_t hi = max(h0, h1);
+      const uint64_t edge_a = nested_hash_mix(lo ^ (hi * 0x9e3779b97f4a7c15ull));
+      const uint64_t edge_b = nested_hash_mix(hi ^ (lo * 0xc2b2ae3d27d4eb4full));
+      const uint64_t sign = (h0 < h1) ? 1 : ~uint64_t(0);
+      sum_a += sign * edge_a;
+      sum_b += sign * edge_b;
+      if (has_slot) {
+        slot_sum_a[slot] += sign * edge_a;
+        slot_sum_b[slot] += sign * edge_b;
+      }
+    }
+    const float3 v0 = float3(verts[triangle.v[0]]) - center;
+    const float3 v1 = float3(verts[triangle.v[1]]) - center;
+    const float3 v2 = float3(verts[triangle.v[2]]) - center;
+    volume += double(dot(v0, cross(v1, v2)));
+  }
+  if (sum_a != 0 || sum_b != 0) {
+    return 0.0f;
+  }
+  volume /= 6.0;
+  /* Flat or inside out. */
+  const float3 size = bounds.size();
+  if (!(volume > 1e-7 * double(size.x) * double(size.y) * double(size.z))) {
+    return 0.0f;
+  }
+  for (int slot = 0; slot < num_slots; slot++) {
+    if ((used_slots & (uint64_t(1) << slot)) && slot_sum_a[slot] == 0 && slot_sum_b[slot] == 0) {
+      closed_shaders |= uint64_t(1) << slot;
+    }
+  }
+  return float(volume);
+}
+
+static float nested_closed_volume(Geometry *geom)
+{
+  if (!geom->nested_closed_volume_valid) {
+    geom->nested_closed_shaders = 0;
+    geom->nested_closed_volume = geom->is_mesh() ?
+                                     nested_mesh_closed_volume(static_cast<Mesh *>(geom),
+                                                               geom->nested_closed_shaders) :
+                                     0.0f;
+    geom->nested_closed_volume_valid = true;
+  }
+  return geom->nested_closed_volume;
+}
+
+static float nested_transform_volume_scale(const Object *object)
+{
+  if (object->get_geometry()->transform_applied) {
+    return 1.0f;
+  }
+  const Transform &tfm = object->get_tfm();
+  const float3 x = make_float3(tfm.x.x, tfm.y.x, tfm.z.x);
+  const float3 y = make_float3(tfm.x.y, tfm.y.y, tfm.z.y);
+  const float3 z = make_float3(tfm.x.z, tfm.y.z, tfm.z.z);
+  return fabsf(dot(x, cross(y, z)));
+}
+
+/* Mark the boxes which overlap another one. */
+static void nested_find_overlaps(const vector<BoundBox> &bounds, vector<bool> &overlaps)
+{
+  const size_t num = bounds.size();
+  vector<size_t> order(num);
+  for (size_t i = 0; i < num; i++) {
+    order[i] = i;
+  }
+  sort(order.begin(), order.end(), [&](const size_t a, const size_t b) {
+    return bounds[a].min.x < bounds[b].min.x;
+  });
+  overlaps.assign(num, false);
+  for (size_t i = 0; i < num; i++) {
+    BoundBox a = bounds[order[i]];
+    for (size_t j = i + 1; j < num && bounds[order[j]].min.x <= a.max.x; j++) {
+      if (a.intersects(bounds[order[j]])) {
+        overlaps[order[i]] = true;
+        overlaps[order[j]] = true;
+      }
+    }
+  }
+}
+
+bool ObjectManager::auto_nested_media_possible(const Scene *scene)
+{
+  if (!scene->integrator->get_use_auto_nested_dielectrics()) {
+    return false;
+  }
+
+  /* Which bounds the objects end up with is not known yet. Use the ones of their vertices
+   * where nothing moves them, and assume the others to overlap everything. */
+  map<const Shader *, bool> shader_candidate;
+  vector<BoundBox> bounds;
+  size_t num_unbounded = 0;
+  for (const Object *object : scene->objects) {
+    Geometry *geom = object->get_geometry();
+    if (!geom->is_mesh()) {
+      continue;
+    }
+    int num_candidates = 0;
+    bool displaced = false;
+    for (Node *node : geom->get_used_shaders()) {
+      const Shader *shader = static_cast<Shader *>(node);
+      if (shader->get_nested_priority() != 0) {
+        continue;
+      }
+      auto it = shader_candidate.find(shader);
+      if (it == shader_candidate.end()) {
+        it = shader_candidate.emplace(shader, shader->has_surface_refraction()).first;
+      }
+      num_candidates += it->second;
+      displaced |= shader->has_displacement;
+    }
+    if (num_candidates == 0) {
+      continue;
+    }
+    if (num_candidates > 1) {
+      /* Shells of several materials in one mesh can be nested in each other. */
+      return true;
+    }
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    if (displaced || object->use_motion() || geom->get_use_motion_blur() ||
+        mesh->get_num_subd_faces() != 0 || mesh->num_verts() == 0)
+    {
+      num_unbounded++;
+      continue;
+    }
+    BoundBox box = BoundBox::empty;
+    const packed_float3 *verts = mesh->get_position();
+    const size_t num_verts = mesh->num_verts();
+    for (size_t i = 0; i < num_verts; i++) {
+      box.grow_safe(verts[i]);
+    }
+    if (!box.valid()) {
+      num_unbounded++;
+      continue;
+    }
+    if (!geom->transform_applied) {
+      box = box.transformed(&object->get_tfm());
+    }
+    /* Room for rounding differences to the bounds of the geometry update. */
+    const float3 margin = 1e-4f * (fabs(box.min) + fabs(box.max)) + make_float3(1e-6f);
+    box.min -= margin;
+    box.max += margin;
+    bounds.push_back(box);
+  }
+
+  if (bounds.size() + num_unbounded < 2) {
+    return false;
+  }
+  if (num_unbounded != 0) {
+    return true;
+  }
+  vector<bool> overlaps;
+  nested_find_overlaps(bounds, overlaps);
+  return find(overlaps.begin(), overlaps.end(), true) != overlaps.end();
+}
+
+void ObjectManager::update_nested_media(DeviceScene *dscene, Scene *scene)
+{
+  const bool use_nested = (dscene->data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) != 0;
+  const bool use_auto = use_nested && scene->integrator->get_use_auto_nested_dielectrics();
+
+  struct Medium {
+    Object *object;
+    /* By a material with a nested priority, otherwise automatic. */
+    bool manual;
+    /* Closed mesh with a refractive material. */
+    bool automatic;
+    /* Several materials are media and each one is a closed surface: they are media of their
+     * own, which can be nested in each other. */
+    bool per_shader;
+    float volume;
+  };
+  vector<Medium> media;
+  vector<BoundBox> bounds;
+
+  if (use_nested) {
+    for (Object *object : scene->objects) {
+      Geometry *geom = object->get_geometry();
+      bool manual = false;
+      bool candidate = false;
+      int num_shaders = 0;
+      uint64_t shader_bits = 0;
+      const array<Node *> &used_shaders = geom->get_used_shaders();
+      for (size_t i = 0; i < used_shaders.size(); i++) {
+        const Shader *shader = static_cast<Shader *>(used_shaders[i]);
+        const bool shader_manual = shader->get_nested_priority() != 0;
+        const bool shader_candidate = use_auto && shader->nested_candidate;
+        manual |= shader_manual;
+        candidate |= shader_candidate;
+        if (shader_manual || shader_candidate) {
+          num_shaders++;
+          /* Beyond the materials which were tested no bit is set. */
+          shader_bits |= (i < 64) ? uint64_t(1) << i : 0;
+        }
+      }
+      if (!(manual || candidate) || !object->bounds.valid()) {
+        continue;
+      }
+      float volume = 0.0f;
+      bool automatic = false;
+      if (candidate || geom->is_mesh()) {
+        volume = nested_closed_volume(geom) * nested_transform_volume_scale(object);
+        automatic = candidate && volume > 0.0f;
+      }
+      if (!(manual || automatic)) {
+        continue;
+      }
+      if (!(volume > 0.0f)) {
+        /* Media which are no closed mesh are ordered by the size of their bounds. */
+        const float3 size = object->bounds.size();
+        volume = size.x * size.y * size.z;
+      }
+      const bool per_shader = num_shaders > 1 && volume > 0.0f && used_shaders.size() <= 64 &&
+                              (geom->nested_closed_shaders & shader_bits) == shader_bits;
+      media.push_back({object, manual, automatic, per_shader, volume});
+      bounds.push_back(object->bounds);
+    }
+
+    /* Automatic media only are tracked where they can be inside of another medium. */
+    vector<bool> overlaps;
+    nested_find_overlaps(bounds, overlaps);
+    size_t num_media = 0;
+    for (size_t i = 0; i < media.size(); i++) {
+      media[i].automatic &= overlaps[i] || media[i].per_shader;
+      if (media[i].manual || media[i].automatic) {
+        media[num_media++] = media[i];
+      }
+    }
+    media.resize(num_media);
+  }
+
+  /* Nesting rank: the smaller the enclosed volume, the higher. Equal volumes, like instances
+   * of a mesh, are ordered by object index in the kernel. */
+  sort(media.begin(), media.end(), [](const Medium &a, const Medium &b) {
+    return (a.volume != b.volume) ? a.volume > b.volume : a.object->index < b.object->index;
+  });
+
+  bool changed = false;
+  vector<bool> is_medium(scene->objects.size(), false);
+  set<const Shader *> active_shaders;
+  int rank = 0;
+  for (size_t i = 0; i < media.size(); i++) {
+    Object *object = media[i].object;
+    if (i == 0 || media[i].volume != media[i - 1].volume) {
+      rank++;
+    }
+    /* More media than ranks share them in order. */
+    const int nested_rank = (media.size() <= SD_OBJECT_NESTED_RANK_MAX) ?
+                                rank :
+                                1 + int((uint64_t(i) * (SD_OBJECT_NESTED_RANK_MAX - 1)) /
+                                        (media.size() - 1));
+    changed |= !object->nested_medium || object->nested_rank != nested_rank ||
+               object->nested_per_shader != media[i].per_shader;
+    object->nested_medium = true;
+    object->nested_rank = nested_rank;
+    object->nested_per_shader = media[i].per_shader;
+    is_medium[object->index] = true;
+    if (media[i].automatic) {
+      for (Node *node : object->get_geometry()->get_used_shaders()) {
+        const Shader *shader = static_cast<Shader *>(node);
+        if (shader->nested_candidate) {
+          active_shaders.insert(shader);
+        }
+      }
+    }
+  }
+  for (Object *object : scene->objects) {
+    if (!is_medium[object->index] && object->nested_medium) {
+      object->nested_medium = false;
+      object->nested_rank = 0;
+      object->nested_per_shader = false;
+      changed = true;
+    }
+  }
+
+  /* Materials which are a medium on some object without a priority. The shader manager wrote
+   * their flags before the geometry was known, so update them here. */
+  bool shaders_changed = false;
+  bool has_nested_shader = false;
+  KernelShader *kshaders = (dscene->shaders.size() == scene->shaders.size()) ?
+                               dscene->shaders.data() :
+                               nullptr;
+  for (size_t i = 0; i < scene->shaders.size(); i++) {
+    Shader *shader = scene->shaders[i];
+    const bool active = active_shaders.find(shader) != active_shaders.end();
+    if (active != shader->nested_auto_active) {
+      shader->nested_auto_active = active;
+      changed = true;
+    }
+    has_nested_shader |= shader->is_nested_medium();
+    if (kshaders) {
+      const int flags = (kshaders[i].flags & ~(SD_HAS_NESTED_PRIORITY | SD_HAS_TRANSPARENT_SHADOW)) |
+                        (shader->is_nested_medium() ? SD_HAS_NESTED_PRIORITY : 0) |
+                        (shader->has_transparent_shadow() ? SD_HAS_TRANSPARENT_SHADOW : 0);
+      if (flags != kshaders[i].flags) {
+        kshaders[i].flags = flags;
+        shaders_changed = true;
+      }
+    }
+  }
+  if (shaders_changed) {
+    dscene->shaders.tag_modified();
+    dscene->shaders.copy_to_device();
+    dscene->shaders.clear_modified();
+  }
+
+  KernelIntegrator *kintegrator = &dscene->data.integrator;
+  kintegrator->use_nested_dielectrics = !media.empty();
+  if (has_nested_shader && !media.empty()) {
+    kintegrator->transparent_shadows = true;
+  }
+
+  if (changed) {
+    /* The camera may be inside of a medium now. */
+    scene->camera->need_flags_update = true;
+  }
+
+  LOG_INFO << "Nested dielectric media: " << media.size() << " objects";
+}
+
 void ObjectManager::device_update_flags(Device * /*unused*/,
                                         DeviceScene *dscene,
                                         Scene *scene,
@@ -1068,6 +1475,10 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
     return;
   }
 
+  if (bounds_valid) {
+    update_nested_media(dscene, scene);
+  }
+
   /* Object info flag. */
   uint *object_flag = dscene->object_flag.data();
 
@@ -1077,7 +1488,7 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
   for (Object *object : scene->objects) {
     /* Nested dielectric media are tracked like volumes: an object which intersects one may have
      * to update the media of a path. */
-    if (object->geometry->has_volume || object->geometry->has_nested_priority) {
+    if (object->geometry->has_volume || object->nested_medium) {
       /* If the bounds are not valid it is not always possible to calculate the volume step, and
        * the step size is not needed for the displacement. So, delay calculation of the volume
        * step size until the final bounds are known. */
@@ -1103,11 +1514,12 @@ void ObjectManager::device_update_flags(Device * /*unused*/,
       object_flag[object->index] &= ~(SD_OBJECT_HAS_VOLUME | SD_OBJECT_HAS_VOLUME_ATTRIBUTES);
     }
 
-    if (object->geometry->has_nested_priority) {
-      object_flag[object->index] |= SD_OBJECT_HAS_NESTED_PRIORITY;
-    }
-    else {
-      object_flag[object->index] &= ~SD_OBJECT_HAS_NESTED_PRIORITY;
+    object_flag[object->index] &= ~(SD_OBJECT_HAS_NESTED_PRIORITY | SD_OBJECT_NESTED_PER_SHADER |
+                                    (SD_OBJECT_NESTED_RANK_MAX << SD_OBJECT_NESTED_RANK_SHIFT));
+    if (object->nested_medium) {
+      object_flag[object->index] |= SD_OBJECT_HAS_NESTED_PRIORITY |
+                                    (object->nested_per_shader ? SD_OBJECT_NESTED_PER_SHADER : 0) |
+                                    (uint(object->nested_rank) << SD_OBJECT_NESTED_RANK_SHIFT);
     }
 
     if (object->is_shadow_catcher) {

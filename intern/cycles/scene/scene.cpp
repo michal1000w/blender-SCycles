@@ -1673,6 +1673,12 @@ void Scene::update_kernel_features()
    * so could be done selective magic for the viewport as well. */
   uint64_t kernel_features = shader_manager->get_kernel_features(this);
 
+  if (ObjectManager::auto_nested_media_possible(this)) {
+    /* Automatic nested dielectrics, see ShaderManager::get_kernel_features(). */
+    kernel_features |= KERNEL_FEATURE_NESTED_DIELECTRICS | KERNEL_FEATURE_VOLUME |
+                       KERNEL_FEATURE_TRANSPARENT;
+  }
+
   if (integrator->get_use_coherent_specular_connections()) {
     kernel_features |= KERNEL_FEATURE_COHERENT_SPECULAR;
   }
@@ -1956,8 +1962,18 @@ int Scene::get_medium_stack_size() const
    * which overlap in one place. */
   vector<BoundBox> bounds;
   for (const Object *object : objects) {
-    if (object->get_geometry()->has_nested_priority && object->bounds.valid()) {
+    if (object->nested_medium && object->bounds.valid()) {
       bounds.push_back(object->bounds);
+      if (object->nested_per_shader) {
+        /* Every material which is a medium can be in the list. */
+        int num_shaders = 0;
+        for (Node *node : object->get_geometry()->get_used_shaders()) {
+          num_shaders += static_cast<Shader *>(node)->is_nested_medium();
+        }
+        for (int i = 1; i < num_shaders; i++) {
+          bounds.push_back(object->bounds);
+        }
+      }
     }
   }
 
