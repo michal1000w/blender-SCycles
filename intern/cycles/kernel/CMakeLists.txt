@@ -213,6 +213,7 @@ set(SRC_KERNEL_INTEGRATOR_HEADERS
   integrator/guiding_gpu.h
   integrator/megakernel.h
   integrator/mnee.h
+  integrator/nested_dielectrics.h
   integrator/polarization_state.h
   integrator/polarization_surface.h
   integrator/path_state.h

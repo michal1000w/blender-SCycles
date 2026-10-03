@@ -17,6 +17,7 @@
 #include "kernel/geom/triangle.h"
 
 #include "kernel/integrator/guiding.h"
+#include "kernel/integrator/nested_dielectrics.h"
 #include "kernel/integrator/shadow_linking.h"
 #include "kernel/integrator/subsurface.h"
 #include "kernel/integrator/volume_stack.h"
@@ -268,6 +269,9 @@ integrate_direct_light_shadow_init_common(KernelGlobals kg,
 #ifdef __VOLUME__
   /* Copy volume stack and enter/exit volume. */
   integrator_state_copy_volume_stack_to_shadow(kg, shadow_state, state);
+#endif
+#ifdef __NESTED_DIELECTRICS__
+  integrator_state_copy_medium_stack_to_shadow(kg, shadow_state, state);
 #endif
 
   /* Write shadow ray and associated state to global memory. */
@@ -571,9 +575,7 @@ ccl_device
 #endif
 
   if (is_transmission) {
-#ifdef __VOLUME__
-    volume_stack_enter_exit<true>(kg, shadow_state, sd);
-#endif
+    path_media_enter_exit<true>(kg, shadow_state, sd);
   }
 
   uint32_t shadow_flag = INTEGRATOR_STATE(state, path, flag);
@@ -722,6 +724,7 @@ ccl_device_forceinline_transport bool integrate_surface_bidirectional(
 #  ifdef __SPECTRAL__
   light_sd.rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #  endif
+  bdpt_vertex_restore_medium(light_vertex->light_group, &light_sd);
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, &light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
   if (light_sd.runtime_flag & SR_CACHE_MISS) {
@@ -756,6 +759,7 @@ ccl_device_forceinline_transport bool integrate_surface_bidirectional(
 #  ifdef __SPECTRAL__
   light_sd.rand_wavelength = photon_unpack_wavelength_rand(light_vertex->time_wavelength);
 #  endif
+  bdpt_vertex_restore_medium(light_vertex->light_group, &light_sd);
   surface_shader_eval<KERNEL_FEATURE_NODE_MASK_SURFACE>(
       kg, state, &light_sd, nullptr, PATH_RAY_VISIBILITY_GLOSSY, light_vertex->flag);
   if (light_sd.runtime_flag & SR_CACHE_MISS) {
@@ -858,8 +862,15 @@ ccl_device_forceinline_transport bool integrate_surface_bidirectional(
 #  endif
 
   IntegratorShadowState shadow_state = integrate_direct_light_shadow_init_common(
-      kg, state, &ray, connection, light_vertex->light_group, 0, true, true);
+      kg, state, &ray, connection, bdpt_vertex_light_group(light_vertex->light_group), 0, true, true);
   INTEGRATOR_STATE_WRITE(shadow_state, shadow_path, transparent_bounce) = transparent_bounce;
+#  ifdef __NESTED_DIELECTRICS__
+  if ((sd->shader_flag & SD_HAS_NESTED_PRIORITY) && dot(sd->Ng, direction) < 0.0f) {
+    /* The connection leaves through the surface of a nested dielectric: it is inside or outside
+     * of that medium from here on, as a transmitted direct light ray is. */
+    path_media_enter_exit<true>(kg, shadow_state, sd);
+  }
+#  endif
   guiding_gpu_record_direct(shadow_state,
                             state,
                             sd->P,
@@ -1163,6 +1174,59 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   return label;
 }
 
+#ifdef __NESTED_DIELECTRICS__
+/* Continue the path through a surface that lies inside a medium of higher priority. Like the
+ * boundary of a volume it is no bounce of any kind: only the start of the ray moves, so that
+ * multiple importance sampling and the bidirectional recurrence see one uninterrupted edge.
+ * Shadow rays pass through the same surfaces. */
+template<uint64_t node_feature_mask>
+ccl_device_forceinline int integrate_surface_nested_false_intersection(
+    KernelGlobals kg,
+    IntegratorState state,
+    ccl_private ShaderData *sd)
+{
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+
+  /* A medium the path enters here becomes the outer side of later surfaces, which needs the
+   * index of refraction its shader evaluates to at the wavelength of the path. */
+  if (!(sd->runtime_flag & SR_BACKFACING) && !(sd->shader_flag & SD_HAS_ONLY_VOLUME)) {
+    surface_shader_eval<node_feature_mask>(
+        kg, state, sd, nullptr, INTEGRATOR_STATE(state, path, visibility), path_flag);
+    if (sd->runtime_flag & SR_CACHE_MISS) {
+      return LABEL_CACHE_MISS;
+    }
+  }
+
+  /* Path termination was decided at the intersection, as for any other surface. */
+  const float continuation_probability = (path_flag & PATH_RAY_TERMINATE_ON_NEXT_SURFACE) ?
+                                             0.0f :
+                                             float(INTEGRATOR_STATE(
+                                                 state, path, continuation_probability));
+  if (continuation_probability == 0.0f) {
+    return LABEL_NONE;
+  }
+  if (continuation_probability != 1.0f) {
+    INTEGRATOR_STATE_WRITE(state, path, throughput) /= continuation_probability;
+  }
+
+  /* Pass through without counting a bounce, only sanity check in case self intersection gets
+   * us stuck. */
+  const uint32_t volume_bounds_bounce = INTEGRATOR_STATE(state, path, volume_bounds_bounce) + 1;
+  INTEGRATOR_STATE_WRITE(state, path, volume_bounds_bounce) = volume_bounds_bounce;
+  if (volume_bounds_bounce > VOLUME_BOUNDS_MAX) {
+    return LABEL_NONE;
+  }
+  INTEGRATOR_STATE_WRITE(state, path, rng_offset) += PRNG_BOUNCE_NUM;
+
+  /* Only modify start distance. */
+  INTEGRATOR_STATE_WRITE(state, ray, tmin) = intersection_t_offset(sd->ray_length);
+
+  path_media_enter_exit<false>(kg, state, sd);
+
+  return LABEL_TRANSMIT | LABEL_TRANSPARENT;
+}
+#endif
+
 #ifdef __VOLUME__
 ccl_device_forceinline int integrate_surface_volume_only_bounce(IntegratorState state,
                                                                 ccl_private ShaderData *sd)
@@ -1251,6 +1315,9 @@ ccl_device_forceinline void integrate_surface_ao(KernelGlobals kg,
 #  ifdef __VOLUME__
   /* Copy volume stack and enter/exit volume. */
   integrator_state_copy_volume_stack_to_shadow(kg, shadow_state, state);
+#  endif
+#  ifdef __NESTED_DIELECTRICS__
+  integrator_state_copy_medium_stack_to_shadow(kg, shadow_state, state);
 #  endif
 
   /* Write shadow ray and associated state to global memory. */
@@ -1369,6 +1436,14 @@ ccl_device int integrate_surface(KernelGlobals kg,
 #endif
   /* 0: initial shading, 1: direct light pending, 2: connection pending, 3: scatter pending.
    * Texture retries reconstruct closures but never repeat completed film or shadow writes. */
+
+#ifdef __NESTED_DIELECTRICS__
+  /* Nested dielectrics: find the medium around the surface, which its dielectric closures are
+   * relative to. A surface inside a medium of higher priority does not exist. */
+  if (nested_dielectric_surface_setup(kg, state, &sd)) {
+    return integrate_surface_nested_false_intersection<node_feature_mask>(kg, state, &sd);
+  }
+#endif
 
   /* Skip most work for volume bounding surface. */
 #ifdef __VOLUME__
@@ -1643,12 +1718,12 @@ ccl_device int integrate_surface(KernelGlobals kg,
     PROFILING_EVENT(PROFILING_SHADE_SURFACE_INDIRECT_LIGHT);
     continue_path_label = integrate_surface_volume_only_bounce(state, &sd);
   }
+#endif
 
   if (continue_path_label & LABEL_TRANSMIT) {
-    /* Enter/Exit volume. */
-    volume_stack_enter_exit<false>(kg, state, &sd);
+    /* Enter/Exit volumes and nested dielectric media. */
+    path_media_enter_exit<false>(kg, state, &sd);
   }
-#endif
 
   return continue_path_label;
 }

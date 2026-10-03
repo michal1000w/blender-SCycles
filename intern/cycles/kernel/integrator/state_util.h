@@ -500,6 +500,7 @@ ccl_device_inline void integrator_state_copy_only(KernelGlobals kg,
       ;
 
 #  define KERNEL_STRUCT_VOLUME_STACK_SIZE kernel_data.volume_stack_size
+#  define KERNEL_STRUCT_MEDIUM_STACK_SIZE kernel_data.medium_stack_size
 
 #  include "kernel/integrator/state_template.h"
 
@@ -511,6 +512,7 @@ ccl_device_inline void integrator_state_copy_only(KernelGlobals kg,
 #  undef KERNEL_STRUCT_END
 #  undef KERNEL_STRUCT_END_ARRAY
 #  undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#  undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
 }
 
 ccl_device_inline void integrator_state_move(KernelGlobals kg,
@@ -575,6 +577,7 @@ ccl_device_inline void integrator_shadow_state_copy_only(KernelGlobals kg,
       ;
 
 #  define KERNEL_STRUCT_VOLUME_STACK_SIZE kernel_data.volume_stack_size
+#  define KERNEL_STRUCT_MEDIUM_STACK_SIZE kernel_data.medium_stack_size
 
 #  include "kernel/integrator/shadow_state_template.h"
 
@@ -586,6 +589,7 @@ ccl_device_inline void integrator_shadow_state_copy_only(KernelGlobals kg,
 #  undef KERNEL_STRUCT_END
 #  undef KERNEL_STRUCT_END_ARRAY
 #  undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#  undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
 }
 
 ccl_device_inline void integrator_shadow_state_move(KernelGlobals kg,
@@ -627,6 +631,17 @@ ccl_device_inline IntegratorState integrator_state_shadow_catcher_split(KernelGl
   to_state->isect = state->isect;
 #  ifdef __VOLUME__
   integrator_state_copy_volume_stack(kg, to_state, state);
+#  endif
+#  ifdef __NESTED_DIELECTRICS__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) {
+    int index = 0;
+    int shader;
+    do {
+      shader = INTEGRATOR_STATE_ARRAY(state, medium_stack, index, shader);
+      to_state->medium_stack[index] = state->medium_stack[index];
+      ++index;
+    } while (shader != SHADER_NONE);
+  }
 #  endif
 #endif
 

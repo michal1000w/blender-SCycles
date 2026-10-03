@@ -117,6 +117,15 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
     INTEGRATOR_STATE_ARRAY_WRITE(state, volume_stack, 1, shader) = SHADER_NONE;
   }
 
+#ifdef __NESTED_DIELECTRICS__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_NESTED_DIELECTRICS) {
+    /* Not inside any nested dielectric medium. */
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, object) = OBJECT_NONE;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, shader) = SHADER_NONE;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, medium_stack, 0, ior) = 0.0f;
+  }
+#endif
+
 #ifdef __DENOISING_FEATURES__
   if (kernel_data.kernel_features & KERNEL_FEATURE_DENOISING) {
     INTEGRATOR_STATE_WRITE(state, path, flag) |= PATH_RAY_DENOISING_FEATURES;

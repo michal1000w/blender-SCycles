@@ -1522,6 +1522,7 @@ void Scene::device_update(Device *device_, Progress &progress)
 
   if (device->have_error() == false) {
     dscene.data.volume_stack_size = get_volume_stack_size();
+    dscene.data.medium_stack_size = get_medium_stack_size();
 
     progress.set_status("Updating Device", "Writing constant memory");
     device->const_copy_to("data", &dscene.data, sizeof(dscene.data));
@@ -1946,6 +1947,73 @@ int Scene::get_volume_stack_size() const
   LOG_DEBUG << "Detected required volume stack size " << volume_stack_size;
 
   return volume_stack_size;
+}
+
+int Scene::get_medium_stack_size() const
+{
+  /* Bounds of the objects with a nested dielectric priority. A path can only be inside of the
+   * ones that share a point, so the list of media needs room for the largest number of bounds
+   * which overlap in one place. */
+  vector<BoundBox> bounds;
+  for (const Object *object : objects) {
+    if (object->get_geometry()->has_nested_priority && object->bounds.valid()) {
+      bounds.push_back(object->bounds);
+    }
+  }
+
+  int depth = 0;
+  const size_t num_bounds = bounds.size();
+  if (num_bounds <= 256) {
+    /* The region where most bounds overlap is a box whose lowest corner takes each coordinate
+     * from the lowest corner of one of them: try those along X and Y, and sweep along Z. */
+    vector<pair<float, int>> events;
+    for (size_t i = 0; i < num_bounds; i++) {
+      const float x = bounds[i].min.x;
+      for (size_t j = 0; j < num_bounds; j++) {
+        const float y = bounds[j].min.y;
+        if (bounds[j].min.x > x || bounds[j].max.x < x || bounds[i].min.y > y ||
+            bounds[i].max.y < y)
+        {
+          continue;
+        }
+        events.clear();
+        for (const BoundBox &box : bounds) {
+          if (box.min.x <= x && box.max.x >= x && box.min.y <= y && box.max.y >= y) {
+            /* Bounds that only touch count as overlapping: entering sorts before leaving. */
+            events.emplace_back(box.min.z, 0);
+            events.emplace_back(box.max.z, 1);
+          }
+        }
+        sort(events.begin(), events.end());
+        int overlap = 0;
+        for (const pair<float, int> &event : events) {
+          overlap += (event.second == 0) ? 1 : -1;
+          depth = max(depth, overlap);
+        }
+      }
+    }
+  }
+  else {
+    /* Cheaper upper bound for very many media: the bounds that overlap one of them. */
+    for (size_t i = 0; i < num_bounds && depth < MAX_MEDIUM_STACK_SIZE; i++) {
+      int overlap = 1;
+      for (size_t j = 0; j < num_bounds; j++) {
+        if (i != j && bounds[i].intersects(bounds[j])) {
+          ++overlap;
+        }
+      }
+      depth = max(depth, overlap);
+    }
+  }
+
+  /* Room for the terminator. Every level is a set of arrays over all paths of a GPU, so there
+   * is no spare one: a path which enters more media than their bounds allow, through a mesh
+   * that intersects itself, ignores the innermost. */
+  const int medium_stack_size = clamp(depth + 1, 2, MAX_MEDIUM_STACK_SIZE);
+
+  LOG_DEBUG << "Detected required nested dielectric medium stack size " << medium_stack_size;
+
+  return medium_stack_size;
 }
 
 bool Scene::has_shadow_catcher()

@@ -184,7 +184,7 @@ ccl_device_inline
           /* instance push */
           object = kernel_data_fetch(prim_object, -prim_addr - 1);
           uint object_flag = kernel_data_fetch(object_flag, object);
-          if (object_flag & SD_OBJECT_HAS_VOLUME) {
+          if (object_flag & SD_OBJECT_HAS_MEDIUM) {
 #if BVH_FEATURE(BVH_MOTION)
             bvh_instance_motion_push(kg, object, ray, &P, &dir, &idir);
 #else

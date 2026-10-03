@@ -516,6 +516,7 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
   for (Geometry *geom : scene->geometry) {
     const bool prev_has_volume = geom->has_volume;
     geom->has_volume = false;
+    geom->has_nested_priority = false;
 
     update_attribute_realloc_flags(device_update_flags, geom->attributes);
 
@@ -528,6 +529,9 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
       Shader *shader = static_cast<Shader *>(node);
       if (shader->has_volume) {
         geom->has_volume = true;
+      }
+      if (shader->get_nested_priority() != 0) {
+        geom->has_nested_priority = true;
       }
 
       if (shader->has_surface_bssrdf) {

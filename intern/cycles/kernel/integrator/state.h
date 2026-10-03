@@ -58,6 +58,7 @@ struct IntegratorShadowStateCPU {
   } \
   name[cpu_size];
 #define KERNEL_STRUCT_VOLUME_STACK_SIZE MAX_VOLUME_STACK_SIZE
+#define KERNEL_STRUCT_MEDIUM_STACK_SIZE MAX_MEDIUM_STACK_SIZE
 #include "kernel/integrator/shadow_state_template.h"
 #undef KERNEL_STRUCT_BEGIN
 #undef KERNEL_STRUCT_BEGIN_PACKED
@@ -81,6 +82,7 @@ struct IntegratorStateCPU {
   } \
   name[cpu_size];
 #define KERNEL_STRUCT_VOLUME_STACK_SIZE MAX_VOLUME_STACK_SIZE
+#define KERNEL_STRUCT_MEDIUM_STACK_SIZE MAX_MEDIUM_STACK_SIZE
 #include "kernel/integrator/state_template.h"
 #undef KERNEL_STRUCT_BEGIN
 #undef KERNEL_STRUCT_BEGIN_PACKED
@@ -90,6 +92,7 @@ struct IntegratorStateCPU {
 #undef KERNEL_STRUCT_END
 #undef KERNEL_STRUCT_END_ARRAY
 #undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
 
   IntegratorShadowStateCPU shadow;
   IntegratorShadowStateCPU ao;
@@ -126,6 +129,7 @@ struct IntegratorQueueCounter {
 #  define KERNEL_STRUCT_END(name)
 #  define KERNEL_STRUCT_END_ARRAY(name, cpu_size, gpu_size)
 #  define KERNEL_STRUCT_VOLUME_STACK_SIZE MAX_VOLUME_STACK_SIZE
+#  define KERNEL_STRUCT_MEDIUM_STACK_SIZE MAX_MEDIUM_STACK_SIZE
 
 #  include "kernel/integrator/shadow_state_template.h"
 #  include "kernel/integrator/state_template.h"
@@ -138,6 +142,7 @@ struct IntegratorQueueCounter {
 #  undef KERNEL_STRUCT_END
 #  undef KERNEL_STRUCT_END_ARRAY
 #  undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#  undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
 
 #endif
 
@@ -186,6 +191,7 @@ struct IntegratorStateGPU {
   } \
   name[gpu_size];
 #define KERNEL_STRUCT_VOLUME_STACK_SIZE MAX_VOLUME_STACK_SIZE
+#define KERNEL_STRUCT_MEDIUM_STACK_SIZE MAX_MEDIUM_STACK_SIZE
 
 #include "kernel/integrator/state_template.h"
 
@@ -199,6 +205,7 @@ struct IntegratorStateGPU {
 #undef KERNEL_STRUCT_END
 #undef KERNEL_STRUCT_END_ARRAY
 #undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
 
   /* Count number of queued kernels. */
   ccl_global IntegratorQueueCounter *queue_counter;
