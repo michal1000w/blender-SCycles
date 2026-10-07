@@ -41,8 +41,7 @@ static size_t estimate_single_state_size(const uint64_t kernel_features,
 
 #define KERNEL_STRUCT_VOLUME_STACK_SIZE (volume_stack_size)
 #define KERNEL_STRUCT_MEDIUM_STACK_SIZE (medium_stack_size)
-#define KERNEL_STRUCT_BEGIN(name) \
-  for (int array_index = 0;; array_index++) {
+#define KERNEL_STRUCT_BEGIN(name) for (int array_index = 0;; array_index++) {
 
 #ifdef __INTEGRATOR_GPU_PACKED_STATE__
 #  define KERNEL_STRUCT_MEMBER(parent_struct, type, name, feature) \
