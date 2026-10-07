@@ -76,7 +76,10 @@ struct KernelTransportStateCPU {
   uint vcm_path_slots = 0;
   uint vcm_light_path_count = 0;
   uint vcm_cache_slots = 0;
-  float vcm_eta = 0.0f;
+  float vcm_eta_scale = 0.0f;
+  float vcm_radius_base = 0.0f;
+  float vcm_radius_slope = 0.0f;
+  uint vcm_groups = 1;
 };
 
 /* On the CPU, we pass along the struct KernelGlobals to nearly everywhere in

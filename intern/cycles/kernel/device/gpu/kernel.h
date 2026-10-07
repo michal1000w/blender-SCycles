@@ -202,12 +202,17 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_bdpt_light_generate,
                              const int num_light_paths,
                              const int iteration,
-                             const int batch_samples)
+                             const int batch_samples,
+                             const int stage)
 {
   const uint light_path_index = ccl_gpu_global_id_x();
   if (light_path_index < uint(num_light_paths)) {
-    ccl_gpu_kernel_call(integrator_bdpt_light_generate(
-        nullptr, light_path_index, light_path_index, uint(iteration), uint(batch_samples)));
+    ccl_gpu_kernel_call(integrator_bdpt_light_generate(nullptr,
+                                                       light_path_index,
+                                                       light_path_index,
+                                                       uint(iteration),
+                                                       uint(batch_samples),
+                                                       uint(stage)));
   }
 }
 ccl_gpu_kernel_postfix

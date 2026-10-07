@@ -54,6 +54,11 @@ KERNEL_STRUCT_MEMBER(path, float, mis_ray_pdf, KERNEL_FEATURE_PATH_TRACING)
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vcm, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vc, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vm, KERNEL_FEATURE_BDPT)
+/* Merge strategy of the previous vertex, see scatter_camera_vcm(). */
+KERNEL_STRUCT_MEMBER(path, float, bdpt_d_vp, KERNEL_FEATURE_BDPT)
+/* Distance from the camera along the path, which sets the merge radius: negative while the
+ * path has only met delta events, positive once it ended at the first other vertex. */
+KERNEL_STRUCT_MEMBER(path, float, bdpt_merge_length, KERNEL_FEATURE_BDPT)
 /* Completed surface stages, retained while a reciprocal shader waits for image tiles. */
 KERNEL_STRUCT_MEMBER(path, uint, bdpt_surface_stage, KERNEL_FEATURE_BDPT)
 KERNEL_STRUCT_MEMBER(path, int, bdpt_volume_bounce, KERNEL_FEATURE_BDPT)

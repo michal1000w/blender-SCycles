@@ -282,12 +282,22 @@ struct IntegratorStateGPU {
 
   /* Vertex merging. Light subpath `i` of a cache stores its vertices in the photon map slots
    * `[i * vcm_path_slots, (i + 1) * vcm_path_slots)`, and only the first `vcm_light_path_count`
-   * subpaths of a cache store any. `vcm_eta` is the number of those subpaths times the area of
-   * the merge disk, zero while merging is off. */
+   * subpaths of a cache store any. `vcm_eta_scale` is the number of those subpaths times pi,
+   * which times the squared merge radius is eta; zero while merging is off.
+   *
+   * A camera path merges within `vcm_radius_base + vcm_radius_slope * distance from the camera`,
+   * the footprint of a few pixels, and at most within `photon_radius`: the cells of the hash
+   * grid are that wide. */
   uint vcm_path_slots;
   uint vcm_light_path_count;
   uint vcm_cache_slots;
-  float vcm_eta;
+  float vcm_eta_scale;
+  float vcm_radius_base;
+  float vcm_radius_slope;
+  /* The subpaths of a cache are dealt to this many groups, and a camera sample merges with the
+   * group of its index: `vcm_light_path_count` subpaths each. An update that serves many samples
+   * then has no more vertices around a camera vertex than one that serves few. */
+  uint vcm_groups;
 };
 
 /* Abstraction

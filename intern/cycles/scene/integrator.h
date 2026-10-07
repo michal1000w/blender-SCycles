@@ -102,6 +102,10 @@ class Integrator : public Node {
 
   NODE_SOCKET_API(bool, use_vertex_merging)
   NODE_SOCKET_API(float, vcm_radius)
+  NODE_SOCKET_API(float, vcm_radius_pixels)
+  NODE_SOCKET_API(bool, vcm_caustics_only)
+  NODE_SOCKET_API(float, vcm_sharp_roughness)
+  NODE_SOCKET_API(float, vcm_light_path_ratio)
   NODE_SOCKET_API(float, vcm_radius_alpha)
   NODE_SOCKET_API(int, vcm_merge_max)
 

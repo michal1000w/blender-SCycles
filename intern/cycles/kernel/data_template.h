@@ -226,6 +226,18 @@ KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, vcm_radius)
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, float, vcm_radius_alpha)
+/* Merge radius in pixels of the image, at the first vertex of a camera path that is not a delta
+ * event. `vcm_radius` is its upper bound in the scene, zero for an automatic one. */
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, vcm_radius_pixels)
+/* Keep light vertices behind sharp scattering events only: caustics. Otherwise all of them. */
+KERNEL_STRUCT_MEMBER(integrator, int, vcm_caustics_only)
+/* Largest product of the microfacet roughness of a closure along both axes that is sharp. */
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, vcm_sharp_roughness_squared)
+/* Light subpaths of a merge map per camera path that it serves, zero to use `bdpt_light_paths`. */
+KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
+KERNEL_STRUCT_MEMBER(integrator, float, vcm_light_path_ratio)
 /* Diagnostic: render with merging alone, like progressive photon mapping. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE
 KERNEL_STRUCT_MEMBER(integrator, int, vcm_merge_only)

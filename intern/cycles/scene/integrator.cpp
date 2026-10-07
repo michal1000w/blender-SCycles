@@ -257,9 +257,13 @@ NODE_DEFINE(Integrator)
   SOCKET_INT(bdpt_update_samples, "BDPT Update Samples", 8);
 
   SOCKET_BOOLEAN(use_vertex_merging, "Vertex Connection and Merging", false);
-  SOCKET_FLOAT(vcm_radius, "Merge Radius", 0.0f);
+  SOCKET_FLOAT(vcm_radius, "Merge Radius Limit", 0.0f);
+  SOCKET_FLOAT(vcm_radius_pixels, "Merge Radius Pixels", 1.0f);
+  SOCKET_BOOLEAN(vcm_caustics_only, "Merge Caustics Only", true);
+  SOCKET_FLOAT(vcm_sharp_roughness, "Merge Caustic Roughness", 0.25f);
+  SOCKET_FLOAT(vcm_light_path_ratio, "Merge Light Path Ratio", 0.0625f);
   SOCKET_FLOAT(vcm_radius_alpha, "Merge Radius Reduction", 0.75f);
-  SOCKET_INT(vcm_merge_max, "Merge Maximum", 16);
+  SOCKET_INT(vcm_merge_max, "Merge Maximum", 8);
 
   SOCKET_BOOLEAN(use_photon_mapping, "Photon Mapping", false);
   SOCKET_INT(photon_count, "Photon Count", 65536);
@@ -468,10 +472,18 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
                                       use_bidirectional_path_tracing;
   kintegrator->vcm_radius = max(vcm_radius, 0.0f);
   kintegrator->vcm_radius_alpha = clamp(vcm_radius_alpha, 0.0f, 1.0f);
-  kintegrator->vcm_merge_max = clamp(vcm_merge_max, 1, 1024);
+  kintegrator->vcm_merge_max = clamp(vcm_merge_max, 1, 32);
+  kintegrator->vcm_radius_pixels = clamp(vcm_radius_pixels, 0.01f, 1000.0f);
+  kintegrator->vcm_light_path_ratio = clamp(vcm_light_path_ratio, 0.0f, 4.0f);
   kintegrator->vcm_merge_only = kintegrator->use_vertex_merging &&
                                 !kintegrator->bdpt_use_connections &&
                                 getenv("CYCLES_VCM_MERGE_ONLY") != nullptr;
+  /* The diagnostic of merging on its own samples every path with it. */
+  kintegrator->vcm_caustics_only = vcm_caustics_only && !kintegrator->vcm_merge_only;
+  /* The closures store the square of the shader roughness along each axis. The limit stays
+   * below the roughness from which a shader is proven not to be sharp, see
+   * shader_has_no_sharp_surface(). */
+  kintegrator->vcm_sharp_roughness_squared = sqr(sqr(clamp(vcm_sharp_roughness, 0.0f, 0.45f)));
   if (kintegrator->use_vertex_merging) {
     /* Merging samples the caustics that manifold next event estimation would add again. */
     kintegrator->use_caustics = false;
@@ -750,11 +762,15 @@ uint64_t Integrator::get_kernel_features() const
     kernel_features |= KERNEL_FEATURE_LIGHT_TREE;
   }
 
-  if (get_use_bidirectional_path_tracing() || get_use_vertex_merging()) {
+  if (get_use_bidirectional_path_tracing()) {
     /* BDPT sensor connections use the manifold solver for specular chains between a cached light
      * vertex and the camera. This is intrinsic bidirectional transport and does not require the
      * user-facing shadow-caustics caster/receiver annotations. */
     kernel_features |= KERNEL_FEATURE_BDPT | KERNEL_FEATURE_MNEE;
+  }
+  else if (get_use_vertex_merging()) {
+    /* Merging alone connects nothing, and samples the caustics of the manifold solver itself. */
+    kernel_features |= KERNEL_FEATURE_BDPT;
   }
   else if (get_use_photon_mapping()) {
     /* Make photon pipeline demand visible before Metal starts compiling generic kernels. */

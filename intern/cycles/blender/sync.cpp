@@ -436,6 +436,10 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
   integrator->set_bdpt_update_samples(get_int(cscene, "bdpt_update_samples"));
   integrator->set_use_vertex_merging(get_boolean(cscene, "use_vertex_merging"));
   integrator->set_vcm_radius(get_float(cscene, "vcm_radius"));
+  integrator->set_vcm_radius_pixels(get_float(cscene, "vcm_radius_pixels"));
+  integrator->set_vcm_caustics_only(get_boolean(cscene, "vcm_caustics_only"));
+  integrator->set_vcm_sharp_roughness(get_float(cscene, "vcm_caustic_roughness"));
+  integrator->set_vcm_light_path_ratio(get_float(cscene, "vcm_light_path_ratio"));
   integrator->set_vcm_radius_alpha(get_float(cscene, "vcm_radius_alpha"));
   integrator->set_vcm_merge_max(get_int(cscene, "vcm_merge_max"));
   integrator->set_use_photon_mapping(get_boolean(cscene, "use_photon_mapping"));

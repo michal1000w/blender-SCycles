@@ -866,13 +866,39 @@ class CYCLES_RENDER_PT_light_paths_vertex_merging(CyclesButtonsPanel, Panel):
             box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
 
         col = layout.column(align=True)
+        col.prop(cscene, "vcm_radius_pixels")
+        col.prop(cscene, "vcm_caustics_only")
+
+
+class CYCLES_RENDER_PT_light_paths_vertex_merging_advanced(CyclesButtonsPanel, Panel):
+    bl_label = "Advanced"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_parent_id = "CYCLES_RENDER_PT_light_paths_vertex_merging"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cscene = context.scene.cycles
+        layout.active = cscene.use_vertex_merging and use_light_cache_transport(context)
+
+        col = layout.column(align=True)
         col.prop(cscene, "vcm_radius")
         col.prop(cscene, "vcm_radius_alpha")
         col.prop(cscene, "vcm_merge_max")
+        sub = col.row()
+        sub.active = cscene.vcm_caustics_only
+        sub.prop(cscene, "vcm_caustic_roughness")
 
         # Merging uses the light paths of the bidirectional pass.
         col = layout.column(align=True)
-        col.prop(cscene, "bdpt_light_paths")
+        sub = col.row()
+        sub.active = not cscene.use_bidirectional_path_tracing
+        sub.prop(cscene, "vcm_light_path_ratio")
+        sub = col.row()
+        sub.active = cscene.use_bidirectional_path_tracing or cscene.vcm_light_path_ratio == 0.0
+        sub.prop(cscene, "bdpt_light_paths")
         col.prop(cscene, "bdpt_max_bounces")
         col.prop(cscene, "bdpt_update_samples")
 
@@ -2881,6 +2907,7 @@ classes = (
     CYCLES_RENDER_PT_light_paths_caustics,
     CYCLES_RENDER_PT_light_paths_bidirectional,
     CYCLES_RENDER_PT_light_paths_vertex_merging,
+    CYCLES_RENDER_PT_light_paths_vertex_merging_advanced,
     CYCLES_RENDER_PT_diffraction,
     CYCLES_RENDER_PT_light_paths_coherent_specular,
     CYCLES_RENDER_PT_light_paths_photon_mapping,

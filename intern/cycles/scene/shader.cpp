@@ -317,6 +317,54 @@ void Shader::set_graph(unique_ptr<ShaderGraph> &&graph_)
   has_volume_connected = (graph->output()->input("Volume")->link != nullptr);
 }
 
+/* Largest roughness that vertex merging can take as sharp: the limit of its setting. A surface
+ * whose closures are all rougher never is. */
+static constexpr float VERTEX_MERGING_SHARP_ROUGHNESS_LIMIT = 0.5f;
+
+/* Whether the surface of the shader is proven to only have closures that vertex merging does not
+ * take as sharp, and no transparent one. Anything that is not known to be so counts as possibly
+ * sharp: the proof only lets light subpaths stop early. */
+static bool shader_has_no_sharp_surface(const Shader *shader)
+{
+  if (!shader->graph || !shader->has_surface) {
+    return false;
+  }
+  const auto is_constant_above_limit = [](ShaderNode *node, const char *name, const float value) {
+    const ShaderInput *input = node->input(name);
+    return input && !input->link && value >= VERTEX_MERGING_SHARP_ROUGHNESS_LIMIT;
+  };
+  for (ShaderNode *node : shader->graph->nodes) {
+    if (node->special_type == SHADER_SPECIAL_TYPE_OSL || node->has_surface_transparent()) {
+      return false;
+    }
+    if (node->special_type != SHADER_SPECIAL_TYPE_CLOSURE) {
+      continue;
+    }
+    if (node->type == DiffuseBsdfNode::get_node_type() ||
+        node->type == TranslucentBsdfNode::get_node_type() ||
+        node->type == EmissionNode::get_node_type() ||
+        node->type == BackgroundNode::get_node_type() ||
+        node->type == HoldoutNode::get_node_type() ||
+        node->type == SubsurfaceScatteringNode::get_node_type() ||
+        dynamic_cast<VolumeNode *>(node) != nullptr)
+    {
+      continue;
+    }
+    if (node->type == PrincipledBsdfNode::get_node_type()) {
+      PrincipledBsdfNode *bsdf = static_cast<PrincipledBsdfNode *>(node);
+      const ShaderInput *coat = node->input("Coat Weight");
+      const bool no_coat = coat && !coat->link && bsdf->get_coat_weight() <= 0.0f;
+      if (is_constant_above_limit(node, "Roughness", bsdf->get_roughness()) &&
+          (no_coat || is_constant_above_limit(node, "Coat Roughness", bsdf->get_coat_roughness())))
+      {
+        continue;
+      }
+    }
+    return false;
+  }
+  return true;
+}
+
 bool Shader::has_surface_shadow_transparency() const
 {
   if (!use_transparent_shadow) {
@@ -773,6 +821,9 @@ void ShaderManager::device_update_common(Device * /*device*/,
     }
     if (shader->has_transparent_shadow()) {
       flag |= SD_HAS_TRANSPARENT_SHADOW;
+    }
+    if (shader_has_no_sharp_surface(shader)) {
+      flag |= SD_HAS_NO_SHARP_SURFACE;
     }
     if (shader->has_surface_raytrace) {
       flag |= SD_HAS_RAYTRACE;
