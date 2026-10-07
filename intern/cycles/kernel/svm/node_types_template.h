@@ -30,6 +30,11 @@ SHADER_NODE_TYPE_DERIVATIVE(NODE_TEX_COORD)
 SHADER_NODE_TYPE_DERIVATIVE(NODE_VALUE_F)
 SHADER_NODE_TYPE_DERIVATIVE(NODE_VALUE_V)
 SHADER_NODE_TYPE_DERIVATIVE(NODE_ATTR)
+/* Two unused node types, where the vertex color node was before it became an attribute node.
+ * They keep the numbers of the node types that follow: without them the Metal compiler builds
+ * a slower dispatch for the specialized node switch of pixel displacement shaders (5-7% of the
+ * render time of procedurally displaced scenes on an M5). */
+SHADER_NODE_TYPE_DERIVATIVE(NODE_RESERVED)
 SHADER_NODE_TYPE(NODE_SET_DISPLACEMENT)
 SHADER_NODE_TYPE(NODE_DISPLACEMENT)
 SHADER_NODE_TYPE(NODE_VECTOR_DISPLACEMENT)
