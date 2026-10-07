@@ -67,6 +67,8 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vcm) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vc) = -INFINITY;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vm) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_d_vp) = -INFINITY;
+    INTEGRATOR_STATE_WRITE(state, path, bdpt_merge_length) = 0.0f;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_surface_stage) = 0;
     INTEGRATOR_STATE_WRITE(state, path, bdpt_volume_bounce) = 0;
     /* Light subpaths are connected to the sensor through media only with connections. */

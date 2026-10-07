@@ -82,43 +82,88 @@ template<int Exponent> struct BDPTMISLogRecurrence {
   }
 
   /* The same recurrence with vertex merging (Georgiev et al., "Light Transport Simulation with
-   * Vertex Connection and Merging"): z is dVM. `vm_factor` is the factor of eta, the number of
-   * light subpaths times the area of the merge disk, and `vc_factor` the factor of its inverse.
-   * Both are negative infinity without merging, and `vm_factor` also at a vertex that cannot be
-   * merged at, a medium vertex for example.
+   * Vertex Connection and Merging"). The sums of the paper are affine in eta, the number of
+   * light subpaths times the area of the merge disk: dVC = y + eta z and dVM = y / eta + z.
+   * Keeping the two parts apart leaves the merge radius open until a weight is evaluated, so
+   * that every camera path can merge within the footprint of its own pixel.
    *
-   * dVCM stands for the strategy that samples the current vertex from the other side and
-   * connects to it. `selection_ratio` scales its density and is zero where no such strategy
-   * exists: without connections, only next event estimation at the first light vertex does. */
-  ccl_device_inline_method static float3 scatter_vcm(const float3 previous,
-                                                     const float cosine,
-                                                     const float forward_pdf,
-                                                     const float reverse_pdf,
-                                                     const float selection_ratio,
-                                                     const float vm_factor,
-                                                     const float vc_factor)
+   * x is dVCM, y the strategies without a merge and z the number of merge strategies, each
+   * relative to the density of the subpath. dVCM stands for the strategy that samples the
+   * current vertex from the other side and connects to it. `selection_ratio` scales its density
+   * and is zero where no such strategy exists: without connections, only next event estimation
+   * at the first light vertex does.
+   *
+   * Light vertices are only kept for merging behind an unbroken chain of sharp scattering
+   * events that starts at the emitter (see vcm_surface_is_sharp()), so a merge strategy exists
+   * for some vertices of a path only.
+   *
+   * A light subpath knows at each of its vertices whether it is kept: `merge` adds its strategy. */
+  ccl_device_inline_method static float3 scatter_light_vcm(const float3 previous,
+                                                           const float cosine,
+                                                           const float forward_pdf,
+                                                           const float reverse_pdf,
+                                                           const float selection_ratio,
+                                                           const bool merge)
   {
     const float geometry = ratio(cosine, forward_pdf);
     const float reverse = factor(reverse_pdf);
     const float connection = product(previous.x, factor(selection_ratio));
-    return make_float3(
-        ratio(1.0f, forward_pdf),
-        product(geometry, sum(sum(product(previous.y, reverse), connection), vm_factor)),
-        vc_factor == -INFINITY ?
-            -INFINITY :
-            product(geometry,
-                    sum(sum(product(previous.z, reverse), product(connection, vc_factor)),
-                        vm_factor == -INFINITY ? -INFINITY : 0.0f)));
+    return make_float3(ratio(1.0f, forward_pdf),
+                       product(geometry, sum(product(previous.y, reverse), connection)),
+                       product(geometry, sum(product(previous.z, reverse), merge ? 0.0f : -INFINITY)));
+  }
+
+  /* A camera subpath learns it later: the light vertex that merges with one of its vertices
+   * arrives through the vertices that follow. w is the strategy of the previous vertex, pending
+   * until the event at the current vertex is known. A sharp event keeps the strategies of all
+   * earlier vertices, any other ends them. `merge` is whether the current vertex can be merged
+   * at; a medium vertex cannot. */
+  ccl_device_inline_method static float4 scatter_camera_vcm(const float4 previous,
+                                                            const float cosine,
+                                                            const float forward_pdf,
+                                                            const float reverse_pdf,
+                                                            const float selection_ratio,
+                                                            const bool merge,
+                                                            const bool sharp)
+  {
+    /* Most sums of a path are empty: no logarithm is taken for those. */
+    const float forward = factor(forward_pdf);
+    const float geometry = factor(cosine) - forward;
+    const float connection = (previous.x == -INFINITY || !(selection_ratio > 0.0f)) ?
+                                 -INFINITY :
+                                 previous.x + factor(selection_ratio);
+    const float merges = sharp ? sum(previous.z, previous.w) : -INFINITY;
+    const float reverse = ((previous.y != -INFINITY || merges != -INFINITY) &&
+                           reverse_pdf > 0.0f) ?
+                              factor(reverse_pdf) :
+                              -INFINITY;
+    return make_float4(-forward,
+                       product(geometry, sum(product(previous.y, reverse), connection)),
+                       product(product(geometry, reverse), merges),
+                       merge ? geometry : -INFINITY);
   }
 
   /* Neither a connection nor a merge can end at a delta vertex. */
-  ccl_device_inline_method static float3 scatter_delta_vcm(const float3 previous,
-                                                           const float cosine,
-                                                           const float forward_mass,
-                                                           const float reverse_mass)
+  ccl_device_inline_method static float3 scatter_delta_light_vcm(const float3 previous,
+                                                                 const float cosine,
+                                                                 const float forward_mass,
+                                                                 const float reverse_mass)
   {
     const float branch = product(factor(cosine), ratio(reverse_mass, forward_mass));
     return make_float3(-INFINITY, product(previous.y, branch), product(previous.z, branch));
+  }
+
+  /* A delta event is sharp: the pending strategy of the previous vertex stays. */
+  ccl_device_inline_method static float4 scatter_delta_camera_vcm(const float4 previous,
+                                                                  const float cosine,
+                                                                  const float forward_mass,
+                                                                  const float reverse_mass)
+  {
+    const float branch = product(factor(cosine), ratio(reverse_mass, forward_mass));
+    return make_float4(-INFINITY,
+                       product(previous.y, branch),
+                       product(sum(previous.z, previous.w), branch),
+                       -INFINITY);
   }
 
   /* The selected strategy has unit relative density. Neither alternative sum

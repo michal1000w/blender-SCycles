@@ -173,6 +173,8 @@ class PathTraceWorkGPU : public PathTraceWork {
   /* Vertex merging keeps its light subpath vertices in the photon map, with these MIS terms. */
   device_only_memory<KernelVCMVertex> vcm_vertices_;
   uint vcm_path_capacity_ = 0;
+  /* Camera samples that share one set of light subpaths. */
+  int bdpt_update_samples_ = 1;
 
   /* Optional Metal bidirectional light-vertex cache. */
   device_only_memory<KernelBDPTVertex> bdpt_vertices_;

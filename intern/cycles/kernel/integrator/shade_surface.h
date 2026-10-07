@@ -803,14 +803,31 @@ ccl_device_forceinline_transport bool integrate_surface_bidirectional(
                                  light_sd.N,
                                  light_sd.runtime_flag,
                                  light_sd.object) : 1.0f;
-  /* Either end of the connection can also be merged with the vertex next to it. */
+  /* Either end of the connection can also be merged with the vertex next to it: the light
+   * vertex when it is kept for merging, the camera vertex when the light subpath extended to
+   * it would be. */
+  const bool merging = vcm_merging_enabled(kg);
+  const BDPTMISWeight eta = vcm_mis_eta(kg, vcm_path_merge_radius(kg, state));
+  const bool light_vertex_kept = merging &&
+                                 (vcm_keep_all(kg) ||
+                                  (light_vertex->sharp_prefix != 0u && light_path_length > 2u));
+  const bool light_side_sharp = merging &&
+                                (vcm_keep_all(kg) || (light_vertex->sharp_prefix != 0u &&
+                                                      vcm_surface_is_sharp(kg, &light_sd)));
   const BDPTMISWeight w_light =
       BDPTMISWeight(camera_pdf_area) *
       (BDPTMISWeight::from_encoded(light_vertex->d_vcm) * selection_ratio +
-       BDPTMISWeight::from_encoded(light_vertex->d_vc) * light_reverse_pdf +
-       vcm_mis_vm_factor(kg));
+       (BDPTMISWeight::from_encoded(light_vertex->d_vc) +
+        BDPTMISWeight::from_encoded(light_vertex->d_vm) * eta) *
+           light_reverse_pdf +
+       (light_vertex_kept ? eta : BDPTMISWeight(0.0f)));
   const BDPTMISWeight w_camera = BDPTMISWeight(light_pdf_area) *
-                                 bdpt_camera_vertex_alternatives(kg, state, camera_reverse_pdf);
+                                 bdpt_camera_vertex_alternatives(kg,
+                                                                 state,
+                                                                 sd,
+                                                                 camera_reverse_pdf,
+                                                                 light_side_sharp,
+                                                                 light_side_sharp);
   /* Reservoir subsampling estimates the sum over all connectible light-path vertices.
    * Its inverse inclusion probability belongs in the contribution below. The recursive MIS
    * partition still describes those complete strategies, as do NEE and sensor connections.
@@ -1050,8 +1067,11 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
       /* Keep the forward mass supplied by the sampled closure mixture. */
       reverse_pdf = bdpt_reverse_pdf(kg, state, sd, bsdf_wo, false, nullptr, true);
     }
-    else {
-      reverse_pdf = (label & LABEL_SINGULAR) ? mis_pdf : bdpt_reverse_pdf(kg, state, sd, bsdf_wo);
+    else if (label & LABEL_SINGULAR) {
+      reverse_pdf = mis_pdf;
+    }
+    else if (bdpt_camera_vertex_needs_reverse_pdf(kg, state, sd)) {
+      reverse_pdf = bdpt_reverse_pdf(kg, state, sd, bsdf_wo);
     }
     if (sd->runtime_flag & SR_CACHE_MISS) {
       return LABEL_CACHE_MISS;
@@ -1122,7 +1142,8 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 #ifdef __BDPT__
   if (update_bdpt_mis) {
     const float cos_out = max(fabsf(dot(sd->Ng, normalize(bsdf_wo))), 1.0e-8f);
-    bdpt_recursive_mis_after_scatter(kg, state, label, cos_out, mis_pdf, reverse_pdf);
+    bdpt_recursive_mis_after_scatter(
+        kg, state, label, cos_out, mis_pdf, reverse_pdf, true, vcm_surface_is_sharp(kg, sd));
   }
 #endif
 

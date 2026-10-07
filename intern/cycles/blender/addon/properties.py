@@ -816,9 +816,18 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
-    vcm_radius: FloatProperty(
+    vcm_radius_pixels: FloatProperty(
         name="Merge Radius",
-        description="Initial world-space radius in which light path vertices are merged; smaller values are sharper but noisier. Zero uses 0.3% of the scene size",
+        description="Radius in pixels of the image within which light path vertices are merged, measured where a camera path first meets a surface that is not a mirror or clear glass. The radius in the scene follows from the distance to the camera, so near and far surfaces resolve the same detail. Larger values are smoother and blurrier",
+        min=0.01, max=1000.0,
+        soft_min=0.5, soft_max=16.0,
+        default=1.0,
+        subtype='PIXEL',
+    )
+
+    vcm_radius: FloatProperty(
+        name="Radius Limit",
+        description="Largest merge radius in the scene, for surfaces far from the camera. Zero uses 1% of the scene size",
         min=0.0, soft_max=1.0,
         default=0.0,
         precision=4,
@@ -835,9 +844,30 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     vcm_merge_max: IntProperty(
         name="Merge Maximum",
         description="Maximum number of nearby light path vertices evaluated at one shading point; dense neighborhoods are sampled without losing energy",
-        min=1, max=1024,
-        soft_max=64,
-        default=16,
+        min=1, max=32,
+        default=8,
+    )
+
+    vcm_caustics_only: BoolProperty(
+        name="Caustics Only",
+        description="Merge only with light that reached a surface through mirrors, glass and other sharp reflections or refractions. Everything else is left to the sampling strategies that render it without the low frequency noise of merging, which makes rendering faster and more robust. Disable to merge all light",
+        default=True,
+    )
+
+    vcm_caustic_roughness: FloatProperty(
+        name="Caustic Roughness",
+        description="Largest roughness of a reflection or refraction whose light is merged as a caustic",
+        min=0.0, max=0.45,
+        default=0.25,
+        subtype='FACTOR',
+    )
+
+    vcm_light_path_ratio: FloatProperty(
+        name="Light Path Ratio",
+        description="Light paths traced for merging relative to the camera paths, when merging is used without bidirectional path tracing. Zero uses the Light Paths count instead",
+        min=0.0, max=4.0,
+        soft_max=1.0,
+        default=0.0625,
     )
 
     use_photon_mapping: BoolProperty(

@@ -23,6 +23,7 @@ CCL_NAMESPACE_BEGIN
 class BufferParams;
 class Device;
 struct KernelIntegrator;
+struct KernelCamera;
 class DeviceScene;
 class Film;
 class PathTraceDisplay;
@@ -37,20 +38,33 @@ bool path_trace_use_bidirectional(const DeviceScene *device_scene);
 /* Upper bound of the memory of one merge map. */
 constexpr size_t VERTEX_MERGING_MAX_MEMORY = size_t(384) * 1024 * 1024;
 
-/* Vertices that one light subpath can keep for merging: one per bounce, and a few more for the
- * surfaces it passes with a transparent closure after storing a vertex. */
+/* Vertices that one light subpath can keep for merging. */
 uint vertex_merging_path_slots(const KernelIntegrator &integrator);
 
+/* Light subpaths of one bidirectional update for a buffer of the given size. With merging in
+ * the regular path tracer the number follows the camera paths that the update serves; otherwise
+ * it is the share of the scene's budget that the buffer has of the full resolution. */
+uint bidirectional_light_paths(const KernelIntegrator &integrator,
+                               const int width,
+                               const int height,
+                               const int update_samples);
+
 struct VertexMergingRadius {
-  /* Merge radius of the map built for the sample `iteration`. */
+  /* Largest merge radius of the map built for the sample `iteration`: the width of a cell of its
+   * hash grid. */
   float radius;
+  /* Merge radius of a camera path, as `base + slope * distance from the camera` of its first
+   * vertex that is not a delta event: the footprint of the configured number of pixels. */
+  float radius_base;
+  float radius_slope;
   /* Number of light subpaths that store their vertices. */
   uint light_paths;
-  /* Subpaths times the area of the merge disk: the density of merging relative to a connection
-   * in the MIS weights, see vcm_mis_vm_factor() in the kernel. */
-  float eta;
+  /* Subpaths times pi: times the squared merge radius this is the density of merging relative to
+   * a connection in the MIS weights, see vcm_mis_eta() in the kernel. */
+  float eta_scale;
 };
 VertexMergingRadius vertex_merging_radius(const KernelIntegrator &integrator,
+                                          const KernelCamera &camera,
                                           const int iteration,
                                           const uint light_paths);
 

@@ -1011,6 +1011,9 @@ enum ShaderDataFlag {
   /* Material takes part in nested dielectrics on the objects that are media, with a priority
    * stored in __shaders. Cleared in ShaderData for any other object. */
   SD_HAS_NESTED_PRIORITY = (1 << 1),
+  /* Surface is proven to have neither a transparent closure nor one that vertex merging takes as
+   * sharp, see vcm_surface_is_sharp(): a light subpath that reaches it first forms no caustic. */
+  SD_HAS_NO_SHARP_SURFACE = (1 << 2),
   /* If the shader is wavelength-dependent. */
   SD_REQUIRES_WAVELENGTH = (1 << 12),
   /* If Light Path Node is present in the shader graph. */
@@ -1806,9 +1809,14 @@ struct ccl_align(16) KernelBDPTVertex {
   packed_float3 emitter_P;
   /* Sensor connection completion, so a tile-cache retry cannot duplicate a queued shadow. */
   uint sensor_complete;
+  /* Vertex merging: the merge strategies of the earlier vertices, see scatter_light_vcm(), and
+   * whether all scattering events before this vertex were sharp. */
+  float d_vm;
+  uint sharp_prefix;
+  uint pad0, pad1;
 };
 static_assert_align(KernelBDPTVertex, 16);
-static_assert(sizeof(KernelBDPTVertex) == 112,
+static_assert(sizeof(KernelBDPTVertex) == 128,
               "KernelBDPTVertex includes the exact emitter endpoint");
 
 /* Recursive MIS terms of a light subpath vertex stored for vertex merging. The vertex itself is

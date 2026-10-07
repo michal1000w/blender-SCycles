@@ -291,13 +291,10 @@ void PathTraceWorkCPU::alloc_bidirectional_path_tracing()
    * PathTraceWorkGPU::alloc_bidirectional_path_tracing(). The setting is the budget at the
    * scene's full render resolution; previews and cropped buffers receive the proportional share.
    * Each emitted path reservoir-selects one connectible vertex. */
-  const uint64_t scaled_light_paths = uint64_t(integrator.bdpt_light_paths) *
-                                      uint64_t(max(effective_buffer_params_.width, 1)) *
-                                      uint64_t(max(effective_buffer_params_.height, 1));
-  const uint64_t reference_pixels = uint64_t(max(integrator.bdpt_reference_pixels, 1));
-  const uint64_t scaled_count = (scaled_light_paths + reference_pixels - 1u) / reference_pixels;
-  const uint light_paths = uint(
-      std::clamp(scaled_count, uint64_t(1), uint64_t(integrator.bdpt_light_paths)));
+  const uint light_paths = bidirectional_light_paths(integrator,
+                                                     effective_buffer_params_.width,
+                                                     effective_buffer_params_.height,
+                                                     integrator.bdpt_update_samples);
   const uint capacity = light_paths;
 
   LOG_INFO << "BDPT light cache: " << capacity << " vertices, light tree "
@@ -394,12 +391,15 @@ void PathTraceWorkCPU::update_bidirectional_light_cache(const int start_sample,
 
   if (integrator.use_vertex_merging && transport_state_.photon_capacity != 0) {
     const VertexMergingRadius merging = vertex_merging_radius(
-        integrator, iteration, min(paths_per_cache, vcm_path_capacity_));
+        integrator, device_scene_->data.cam, iteration, min(paths_per_cache, vcm_path_capacity_));
     transport_state_.photon_iteration = iteration;
     transport_state_.photon_radius = merging.radius;
+    transport_state_.vcm_radius_base = merging.radius_base;
+    transport_state_.vcm_radius_slope = merging.radius_slope;
     transport_state_.vcm_light_path_count = merging.light_paths;
-    transport_state_.vcm_eta = merging.eta;
+    transport_state_.vcm_eta_scale = merging.eta_scale;
     std::fill(photon_hash_.begin(), photon_hash_.end(), 0u);
+    photon_stored_ = 0;
   }
 
   const int num_light_paths = int(paths_per_cache);
@@ -414,7 +414,7 @@ void PathTraceWorkCPU::update_bidirectional_light_cache(const int start_sample,
     return;
   }
 
-  if (transport_state_.vcm_eta > 0.0f) {
+  if (transport_state_.vcm_eta_scale > 0.0f) {
     photon_stored_ = uint(kernels_.integrator_vcm_map_build(&kernel_thread_globals_->front()));
     LOG_DEBUG << "Vertex merging: " << photon_stored_ << " light vertices of "
               << transport_state_.vcm_light_path_count << " subpaths at radius "

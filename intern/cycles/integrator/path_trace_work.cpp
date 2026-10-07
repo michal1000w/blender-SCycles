@@ -41,26 +41,93 @@ bool path_trace_use_bidirectional(const DeviceScene *device_scene)
 
 uint vertex_merging_path_slots(const KernelIntegrator &integrator)
 {
-  return uint(integrator.bdpt_max_bounces) + 4u;
+  /* A subpath that only keeps the vertices of caustics stops at the first surface that is not
+   * sharp, and rarely has more than one. With more vertices to keep than slots a subpath keeps
+   * a random subset that stands for all, see vcm_finish_light_path() in the kernel. */
+  const uint bounces = uint(integrator.bdpt_max_bounces);
+  return integrator.vcm_caustics_only ? 2u : min(bounces + 4u, 8u);
+}
+
+uint bidirectional_light_paths(const KernelIntegrator &integrator,
+                               const int width,
+                               const int height,
+                               const int update_samples)
+{
+  const uint64_t pixels = uint64_t(max(width, 1)) * uint64_t(max(height, 1));
+  if (integrator.use_vertex_merging && !integrator.bdpt_use_connections &&
+      integrator.vcm_light_path_ratio > 0.0f)
+  {
+    /* The light subpaths only provide vertices to merge with, and a camera path merges within
+     * a few pixels: keep their number in proportion to the camera paths of one update. */
+    const double paths = double(integrator.vcm_light_path_ratio) * double(pixels) *
+                         double(max(update_samples, 1));
+    return uint(std::min(std::max(paths, 1024.0), 4.0 * 1024.0 * 1024.0));
+  }
+  /* Keep the light-subpath density constant as image resolution changes. The setting is the
+   * budget at the scene's full render resolution; previews and cropped buffers receive the
+   * proportional share. */
+  const uint64_t scaled_light_paths = uint64_t(integrator.bdpt_light_paths) * pixels;
+  const uint64_t reference_pixels = uint64_t(max(integrator.bdpt_reference_pixels, 1));
+  const uint64_t scaled_count = (scaled_light_paths + reference_pixels - 1u) / reference_pixels;
+  return uint(std::clamp(scaled_count, uint64_t(1), uint64_t(integrator.bdpt_light_paths)));
 }
 
 VertexMergingRadius vertex_merging_radius(const KernelIntegrator &integrator,
+                                          const KernelCamera &camera,
                                           const int iteration,
                                           const uint light_paths)
 {
   /* Progressive radius reduction of Georgiev et al.: the variance of merging stays bounded while
-   * its blur vanishes. Without a radius, 0.3% of the radius of the scene. */
-  const float initial_radius = integrator.vcm_radius > 0.0f ?
-                                   integrator.vcm_radius :
-                                   0.003f * integrator.photon_scene.w;
+   * its blur vanishes. */
+  const float shrink = powf(float(iteration + 1), 0.5f * (integrator.vcm_radius_alpha - 1.0f));
+  const float pixels = max(integrator.vcm_radius_pixels, 1.0e-3f) * shrink;
+  const float scene_radius = max(integrator.photon_scene.w, 1.0e-6f);
+
+  /* The footprint of a pixel grows with the distance from a perspective or panoramic camera,
+   * and is the same everywhere for an orthographic one. */
   VertexMergingRadius result;
-  result.radius = max(
-      initial_radius * powf(float(iteration + 1), 0.5f * (integrator.vcm_radius_alpha - 1.0f)),
-      1.0e-6f);
+  /* Twice the radius at the distance of the middle of the scene. */
+  float largest;
+  if (camera.type == CAMERA_ORTHOGRAPHIC) {
+    result.radius_base = pixels * 0.5f * (len(make_float3(camera.dx)) + len(make_float3(camera.dy)));
+    result.radius_slope = 0.0f;
+    largest = 2.0f * result.radius_base;
+  }
+  else {
+    float pixel_angle;
+    if (camera.type == CAMERA_PERSPECTIVE) {
+      /* The raster derivatives are lengths on the plane that the raster unprojects to. */
+      const ProjectionTransform raster_to_camera = camera.rastertocamera;
+      const float3 center = transform_perspective(
+          &raster_to_camera, make_float3(0.5f * camera.width, 0.5f * camera.height, 0.0f));
+      pixel_angle = 0.5f * (len(make_float3(camera.dx)) + len(make_float3(camera.dy))) /
+                    max(len(center), 1.0e-8f);
+    }
+    else {
+      const float fov = (camera.panorama_type == PANORAMA_FISHEYE_EQUIDISTANT ||
+                         camera.panorama_type == PANORAMA_FISHEYE_EQUISOLID) ?
+                            camera.fisheye_fov :
+                            M_2PI_F;
+      pixel_angle = fov / max(camera.width, 1.0f);
+    }
+    result.radius_base = 0.0f;
+    result.radius_slope = pixels * max(pixel_angle, 1.0e-8f);
+    const float3 camera_P = make_float3(
+        camera.cameratoworld.x.w, camera.cameratoworld.y.w, camera.cameratoworld.z.w);
+    largest = 2.0f * result.radius_slope *
+              max(len(camera_P - make_float3(integrator.photon_scene)), 0.25f * scene_radius);
+  }
+  /* The cells of the grid are as wide as the largest radius, and a camera vertex walks through
+   * all vertices of the cells that its merge disk touches: keep them close to the disks of most
+   * camera vertices, and bound them in the scene for a camera that is far away. Paths with a
+   * larger footprint merge within this radius. */
+  const float bound = (integrator.vcm_radius > 0.0f ? integrator.vcm_radius :
+                                                      0.01f * scene_radius) *
+                      shrink;
+  result.radius = max(min(largest, bound), 1.0e-6f);
   result.light_paths = light_paths;
   /* A camera vertex only merges with the subpaths of its time bin, and counts each as many. */
-  result.eta = M_PI_F * sqr(result.radius) * float(light_paths) /
-               float(max(integrator.photon_time_bins, 1));
+  result.eta_scale = M_PI_F * float(light_paths) / float(max(integrator.photon_time_bins, 1));
   return result;
 }
 

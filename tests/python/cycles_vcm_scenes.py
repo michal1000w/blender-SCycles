@@ -11,8 +11,9 @@ glass, caustics of point lights).
 
   blender -b --factory-startup --python tests/python/cycles_vcm_scenes.py -- \
       --output DIRECTORY [--device CPU|METAL] [--integrator pt|bdpt] [--vcm] [--guiding] \
-      [--scenes a,b,c|validation|demo|all] [--samples N] [--resolution N] [--radius R] \
-      [--light-paths N] [--time-limit SECONDS] [--save-blend] [--no-render] [--png]
+      [--scenes a,b,c|validation|demo|all] [--samples N] [--resolution N] [--radius-pixels R] \
+      [--radius R] [--all-light] [--light-path-ratio R] [--light-paths N] \
+      [--time-limit SECONDS] [--save-blend] [--no-render] [--png]
 
 Scenes without `--vcm` do not touch the setting, so they also render in builds without it.
 Compare with tests/python/cycles_vcm_compare.py.
@@ -43,9 +44,16 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--bounces", type=int, default=8)
-    parser.add_argument("--radius", type=float, default=0.0, help="Merge radius, 0 is automatic")
+    parser.add_argument("--radius", type=float, default=0.0,
+                        help="Largest merge radius in the scene, 0 is automatic")
+    parser.add_argument("--radius-pixels", type=float, default=-1.0,
+                        help="Merge radius in pixels, negative keeps the default")
+    parser.add_argument("--all-light", action="store_true",
+                        help="Merge all light instead of caustics only")
+    parser.add_argument("--caustic-roughness", type=float, default=-1.0)
+    parser.add_argument("--light-path-ratio", type=float, default=-1.0)
     parser.add_argument("--alpha", type=float, default=0.75)
-    parser.add_argument("--merge-max", type=int, default=16)
+    parser.add_argument("--merge-max", type=int, default=8)
     parser.add_argument("--light-paths", type=int, default=65536)
     parser.add_argument("--update-samples", type=int, default=8)
     parser.add_argument("--time-limit", type=float, default=0.0)
@@ -116,6 +124,14 @@ def new_scene(args, camera_location=(0.0, -3.9, 1.0), look_at=(0.0, 0.0, 1.0), l
         cycles.vcm_radius = args.radius
         cycles.vcm_radius_alpha = args.alpha
         cycles.vcm_merge_max = args.merge_max
+        if hasattr(cycles, "vcm_radius_pixels"):
+            if args.radius_pixels >= 0.0:
+                cycles.vcm_radius_pixels = args.radius_pixels
+            cycles.vcm_caustics_only = not args.all_light
+            if args.caustic_roughness >= 0.0:
+                cycles.vcm_caustic_roughness = args.caustic_roughness
+            if args.light_path_ratio >= 0.0:
+                cycles.vcm_light_path_ratio = args.light_path_ratio
 
     world = bpy.data.worlds.new("World")
     world.use_nodes = True
