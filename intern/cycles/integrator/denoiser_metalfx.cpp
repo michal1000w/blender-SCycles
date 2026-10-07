@@ -301,7 +301,7 @@ bool MetalFXDenoiser::denoise_run(const DenoiseContext &context, const DenoisePa
   frame.pass_noisy = pass.noisy_offset;
   frame.pass_denoised = pass.denoised_offset;
   frame.num_components = pass.num_components;
-  frame.use_compositing = pass.use_compositing;
+  frame.use_compositing = Pass::get_info(pass.type).use_compositing;
   frame.use_albedo = pass.use_denoising_albedo;
   frame.upscale_factor = params_.upscale_factor;
 

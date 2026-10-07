@@ -18,6 +18,7 @@ void node_bsdf_refraction(float4 color,
                           float /*diffraction_depth*/,    /* Unsupported. */
                           float /*diffraction_duty*/,     /* Unsupported. */
                           float3 /*diffraction_tangent*/, /* Unsupported. */
+                          KernelGlobals &kg,
                           ShadingData &sd,
                           Closure &result)
 {

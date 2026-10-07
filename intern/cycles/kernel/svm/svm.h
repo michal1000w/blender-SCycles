@@ -485,18 +485,6 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
         }
       }
       break;
-      SVM_SHARED_CASE(NODE_VERTEX_COLOR)
-      svm_node_vertex_color(kg, sd, stack, svm_node_get<SVMNodeVertexColor>(kg, &offset));
-      break;
-      SVM_SHARED_CASE(NODE_VERTEX_COLOR_DERIVATIVE)
-      {
-        const ccl_global auto &node = svm_node_get<SVMNodeVertexColor>(kg, &offset);
-        IF_NOT_KERNEL_NODES_FEATURE(VOLUME)
-        {
-          svm_node_vertex_color_derivative(kg, sd, stack, node);
-        }
-      }
-      break;
       SVM_CASE(NODE_SET_DISPLACEMENT)
       svm_node_set_displacement<node_feature_mask>(
           sd, stack, svm_node_get<SVMNodeSetDisplacement>(kg, &offset));
