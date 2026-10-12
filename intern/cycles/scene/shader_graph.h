@@ -218,6 +218,21 @@ class ShaderNode : public Node {
   {
     return false;
   }
+  /* Volume index of refraction: whether the node gives a volume one that may vary in space, and
+   * the step along the rays it bends (zero for an automatic one). */
+  virtual bool has_volume_ior()
+  {
+    return false;
+  }
+  virtual float get_volume_ior_step_size()
+  {
+    return 0.0f;
+  }
+  /* Whether the node, as a closure of a volume shader, may absorb, scatter or emit light. */
+  virtual bool has_volume_medium()
+  {
+    return true;
+  }
   /* True if the node only multiplies or adds a constant values. */
   virtual bool is_linear_operation()
   {

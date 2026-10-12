@@ -103,6 +103,9 @@ Shader::Shader() : Node(get_node_type())
   has_surface_spatial_varying = false;
   has_volume_spatial_varying = false;
   has_volume_attribute_dependency = false;
+  has_volume_ior = false;
+  has_volume_medium = false;
+  volume_ior_step_size = 0.0f;
   has_volume_connected = false;
   prev_has_surface_shadow_transparency = false;
   prev_volume_step_rate = 0.0f;
@@ -495,6 +498,22 @@ void Shader::tag_update(Scene *scene)
   }
 }
 
+void Shader::tag_volume_closure_node(ShaderNode *node)
+{
+  if (node->has_volume_ior()) {
+    has_volume_ior = true;
+    const float step_size = node->get_volume_ior_step_size();
+    if (step_size > 0.0f) {
+      volume_ior_step_size = (volume_ior_step_size > 0.0f) ?
+                                 fminf(volume_ior_step_size, step_size) :
+                                 step_size;
+    }
+  }
+  if (node->has_volume_medium()) {
+    has_volume_medium = true;
+  }
+}
+
 void Shader::tag_used(Scene *scene)
 {
   /* if an unused shader suddenly gets used somewhere, it needs to be
@@ -625,6 +644,9 @@ void ShaderManager::device_update_pre(Device * /*device*/,
       shader->has_volume = output->input("Volume")->link != nullptr;
       shader->has_volume_spatial_varying = false;
       shader->has_volume_attribute_dependency = false;
+      shader->has_volume_ior = false;
+      shader->has_volume_medium = false;
+      shader->volume_ior_step_size = 0.0f;
       shader->has_displacement = output->input("Displacement")->link != nullptr;
       shader->has_bump_from_surface = false;
       shader->has_dispersion = false;
@@ -844,6 +866,14 @@ void ShaderManager::device_update_common(Device * /*device*/,
     }
     if (shader->has_volume_attribute_dependency) {
       flag |= SD_NEED_VOLUME_ATTRIBUTES;
+    }
+    if (shader->has_volume && shader->has_volume_ior &&
+        scene->integrator->get_use_volume_ior())
+    {
+      flag |= SD_HAS_VOLUME_IOR;
+      if (!shader->has_volume_medium) {
+        flag |= SD_HAS_ONLY_VOLUME_IOR;
+      }
     }
     if (shader->has_bssrdf_bump) {
       flag |= SD_HAS_BSSRDF_BUMP;
@@ -1090,6 +1120,9 @@ uint64_t ShaderManager::get_graph_kernel_features(ShaderGraph *graph)
 
   for (ShaderNode *node : graph->nodes) {
     kernel_features |= node->get_feature();
+    if (node->has_volume_ior()) {
+      kernel_features |= KERNEL_FEATURE_VOLUME_IOR;
+    }
     if (node->special_type == SHADER_SPECIAL_TYPE_CLOSURE) {
       BsdfBaseNode *bsdf_node = static_cast<BsdfBaseNode *>(node);
       if (CLOSURE_IS_VOLUME(bsdf_node->get_closure_type())) {

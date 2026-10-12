@@ -53,6 +53,7 @@ class VolumeManager {
   static bool is_homogeneous_volume(const Object *, const Shader *);
 
   bool need_update_step_size;
+  bool need_update_ior_step_size;
 
  private:
   /* Initialize octrees from the volumes in the scene. */
@@ -79,6 +80,9 @@ class VolumeManager {
 
   /* Step size for ray marching. */
   void update_step_size(const Scene *, DeviceScene *, Progress &progress);
+
+  /* Step size along the rays that a volume index of refraction bends. */
+  void update_ior_step_size(const Scene *, DeviceScene *, Progress &progress);
 
   /* One octree per object per shader. */
   std::map<std::pair<const Object *, const Shader *>, std::shared_ptr<Octree>> object_octrees_;

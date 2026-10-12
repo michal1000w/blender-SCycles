@@ -116,8 +116,15 @@ ccl_device float4 volume_attribute_float4(KernelGlobals kg,
     object_inverse_position_transform(kg, sd, &P);
     const InterpolationType interp = (sd->shader_flag & SD_VOLUME_CUBIC) ? INTERPOLATION_CUBIC :
                                                                            INTERPOLATION_NONE;
+#  ifdef __VOLUME_IOR__
+    /* The index of refraction is differentiated between lookups that are less than a voxel
+     * apart: one voxel picked at random for each of them is no gradient. */
+    const bool one_tap = stochastic && !(sd->runtime_flag & SR_VOLUME_IOR_EVAL);
+#  else
+    const bool one_tap = stochastic;
+#  endif
     const float4 value = kernel_image_interp_3d(
-        kg, sd, desc.offset, P, interp, stochastic, extend_border);
+        kg, sd, desc.offset, P, interp, one_tap, extend_border);
     if (value.w > 1e-6f && value.w != 1.0f) {
       /* For RGBA colors, unpremultiply after interpolation. */
       return make_float4(make_float3(value) / value.w, value.w);

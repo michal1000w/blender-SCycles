@@ -9,6 +9,7 @@
 #include "kernel/integrator/guiding.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/shadow_catcher.h"
+#include "kernel/integrator/volume_ior.h"
 
 #include "kernel/light/light.h"
 
@@ -222,11 +223,13 @@ ccl_device_forceinline void integrator_intersect_next_kernel(
     IntegratorState state,
     const ccl_private Intersection *ccl_restrict isect,
     ccl_global float *ccl_restrict render_buffer,
-    const bool hit)
+    const bool hit,
+    const bool skip_volume = false)
 {
-  /* Continue with volume kernel if we are inside a volume, regardless if we hit anything. */
+  /* Continue with volume kernel if we are inside a volume, regardless if we hit anything.
+   * `skip_volume`: the volumes have nothing but an index of refraction, see volume_ior.h. */
 #ifdef __VOLUME__
-  if (!integrator_state_volume_stack_is_empty(kg, state)) {
+  if (!skip_volume && !integrator_state_volume_stack_is_empty(kg, state)) {
     const bool hit_surface = hit && !(isect->type & PRIMITIVE_LAMP);
     const int shader = (hit_surface) ? intersection_get_shader(kg, isect) : SHADER_NONE;
     const int flags = (hit_surface) ? kernel_data_fetch(shaders, shader).flags : 0;
@@ -348,49 +351,11 @@ ccl_device_forceinline void integrator_intersect_next_kernel_after_volume(
   }
 }
 
-ccl_device void integrator_intersect_closest(KernelGlobals kg,
-                                             IntegratorState state,
-                                             ccl_global float *ccl_restrict render_buffer)
+/* Setup mnee flag to signal last intersection with a caster. */
+ccl_device_forceinline void integrator_intersect_closest_mnee_setup(KernelGlobals kg,
+                                                                    IntegratorState state,
+                                                                    const int last_isect_object)
 {
-  PROFILING_INIT(kg, PROFILING_INTERSECT_CLOSEST);
-
-  /* Read ray from integrator state into local memory. */
-  Ray ray ccl_optional_struct_init;
-  integrator_state_read_ray(state, &ray);
-  kernel_assert(ray.tmax != 0.0f);
-
-  const uint visibility = path_state_ray_visibility(state);
-  const int last_isect_prim = INTEGRATOR_STATE(state, isect, prim);
-  const int last_isect_object = INTEGRATOR_STATE(state, isect, object);
-
-  /* Trick to use short AO rays to approximate indirect light at the end of the path. */
-  if (path_state_ao_bounce(kg, state)) {
-    ray.tmax = kernel_data.integrator.ao_bounces_distance;
-
-    if (last_isect_object != OBJECT_NONE) {
-      const float object_ao_distance = kernel_data_fetch(objects, last_isect_object).ao_distance;
-      if (object_ao_distance != 0.0f) {
-        ray.tmax = object_ao_distance;
-      }
-    }
-  }
-
-  /* Scene Intersection. */
-  Intersection isect ccl_optional_struct_init;
-  isect.object = OBJECT_NONE;
-  isect.prim = PRIM_NONE;
-  ray.self.object = last_isect_object;
-  ray.self.prim = last_isect_prim;
-  ray.self.light_object = OBJECT_NONE;
-  ray.self.light_prim = PRIM_NONE;
-  bool hit = scene_intersect(kg, &ray, visibility, &isect);
-
-  /* TODO: remove this and do it in the various intersection functions instead. */
-  if (!hit) {
-    isect.prim = PRIM_NONE;
-  }
-
-  /* Setup mnee flag to signal last intersection with a caster */
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
@@ -431,7 +396,197 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
       INTEGRATOR_STATE_WRITE(state, path, mnee) &= ~PATH_MNEE_RECEIVER_ANCESTOR;
     }
   }
+#else
+  (void)kg;
+  (void)state;
+  (void)last_isect_object;
 #endif /* __MNEE__ */
+}
+
+#ifdef __VOLUME_IOR__
+/* Intersection of a path inside of a volume that bends it, and the kernel that follows.
+ *
+ * A volume with nothing but an index of refraction is crossed here, up to the next surface. One
+ * that also absorbs, scatters or emits is crossed one straight segment at a time, each followed
+ * by the volume kernel: a path state with `volume_ior_segment` set is in between two of them.
+ *
+ * Not inlined on Metal: the kernel of scenes without such volumes would carry the shader data
+ * and the loop of this function through every intersection. */
+ccl_device_outline_metal void integrator_intersect_closest_volume_ior(
+    KernelGlobals kg,
+    IntegratorState state,
+    ccl_global float *ccl_restrict render_buffer,
+    ccl_private Ray *ccl_restrict ray,
+    ccl_private Intersection *ccl_restrict isect,
+    const uint visibility,
+    const int last_isect_prim,
+    const int last_isect_object)
+{
+  const int segment = INTEGRATOR_STATE(state, path, volume_ior_segment);
+  const bool pending = segment != 0;
+  VolumeIORState ior;
+  ior.pending = pending;
+  ior.steps = (pending) ? segment - 1 : 0;
+  if (pending) {
+    ior.D = INTEGRATOR_STATE(state, path, volume_ior_D);
+    ior.resume = INTEGRATOR_STATE(state, path, volume_ior_resume);
+  }
+
+  uint16_t rng_offset = INTEGRATOR_STATE(state, path, rng_offset);
+  if (pending) {
+    /* Continue behind the segment the volume kernel has integrated, with the limit of an ambient
+     * occlusion bounce if the caller has set one. */
+    const float segment_end = INTEGRATOR_STATE(state, ray, tmax);
+    ray->tmax = (path_state_ao_bounce(kg, state)) ? ray->tmax : FLT_MAX;
+    ray->tmin = segment_end;
+    if (!(ray->tmax > ray->tmin)) {
+      ray->tmax = ray->tmin;
+    }
+    /* New random numbers for the volume kernel of the next segment. */
+    rng_offset += PRNG_BOUNCE_NUM;
+  }
+
+  const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+
+  VolumeIORLights lights;
+  lights.enabled = kernel_data.integrator.use_light_mis &&
+                   !integrator_intersect_skip_lights(kg, state);
+  lights.last_prim = last_isect_prim;
+  lights.last_object = last_isect_object;
+  lights.last_type = INTEGRATOR_STATE(state, isect, type);
+  lights.path_visibility = path_visibility;
+  lights.path_flag = path_flag;
+
+  RNGState rng_state;
+  path_state_rng_load(state, &rng_state);
+  const float rand = path_state_rng_1D(kg, &rng_state, PRNG_VOLUME_IOR_OFFSET);
+
+  const VolumeIORResult result = volume_ior_intersect(kg,
+                                                      state,
+                                                      ray,
+                                                      (PathRayVisibility)visibility,
+                                                      isect,
+                                                      rand,
+                                                      &ior,
+                                                      &lights);
+  if (result == VOLUME_IOR_CACHE_MISS) {
+    /* Nothing of the state has changed. */
+    integrator_path_cache_miss(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
+    return;
+  }
+
+  const bool hit = (result == VOLUME_IOR_HIT);
+  const bool is_segment = (result == VOLUME_IOR_SEGMENT);
+
+  if (!pending) {
+    integrator_intersect_closest_mnee_setup(kg, state, last_isect_object);
+  }
+
+  /* The ray is the last straight segment of the path now. */
+  INTEGRATOR_STATE_WRITE(state, ray, P) = ray->P;
+  INTEGRATOR_STATE_WRITE(state, ray, D) = ray->D;
+  INTEGRATOR_STATE_WRITE(state, ray, tmin) = ray->tmin;
+  INTEGRATOR_STATE_WRITE(state, ray, tmax) = ray->tmax;
+  INTEGRATOR_STATE_WRITE(state, path, rng_offset) = rng_offset;
+  INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = (is_segment) ?
+                                                                 uint16_t(
+                                                                     min(ior.steps, 65534) + 1) :
+                                                                 0;
+  if (is_segment) {
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_D) = ior.D;
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_resume) = ior.resume;
+  }
+  integrator_state_write_isect(state, isect);
+
+  if (!pending && !is_segment) {
+    /* Nothing for the volume kernel to integrate if the index of refraction is all there is. */
+    bool only_ior;
+    volume_ior_stack_step_size(kg, state, &only_ior);
+    integrator_intersect_next_kernel<DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST>(
+        kg, state, isect, render_buffer, hit, only_ior);
+    return;
+  }
+
+  /* Path termination is decided once per bounce, at its first segment. What the path hits in
+   * the end is not known there: continue to it as if it were an emitter, the path ends after
+   * its emission then. */
+  if (!pending &&
+      integrator_intersect_terminate(kg, state, SD_HAS_EMISSION | SD_HAS_TRANSPARENT_SHADOW))
+  {
+    integrator_path_terminate(
+        kg, state, render_buffer, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
+    return;
+  }
+
+  if (kernel_data.integrator.volume_ray_marching) {
+    integrator_path_next(state,
+                         DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST,
+                         DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING);
+  }
+  else {
+    integrator_path_next(
+        state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST, DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME);
+  }
+}
+#endif /* __VOLUME_IOR__ */
+
+ccl_device void integrator_intersect_closest(KernelGlobals kg,
+                                             IntegratorState state,
+                                             ccl_global float *ccl_restrict render_buffer)
+{
+  PROFILING_INIT(kg, PROFILING_INTERSECT_CLOSEST);
+
+  /* Read ray from integrator state into local memory. */
+  Ray ray ccl_optional_struct_init;
+  integrator_state_read_ray(state, &ray);
+  kernel_assert(ray.tmax != 0.0f);
+
+  const uint visibility = path_state_ray_visibility(state);
+  const int last_isect_prim = INTEGRATOR_STATE(state, isect, prim);
+  const int last_isect_object = INTEGRATOR_STATE(state, isect, object);
+
+  /* Trick to use short AO rays to approximate indirect light at the end of the path. */
+  if (path_state_ao_bounce(kg, state)) {
+    ray.tmax = kernel_data.integrator.ao_bounces_distance;
+
+    if (last_isect_object != OBJECT_NONE) {
+      const float object_ao_distance = kernel_data_fetch(objects, last_isect_object).ao_distance;
+      if (object_ao_distance != 0.0f) {
+        ray.tmax = object_ao_distance;
+      }
+    }
+  }
+
+  /* Scene Intersection. */
+  Intersection isect ccl_optional_struct_init;
+  isect.object = OBJECT_NONE;
+  isect.prim = PRIM_NONE;
+  ray.self.object = last_isect_object;
+  ray.self.prim = last_isect_prim;
+  ray.self.light_object = OBJECT_NONE;
+  ray.self.light_prim = PRIM_NONE;
+
+#ifdef __VOLUME_IOR__
+  /* Inside of a volume with an index of refraction the ray is curved, see volume_ior.h. */
+  if (volume_ior_stack_active(kg, state)) {
+    integrator_intersect_closest_volume_ior(
+        kg, state, render_buffer, &ray, &isect, visibility, last_isect_prim, last_isect_object);
+    return;
+  }
+#endif
+
+  bool hit = scene_intersect(kg, &ray, visibility, &isect);
+
+  /* TODO: remove this and do it in the various intersection functions instead. */
+  if (!hit) {
+    isect.prim = PRIM_NONE;
+  }
+
+  integrator_intersect_closest_mnee_setup(kg, state, last_isect_object);
+
+  const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
+  const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
 
   /* Light intersection for MIS. */
   if (kernel_data.integrator.use_light_mis && !integrator_intersect_skip_lights(kg, state)) {

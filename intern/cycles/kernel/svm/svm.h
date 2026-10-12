@@ -600,6 +600,14 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
             kg, sd, stack, closure_weight, volume_node, path_visibility, path_flag);
       }
       break;
+      SVM_CASE(NODE_VOLUME_IOR)
+      {
+        const ccl_global SVMNodeVolumeIOR &ior_node = svm_node_get<SVMNodeVolumeIOR>(kg, &offset);
+        IF_KERNEL_NODES_FEATURE (VOLUME) {
+          svm_node_volume_ior<type>(kg, sd, stack, ior_node);
+        }
+      }
+      break;
       SVM_SHARED_CASE(NODE_MATH)
       svm_node_math(stack, svm_node_get<SVMNodeMath>(kg, &offset));
       break;

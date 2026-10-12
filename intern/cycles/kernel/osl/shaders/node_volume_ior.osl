@@ -1,0 +1,38 @@
+/* SPDX-FileCopyrightText: 2026 Blender Authors
+ *
+ * SPDX-License-Identifier: Apache-2.0 */
+
+#include "stdcycles.h"
+
+/* Refractivity `n - 1` of the volume, as the weight of a closure that has nothing else to it.
+ * See svm_node_volume_ior(). */
+shader node_volume_ior(string mode = "temperature",
+                       string Attribute = "",
+                       float IOR = 1.0,
+                       float Temperature = 1000.0,
+                       float AmbientTemperature = 293.15,
+                       float Pressure = 1.0,
+                       float GasIOR = 1.000278,
+                       float Strength = 1.0,
+                       output closure color Volume = 0)
+{
+  float field = 1.0;
+  if (Attribute != "") {
+    float value;
+    if (getattribute(Attribute, value)) {
+      field = value;
+    }
+  }
+
+  float refractivity;
+  if (mode == "temperature") {
+    float ambient = max(AmbientTemperature, 1.0);
+    float temperature = max(Temperature * field, ambient);
+    refractivity = (GasIOR - 1.0) * max(Pressure, 0.0) * (288.15 / temperature);
+  }
+  else {
+    refractivity = (IOR - 1.0) * field;
+  }
+
+  Volume = (Strength * refractivity) * volume_ior();
+}

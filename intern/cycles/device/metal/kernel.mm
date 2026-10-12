@@ -653,8 +653,10 @@ void ShaderCache::load_kernel(DeviceKernel device_kernel,
    * displacement ray solver as separate functions. */
   pipeline->software_bvh_library = pipeline->complete_generic &&
                                          !device->use_metalrt_for_current_scene();
+  pipeline->volume_ior_shading = (device->scene_kernel_features & KERNEL_FEATURE_VOLUME_IOR) != 0;
   if (pipeline->complete_generic &&
-      metal_kernel_uses_shading_functions(device_kernel, pipeline->software_bvh_library))
+      metal_kernel_uses_shading_functions(
+          device_kernel, pipeline->software_bvh_library, pipeline->volume_ior_shading))
   {
     pipeline->visible_functions = device->visible_functions;
   }
@@ -1853,7 +1855,7 @@ void MetalKernelPipeline::compile()
     computePipelineStateDescriptor.supportAddingBinaryFunctions = YES;
     computePipelineStateDescriptor.maxCallStackDepth = max(
         int(computePipelineStateDescriptor.maxCallStackDepth),
-        metal_kernel_shading_call_depth(device_kernel, software_bvh_library));
+        metal_kernel_shading_call_depth(device_kernel, software_bvh_library, volume_ior_shading));
   }
 
   MTLPipelineOption pipelineOptions = MTLPipelineOptionNone;

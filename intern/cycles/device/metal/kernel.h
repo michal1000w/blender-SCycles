@@ -40,7 +40,8 @@ static inline bool metal_kernel_has_intersection(const DeviceKernel kernel,
  * library: its traversal is a separate function, which calls the displacement ray solver, two
  * levels deeper. */
 static inline int metal_kernel_shading_call_depth(const DeviceKernel kernel,
-                                                  const bool software_bvh)
+                                                  const bool software_bvh,
+                                                  const bool volume_ior = false)
 {
   int depth = 2;
   /* Surface stages call the shader interpreter. Its raytrace nodes can evaluate the
@@ -57,7 +58,9 @@ static inline int metal_kernel_shading_call_depth(const DeviceKernel kernel,
            kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE ||
            kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT ||
            kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
-           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT)
+           kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+           /* Volume shaders evaluated for the index of refraction that bends the ray. */
+           (volume_ior && kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST))
   {
     depth = 3;
   }
@@ -69,7 +72,8 @@ static inline int metal_kernel_shading_call_depth(const DeviceKernel kernel,
  * call stack reservation for every thread, which the large thread groups of the sorting and
  * compaction kernels cannot afford. */
 static inline bool metal_kernel_uses_shading_functions(const DeviceKernel kernel,
-                                                       const bool software_bvh)
+                                                       const bool software_bvh,
+                                                       const bool volume_ior = false)
 {
   /* Verified against the kernel call graph by tests/python/cycles_metal_visible_call_depth.py,
    * together with metal_kernel_shading_call_depth(). */
@@ -84,6 +88,9 @@ static inline bool metal_kernel_uses_shading_functions(const DeviceKernel kernel
          /* Local intersections evaluate the displaced normal of their hits. */
          kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_SUBSURFACE ||
          kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_VOLUME_STACK ||
+         /* Rays bent by a volume index of refraction evaluate the volume shaders while they are
+          * intersected, in scenes with such volumes only: see volume_ior_shading. */
+         (volume_ior && kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST) ||
          /* The software BVH traversal is a separate function, which also evaluates displacement
           * while intersecting. */
          (software_bvh && kernel >= DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST &&
@@ -341,6 +348,10 @@ class MetalKernelPipeline {
   bool complete_generic = false;
   /* From the software BVH variant of the complete generic library. */
   bool software_bvh_library = false;
+  /* The scene has volumes with an index of refraction: the closest intersection kernel evaluates
+   * their shaders and links the shading functions, which it has no use for otherwise. The key of
+   * the pipelines of such scenes differs, see refresh_source_and_kernels_md5(). */
+  bool volume_ior_shading = false;
   void link_visible_functions();
 
   /* The linked pipeline with specialized displacement functions added, or nil if adding them

@@ -31,6 +31,7 @@ class Device;
 class DeviceScene;
 class Mesh;
 class Progress;
+class ShaderNode;
 class Scene;
 class ShaderGraph;
 struct float3;
@@ -152,6 +153,13 @@ class Shader : public Node {
   bool has_surface_spatial_varying;
   bool has_volume_spatial_varying;
   bool has_volume_attribute_dependency;
+  /* Volume has an index of refraction that bends rays, and nothing else. */
+  bool has_volume_ior;
+  bool has_volume_medium;
+  /* Called by the shader compilers for every closure node of the volume shader. */
+  void tag_volume_closure_node(ShaderNode *node);
+  /* Step along the bent rays as set by the nodes, zero for an automatic one. */
+  float volume_ior_step_size;
   bool has_light_path_node;
   bool has_aov_output_node;
   bool has_time_dependency;

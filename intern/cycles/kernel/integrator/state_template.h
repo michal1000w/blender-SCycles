@@ -98,6 +98,14 @@ KERNEL_STRUCT_MEMBER(path,
                      SpectrumCompressedOnGPU,
                      denoising_feature_throughput,
                      KERNEL_FEATURE_DENOISING)
+/* Volume index of refraction: zero, or one plus the number of steps taken along the curved ray
+ * of this bounce when its current segment ends at a step instead of at a surface. The direction
+ * change of that step is applied when the path is intersected again. */
+KERNEL_STRUCT_MEMBER(path, uint16_t, volume_ior_segment, KERNEL_FEATURE_VOLUME_IOR)
+/* The direction after that step, and the length of the path up to which it accounts for the
+ * index of refraction. */
+KERNEL_STRUCT_MEMBER(path, packed_float3, volume_ior_D, KERNEL_FEATURE_VOLUME_IOR)
+KERNEL_STRUCT_MEMBER(path, float, volume_ior_resume, KERNEL_FEATURE_VOLUME_IOR)
 /* Shader sorting. */
 /* TODO: compress as uint16? or leave out entirely and recompute key in sorting code? */
 KERNEL_STRUCT_MEMBER(path, uint32_t, shader_sort_key, KERNEL_FEATURE_PATH_TRACING)

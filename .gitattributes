@@ -118,3 +118,7 @@ scripts/modules/_bpy_internal/assets/remote_library/*_openapi.py linguist-genera
 
 # Small generated VCM test scenes are stored in git directly; GitHub rejects new LFS objects on a public fork.
 /tests/vcm/*.blend -filter -diff -merge -text
+
+# Volume IOR test scenes and their small VDB grids, stored in git directly for the same reason.
+/tests/volume_ior/*.blend -filter -diff -merge -text
+/tests/volume_ior/*.vdb -filter -diff -merge -text

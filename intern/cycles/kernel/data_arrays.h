@@ -118,6 +118,9 @@ KERNEL_DATA_ARRAY(KernelOctreeNode, volume_tree_nodes)
 KERNEL_DATA_ARRAY(KernelOctreeRoot, volume_tree_roots)
 KERNEL_DATA_ARRAY(int, volume_tree_root_ids)
 KERNEL_DATA_ARRAY(float, volume_step_size)
+/* Two per object: the step along a ray bent by the index of refraction of its volume, and the
+ * size of the detail of that index. */
+KERNEL_DATA_ARRAY(float, volume_ior_step_size)
 
 /* image textures */
 KERNEL_DATA_ARRAY(KernelImageTexture, image_textures)

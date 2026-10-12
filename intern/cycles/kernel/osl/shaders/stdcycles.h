@@ -95,6 +95,7 @@ closure color fournier_forand(float B, float IOR) BUILTIN;
 closure color draine(float g, float alpha) BUILTIN;
 closure color rayleigh() BUILTIN;
 closure color absorption() BUILTIN;
+closure color volume_ior() BUILTIN;
 
 // Ray Portal
 closure color ray_portal_bsdf(vector position, vector direction) BUILTIN;
