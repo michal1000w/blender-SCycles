@@ -407,6 +407,76 @@ float Object::compute_volume_step_size(Progress &progress) const
   return step_size;
 }
 
+float Object::compute_volume_ior_step_size(const Scene *scene,
+                                           Progress &progress,
+                                           float *detail_size) const
+{
+  *detail_size = FLT_MAX;
+
+  if (!geometry->is_light() && !geometry->is_mesh() && !geometry->is_volume()) {
+    return FLT_MAX;
+  }
+
+  /* Step size set by the shader nodes. */
+  bool has_ior = false;
+  float shader_step_size = FLT_MAX;
+  for (const Node *node : geometry->get_used_shaders()) {
+    const Shader *shader = static_cast<const Shader *>(node);
+    if (shader->has_volume && shader->has_volume_ior) {
+      has_ior = true;
+      if (shader->volume_ior_step_size > 0.0f) {
+        shader_step_size = fminf(shader_step_size, shader->volume_ior_step_size);
+      }
+    }
+  }
+  if (!has_ior) {
+    return FLT_MAX;
+  }
+
+  /* The size of a voxel, of the smallest grid. */
+  float detail = FLT_MAX;
+  if (geometry->is_volume()) {
+    Volume *volume = static_cast<Volume *>(geometry);
+    for (Attribute &attr : volume->attributes.attributes) {
+      if (attr.element != ATTR_ELEMENT_VOXEL) {
+        continue;
+      }
+      ImageHandle &handle = attr.data_voxel_for_write();
+      const ImageMetaData &metadata = handle.metadata(progress);
+      if (metadata.nanovdb_byte_size == 0) {
+        continue;
+      }
+      Transform voxel_tfm = tfm;
+      if (metadata.use_transform_3d) {
+        voxel_tfm = tfm * transform_inverse(metadata.transform_3d);
+      }
+      const float voxel_size = reduce_min(fabs(transform_direction(&voxel_tfm, one_float3())));
+      if (voxel_size > 0.0f) {
+        detail = fminf(voxel_size, detail);
+      }
+    }
+  }
+
+  if (detail == FLT_MAX) {
+    /* Procedural volumes: a fraction of the smallest side of the object, as a layer of hot air
+     * is thin, or of the scene for the world. */
+    BoundBox box = bounds;
+    if (geometry->is_light() || !box.valid()) {
+      box = BoundBox::empty;
+      for (const Object *object : scene->objects) {
+        if (!object->get_geometry()->is_light() && object->bounds.valid()) {
+          box.grow(object->bounds);
+        }
+      }
+    }
+    const float size = (box.valid()) ? reduce_min(box.size()) : 0.0f;
+    detail = (size > 0.0f) ? size / 32.0f : 0.1f;
+  }
+
+  *detail_size = detail;
+  return (shader_step_size != FLT_MAX) ? shader_step_size : detail;
+}
+
 int Object::get_device_index() const
 {
   return index;

@@ -15,6 +15,7 @@
 #include "kernel/camera/camera.h"
 #include "kernel/film/adaptive_sampling.h"
 #include "kernel/geom/shader_data.h"
+#include "kernel/integrator/volume_ior.h"
 #include "kernel/integrator/bidirectional_transport.h"
 #include "kernel/integrator/bidirectional_volume.h"
 #include "kernel/integrator/path_state.h"
@@ -2582,14 +2583,26 @@ ccl_device_inline void bdpt_light_generate_path(KernelGlobals kg,
                                  kernel_data_fetch(light_distribution, emitter_distribution).prim >=
                                      0 ||
                                  (emitter_shader_flags & SHADER_USE_MIS));
+  /* Curved ray through a volume index of refraction, see volume_ior.h. */
+  VolumeIORState ior_state;
+  ior_state.steps = 0;
+  ior_state.pending = false;
   for (int bounce = 0; bounce < kernel_data.integrator.bdpt_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
-    const bool hit_surface = scene_intersect(kg, &ray, path_visibility, &isect);
+    const VolumeIORResult ior_result = volume_ior_light_path_intersect(
+        kg, state, &ray, path_visibility, &isect, &rng, &ior_state);
+    if (ior_result == VOLUME_IOR_CACHE_MISS) {
+      kernel_integrator_state.queue_counter->cache_miss = true;
+      return;
+    }
+    const bool hit_surface = (ior_result == VOLUME_IOR_HIT);
 
 #ifdef __VOLUME__
     if (kernel_data.integrator.use_volumes && !integrator_state_volume_stack_is_empty(kg, state)) {
-      ray.tmax = hit_surface ? isect.t : FLT_MAX;
+      if (ior_result != VOLUME_IOR_SEGMENT) {
+        ray.tmax = hit_surface ? isect.t : FLT_MAX;
+      }
       INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
       float3 scatter_P;
       int receiver_object = OBJECT_NONE;
@@ -2649,6 +2662,16 @@ ccl_device_inline void bdpt_light_generate_path(KernelGlobals kg,
       }
     }
 #endif
+    if (ior_result == VOLUME_IOR_SEGMENT) {
+      /* Not a vertex of the subpath: the ray continues behind the segment in another direction.
+       * The recurrence converts the measure of the edge with the length of the whole path. */
+      ray.tmin = ray.tmax;
+      ray.tmax = FLT_MAX;
+      /* New random numbers for the media of the next segment. */
+      INTEGRATOR_STATE_WRITE(state, path, rng_offset) += PRNG_BOUNCE_NUM;
+      bounce--;
+      continue;
+    }
     if (!hit_surface) {
       break;
     }

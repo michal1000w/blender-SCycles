@@ -86,6 +86,7 @@ DeviceScene::DeviceScene(Device *device)
       volume_tree_roots(device, "volume_tree_roots", MEM_GLOBAL),
       volume_tree_root_ids(device, "volume_tree_root_ids", MEM_GLOBAL),
       volume_step_size(device, "volume_step_size", MEM_GLOBAL),
+      volume_ior_step_size(device, "volume_ior_step_size", MEM_GLOBAL),
       image_textures(device, "image_textures", MEM_GLOBAL),
       image_texture_tile_descriptors(device, "image_texture_tile_descriptors", MEM_GLOBAL),
       image_texture_tile_access_state(device, "image_texture_tile_access_state", MEM_GLOBAL),

@@ -693,6 +693,7 @@ VolumeManager::VolumeManager()
 {
   need_rebuild_ = true;
   need_update_step_size = true;
+  need_update_ior_step_size = true;
 }
 
 void VolumeManager::tag_update()
@@ -1212,11 +1213,52 @@ void VolumeManager::update_step_size(const Scene *scene, DeviceScene *dscene, Pr
   need_update_step_size = false;
 }
 
+void VolumeManager::update_ior_step_size(const Scene *scene,
+                                         DeviceScene *dscene,
+                                         Progress &progress)
+{
+  if (!(dscene->data.kernel_features & KERNEL_FEATURE_VOLUME_IOR)) {
+    if (dscene->volume_ior_step_size.size() != 0) {
+      dscene->volume_ior_step_size.free();
+    }
+    return;
+  }
+
+  /* Cheap, and it depends on shaders, objects and voxel grids: no tracking of what changed. */
+  vector<float> step_size(2 * scene->objects.size(), FLT_MAX);
+  const float step_rate = scene->integrator->get_volume_ior_step_rate();
+  for (const Object *object : scene->objects) {
+    float detail_size;
+    const float object_step_size = object->compute_volume_ior_step_size(
+        scene, progress, &detail_size);
+    if (object_step_size != FLT_MAX) {
+      step_size[2 * object->index] = fmaxf(object_step_size * step_rate, 1e-6f);
+      step_size[2 * object->index + 1] = fmaxf(detail_size, 1e-6f);
+    }
+  }
+
+  if (dscene->volume_ior_step_size.size() == step_size.size() && !need_update_ior_step_size &&
+      memcmp(dscene->volume_ior_step_size.data(),
+             step_size.data(),
+             sizeof(float) * step_size.size()) == 0)
+  {
+    return;
+  }
+
+  float *data = dscene->volume_ior_step_size.alloc(step_size.size());
+  std::copy(step_size.begin(), step_size.end(), data);
+  dscene->volume_ior_step_size.copy_to_device();
+  dscene->volume_ior_step_size.clear_modified();
+  need_update_ior_step_size = false;
+}
+
 void VolumeManager::device_update(Device *device,
                                   DeviceScene *dscene,
                                   const Scene *scene,
                                   Progress &progress)
 {
+  update_ior_step_size(scene, dscene, progress);
+
   if (scene->integrator->get_volume_ray_marching()) {
     /* No need to update octree for ray marching. */
     if (algorithm_modified_) {
@@ -1267,6 +1309,7 @@ void VolumeManager::device_free(DeviceScene *dscene)
   dscene->volume_tree_roots.free();
   dscene->volume_tree_root_ids.free();
   dscene->volume_step_size.free();
+  dscene->volume_ior_step_size.free();
 }
 
 VolumeManager::~VolumeManager()

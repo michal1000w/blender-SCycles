@@ -55,6 +55,11 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, transparent_bounce) = 0;
   INTEGRATOR_STATE_WRITE(state, path, volume_bounce) = 0;
   INTEGRATOR_STATE_WRITE(state, path, volume_bounds_bounce) = 0;
+#ifdef __VOLUME_IOR__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) {
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = 0;
+  }
+#endif
   if ((kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL)) {
     INTEGRATOR_STATE_WRITE(state, path, portal_bounce) = 0;
   }

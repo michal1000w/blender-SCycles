@@ -145,6 +145,7 @@
 /* Fork nodes, numbered away from the upstream range to avoid collisions when merging. */
 #define SH_NODE_VOLUME_FAST 790
 #define SH_NODE_BSDF_DIFFRACTION 791
+#define SH_NODE_VOLUME_IOR 792
 
 /** \} */
 

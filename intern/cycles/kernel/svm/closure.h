@@ -1478,6 +1478,12 @@ ccl_device_noinline void svm_node_closure_volume(
   if (shader_type != SHADER_TYPE_VOLUME) {
     return;
   }
+#  ifdef __VOLUME_IOR__
+  if (sd->runtime_flag & SR_VOLUME_IOR_EVAL) {
+    /* Only the index of refraction is evaluated, see svm_node_volume_ior(). */
+    return;
+  }
+#  endif
 
   const float mix_weight = stack_load_float_default(stack, node.mix_weight_offset, 1.0f);
   if (mix_weight == 0.0f) {
@@ -1522,6 +1528,12 @@ ccl_device_noinline void svm_node_volume_coefficients(
   if (shader_type != SHADER_TYPE_VOLUME) {
     return;
   }
+#  ifdef __VOLUME_IOR__
+  if (sd->runtime_flag & SR_VOLUME_IOR_EVAL) {
+    /* Only the index of refraction is evaluated, see svm_node_volume_ior(). */
+    return;
+  }
+#  endif
 
   const float mix_weight = stack_load_float_default(stack, node.mix_weight_offset, 1.0f);
   if (mix_weight == 0.0f) {
@@ -1570,6 +1582,12 @@ ccl_device_noinline void svm_node_principled_volume(
   if (shader_type != SHADER_TYPE_VOLUME) {
     return;
   }
+#  ifdef __VOLUME_IOR__
+  if (sd->runtime_flag & SR_VOLUME_IOR_EVAL) {
+    /* Only the index of refraction is evaluated, see svm_node_volume_ior(). */
+    return;
+  }
+#  endif
 
   const float mix_weight = stack_load_float_default(stack, node.mix_weight_offset, 1.0f);
 
@@ -1676,6 +1694,12 @@ ccl_device_noinline void svm_node_fast_volume(KernelGlobals kg,
   if (shader_type != SHADER_TYPE_VOLUME) {
     return;
   }
+#  ifdef __VOLUME_IOR__
+  if (sd->runtime_flag & SR_VOLUME_IOR_EVAL) {
+    /* Only the index of refraction is evaluated, see svm_node_volume_ior(). */
+    return;
+  }
+#  endif
 
   const float mix_weight = stack_load_float_default(stack, node.mix_weight_offset, 1.0f);
   if (mix_weight == 0.0f) {
@@ -1759,6 +1783,57 @@ ccl_device_noinline void svm_node_fast_volume(KernelGlobals kg,
       const float3 bb = tint * intensity * rec709_to_rgb(kg, svm_math_blackbody_color_rec709(T));
       emission_setup(sd, rgb_to_spectrum(bb * object_weight));
     }
+  }
+#endif
+}
+
+/* Volume index of refraction.
+ *
+ * Not a closure: adds the refractivity `n - 1` of the medium at the shading point to the shader
+ * data, for the integrator to bend rays along its gradient (see integrator/volume_ior.h). The
+ * refractivities of the gases of a mixture add up (Gladstone-Dale), which is what mixing and
+ * adding this node with others does. Only evaluated on request, as it is of no use to the
+ * evaluation of the scattering coefficients. */
+template<ShaderType shader_type>
+ccl_device_noinline void svm_node_volume_ior(KernelGlobals kg,
+                                             ccl_private ShaderData *sd,
+                                             ccl_private float *ccl_restrict stack,
+                                             const ccl_global SVMNodeVolumeIOR &ccl_restrict node)
+{
+#ifdef __VOLUME_IOR__
+  if (shader_type != SHADER_TYPE_VOLUME || !(sd->runtime_flag & SR_VOLUME_IOR_EVAL)) {
+    return;
+  }
+
+  const float mix_weight = stack_load_float_default(stack, node.mix_weight_offset, 1.0f);
+  const float strength = stack_load(stack, node.strength) * mix_weight;
+  if (strength == 0.0f) {
+    return;
+  }
+
+  /* Field that scales the input, a voxel grid for example. */
+  float field = 1.0f;
+  const AttributeDescriptor attr_field = find_attribute(kg, sd, node.attr_field);
+  if (is_attribute_found(attr_field)) {
+    field = primitive_volume_attribute<float>(kg, sd, attr_field, true);
+  }
+
+  float refractivity;
+  if (node.mode == NODE_VOLUME_IOR_TEMPERATURE) {
+    /* Gladstone-Dale relation for an ideal gas at constant pressure: the refractivity follows
+     * the density, which is proportional to pressure over temperature. `gas_ior` is the index
+     * of the gas at 15 degrees Celsius and one atmosphere. */
+    const float ambient = fmaxf(stack_load(stack, node.ambient_temperature), 1.0f);
+    const float temperature = fmaxf(stack_load(stack, node.temperature) * field, ambient);
+    const float pressure = fmaxf(stack_load(stack, node.pressure), 0.0f);
+    refractivity = (stack_load(stack, node.gas_ior) - 1.0f) * pressure * (288.15f / temperature);
+  }
+  else {
+    refractivity = (stack_load(stack, node.ior) - 1.0f) * field;
+  }
+
+  if (isfinite_safe(refractivity)) {
+    sd->volume_ior += strength * refractivity;
   }
 #endif
 }

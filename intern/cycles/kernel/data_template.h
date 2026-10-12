@@ -335,6 +335,10 @@ KERNEL_STRUCT_MEMBER(integrator, int, pixel_displacement_evaluator_set)
 /* Nested dielectrics: some material has a nested priority. Also keeps the jitter on a multiple of
  * 8 bytes, where the Metal shading language puts a float2. */
 KERNEL_STRUCT_MEMBER(integrator, int, use_nested_dielectrics)
+/* Volume index of refraction: some volume shader has one, and the number of steps a ray may be
+ * bent at before it continues straight. */
+KERNEL_STRUCT_MEMBER(integrator, int, use_volume_ior)
+KERNEL_STRUCT_MEMBER(integrator, int, volume_ior_max_steps)
 
 /* Sub-pixel offset of the camera rays, changes with every frame of real-time denoisers. */
 KERNEL_STRUCT_MEMBER_DONT_SPECIALIZE

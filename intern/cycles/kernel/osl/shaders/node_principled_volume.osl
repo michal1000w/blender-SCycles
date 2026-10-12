@@ -14,6 +14,8 @@ shader node_principled_volume(color Color = color(0.5, 0.5, 0.5),
                               float BlackbodyIntensity = 0.0,
                               color BlackbodyTint = color(1.0, 1.0, 1.0),
                               float Temperature = 1500.0,
+                              float IOR = 1.0,
+                              float HeatRefraction = 0.0,
                               string DensityAttribute = "geom:density",
                               string ColorAttribute = "geom:color",
                               string TemperatureAttribute = "geom:temperature",
@@ -78,5 +80,18 @@ shader node_principled_volume(color Color = color(0.5, 0.5, 0.5),
         Volume += bb * emission();
       }
     }
+  }
+
+  /* Index of refraction, as the Volume IOR node. */
+  if (isconnected(IOR)) {
+    Volume += (IOR - 1.0) * volume_ior();
+  }
+  if (HeatRefraction != 0.0) {
+    float field;
+    if (!getattribute(TemperatureAttribute, field)) {
+      field = 1.0;
+    }
+    float T = max(Temperature * field, 293.15);
+    Volume += (HeatRefraction * (1.000278 - 1.0) * (288.15 / T)) * volume_ior();
   }
 }

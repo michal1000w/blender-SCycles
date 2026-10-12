@@ -206,6 +206,9 @@ NODE_DEFINE(Integrator)
 
   SOCKET_BOOLEAN(volume_ray_marching, "Biased", false);
   SOCKET_INT(volume_max_steps, "Volume Max Steps", 1024);
+  SOCKET_BOOLEAN(use_volume_ior, "Volume Index of Refraction", true);
+  SOCKET_FLOAT(volume_ior_step_rate, "Volume IOR Step Rate", 1.0f);
+  SOCKET_INT(volume_ior_max_steps, "Volume IOR Max Steps", 1024);
   SOCKET_FLOAT(volume_step_rate, "Volume Step Rate", 1.0f);
 
   static NodeEnum guiding_distribution_enum;
@@ -439,6 +442,9 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
 
   kintegrator->volume_ray_marching = volume_ray_marching;
   kintegrator->volume_max_steps = volume_max_steps;
+  kintegrator->use_volume_ior = use_volume_ior &&
+                                (scene->dscene.data.kernel_features & KERNEL_FEATURE_VOLUME_IOR);
+  kintegrator->volume_ior_max_steps = max(volume_ior_max_steps, 1);
 
   kintegrator->caustics_reflective = caustics_reflective;
   kintegrator->caustics_refractive = caustics_refractive;
@@ -742,6 +748,14 @@ void Integrator::tag_update(Scene *scene, const uint32_t flag)
   if (use_auto_nested_dielectrics_is_modified()) {
     /* Which objects are media. */
     scene->object_manager->need_flags_update = true;
+  }
+
+  if (use_volume_ior_is_modified()) {
+    /* Shader flags, and the bounds of the volumes. */
+    scene->shader_manager->tag_update(scene, ShaderManager::SHADER_MODIFIED);
+  }
+  if (use_volume_ior_is_modified() || volume_ior_step_rate_is_modified()) {
+    scene->volume_manager->need_update_ior_step_size = true;
   }
 
   if (volume_ray_marching_is_modified()) {

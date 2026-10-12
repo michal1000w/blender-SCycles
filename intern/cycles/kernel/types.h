@@ -131,6 +131,10 @@ enum PathTraceDimension {
   /* Sample wavelength for dispersion. */
   PRNG_WAVELENGTH = 12,
 
+  /* Offset of the steps along a ray that a volume index of refraction bends. Used by the
+   * intersection kernel, so it must differ from the dimensions of the shading kernels. */
+  PRNG_VOLUME_IOR_OFFSET = 13,
+
   /* High enough number so we don't need to change it when adding new dimensions,
    * low enough so there is no uint16_t overflow with many bounces. */
   PRNG_BOUNCE_NUM = 16,
@@ -996,6 +1000,9 @@ enum ShaderRuntimeFlag {
   SR_BSDF_HAS_DISPERSION = (1 << 13),
   /* BSDF has wavelength-dependent transmission tint. */
   SR_BSDF_HAS_SPECTRAL_TRANSMISSION = (1 << 14),
+  /* Volume shader is evaluated for its index of refraction only. Not a closure flag: it is set
+   * by the caller and kept by the evaluation. */
+  SR_VOLUME_IOR_EVAL = (1 << 15),
 
   /* Flags that indicate the presence of closures. */
   SR_CLOSURE_FLAG = (SR_EMISSION | SR_BSDF | SR_BSDF_HAS_EVAL | SR_BSSRDF | SR_HOLDOUT |
@@ -1014,6 +1021,10 @@ enum ShaderDataFlag {
   /* Surface is proven to have neither a transparent closure nor one that vertex merging takes as
    * sharp, see vcm_surface_is_sharp(): a light subpath that reaches it first forms no caustic. */
   SD_HAS_NO_SHARP_SURFACE = (1 << 2),
+  /* Volume has a spatially varying index of refraction, see volume_ior.h. */
+  SD_HAS_VOLUME_IOR = (1 << 3),
+  /* Volume has nothing but an index of refraction: it neither absorbs, scatters nor emits. */
+  SD_HAS_ONLY_VOLUME_IOR = (1 << 4),
   /* If the shader is wavelength-dependent. */
   SD_REQUIRES_WAVELENGTH = (1 << 12),
   /* If Light Path Node is present in the shader graph. */
@@ -1201,6 +1212,11 @@ struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
   /* Index of refraction of the interior of this surface as evaluated by its dielectric closures,
    * 0 if the shader did not set up any. */
   float interior_ior;
+#endif
+#ifdef __VOLUME_IOR__
+  /* Refractivity (index of refraction minus one) summed by the volume shaders, only evaluated
+   * with SR_VOLUME_IOR_EVAL. */
+  float volume_ior;
 #endif
 #ifdef __KERNEL_METAL__
   /* Reuse one spatial/product query across BSDF pdf and sample on the same ShaderData. */

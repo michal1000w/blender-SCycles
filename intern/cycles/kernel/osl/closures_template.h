@@ -377,6 +377,10 @@ OSL_CLOSURE_STRUCT_END(HuangHair, hair_huang)
 OSL_CLOSURE_STRUCT_BEGIN(VolumeAbsorption, absorption)
 OSL_CLOSURE_STRUCT_END(VolumeAbsorption, absorption)
 
+/* Not a closure: its weight is the refractivity of the volume, see svm_node_volume_ior(). */
+OSL_CLOSURE_STRUCT_BEGIN(VolumeIOR, volume_ior)
+OSL_CLOSURE_STRUCT_END(VolumeIOR, volume_ior)
+
 OSL_CLOSURE_STRUCT_BEGIN(VolumeHenyeyGreenstein, henyey_greenstein)
   OSL_CLOSURE_STRUCT_MEMBER(VolumeHenyeyGreenstein, FLOAT, float, g, nullptr)
 OSL_CLOSURE_STRUCT_END(VolumeHenyeyGreenstein, henyey_greenstein)

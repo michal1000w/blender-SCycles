@@ -1162,6 +1162,12 @@ enum eNodeScattering_PhaseFunc : short {
   SHD_PHASE_MIE = 4,
 };
 
+/* Volume index of refraction: what it is derived from. */
+enum eNodeVolumeIOR_Mode : short {
+  SHD_VOLUME_IOR_DIRECT = 0,
+  SHD_VOLUME_IOR_TEMPERATURE = 1,
+};
+
 /* Output shader node */
 
 enum NodeShaderOutputTarget {

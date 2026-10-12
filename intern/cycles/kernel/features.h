@@ -98,6 +98,9 @@ CCL_NAMESPACE_BEGIN
  * of to resolve overlapping refractive objects. */
 #define KERNEL_FEATURE_NESTED_DIELECTRICS (1ULL << 38ULL)
 
+/* Volumes with a spatially varying index of refraction, which bend the rays that cross them. */
+#define KERNEL_FEATURE_VOLUME_IOR (1ULL << 39ULL)
+
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
 #define KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT \
@@ -151,6 +154,7 @@ CCL_NAMESPACE_BEGIN
 #define __SUBSURFACE__
 #define __TRANSPARENT_SHADOWS__
 #define __VOLUME__
+#define __VOLUME_IOR__
 #define __NESTED_DIELECTRICS__
 
 #define __CAUSTICS_TRICKS__
@@ -215,9 +219,13 @@ CCL_NAMESPACE_BEGIN
 #  endif
 #  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_VOLUME)
 #    undef __VOLUME__
+#    undef __VOLUME_IOR__
 #    if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_TRANSPARENT)
 #      undef __TRANSPARENT_SHADOWS__
 #    endif
+#  endif
+#  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_VOLUME_IOR)
+#    undef __VOLUME_IOR__
 #  endif
 #  if !(__KERNEL_FEATURES__ & KERNEL_FEATURE_NESTED_DIELECTRICS)
 #    undef __NESTED_DIELECTRICS__

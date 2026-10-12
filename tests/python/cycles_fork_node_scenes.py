@@ -75,6 +75,17 @@ def main():
         node_scene(args, "ShaderNodeBsdfDiffraction", tangent=True); finish(args, "diffraction_node")
     if want("fast_volume"):
         node_scene(args, "ShaderNodeVolumeFast", volume=True); finish(args, "fast_volume")
+    if want("volume_ior") and hasattr(bpy.types, "ShaderNodeVolumeIOR"):
+        # Refraction of a field that varies in the cube, in white fog to see it by.
+        node = node_scene(args, "ShaderNodeVolumeIOR", {"Strength": 400.0}, volume=True,
+                          props={"mode": "TEMPERATURE"})
+        tree = node.id_data
+        noise = tree.nodes.new("ShaderNodeTexNoise")
+        kelvin = tree.nodes.new("ShaderNodeMath"); kelvin.operation = "MULTIPLY_ADD"
+        kelvin.inputs[1].default_value = 600.0; kelvin.inputs[2].default_value = 293.0
+        tree.links.new(noise.outputs["Fac"], kelvin.inputs[0])
+        tree.links.new(kelvin.outputs[0], node.inputs["Temperature"])
+        finish(args, "volume_ior")
     if want("glass_polarizer_grating"):
         node_scene(args, "ShaderNodeBsdfGlass", {"Roughness": 0.1, "Polarizer": True, "Polarizer Angle": 0.4,
                    "Diffraction Weight": 0.6, "Diffraction Pitch": 1400, "Diffraction Depth": 200}, tangent=True)

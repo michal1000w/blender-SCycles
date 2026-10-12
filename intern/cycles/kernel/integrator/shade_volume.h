@@ -3479,12 +3479,23 @@ ccl_device_inline void integrator_shade_volume_setup(KernelGlobals kg,
   integrator_state_read_ray(state, ray);
   integrator_state_read_isect(state, isect);
 
-  /* Set ray length to current segment. */
-  ray->tmax = (isect->prim != PRIM_NONE) ? isect->t : FLT_MAX;
+#  ifdef __VOLUME_IOR__
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) &&
+      INTEGRATOR_STATE(state, path, volume_ior_segment))
+  {
+    /* Segment of a ray that a volume index of refraction bends: it ends at a step inside of the
+     * volume, where the path continues in another direction. */
+  }
+  else
+#  endif
+  {
+    /* Set ray length to current segment. */
+    ray->tmax = (isect->prim != PRIM_NONE) ? isect->t : FLT_MAX;
 
-  /* Clean volume stack for background rays. */
-  if (isect->prim == PRIM_NONE) {
-    volume_stack_clean(kg, state);
+    /* Clean volume stack for background rays. */
+    if (isect->prim == PRIM_NONE) {
+      volume_stack_clean(kg, state);
+    }
   }
 
   /* Assign flag to transmitted volume rays for scattering probability guiding. */
@@ -3507,6 +3518,20 @@ ccl_device_inline void integrator_next_kernel_after_shade_volume(
     integrator_path_terminate(kg, state, render_buffer, volume_kernel);
     return;
   }
+
+#ifdef __VOLUME_IOR__
+  if ((kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) &&
+      INTEGRATOR_STATE(state, path, volume_ior_segment))
+  {
+    if (event == VOLUME_PATH_ATTENUATED) {
+      /* Continue with the next segment of the curved ray. */
+      integrator_path_next(state, volume_kernel, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
+      return;
+    }
+    /* Scattered into a new ray. */
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = 0;
+  }
+#endif
 
   if (event == VOLUME_PATH_ATTENUATED) {
     /* Continue to background, light or surface. */

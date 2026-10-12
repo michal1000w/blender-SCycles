@@ -1683,6 +1683,10 @@ void Scene::update_kernel_features()
     kernel_features |= KERNEL_FEATURE_COHERENT_SPECULAR;
   }
 
+  if (!integrator->get_use_volume_ior()) {
+    kernel_features &= ~KERNEL_FEATURE_VOLUME_IOR;
+  }
+
   const bool use_motion = need_motion() == Scene::MotionType::MOTION_BLUR;
   kernel_features |= KERNEL_FEATURE_PATH_TRACING;
 
