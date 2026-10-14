@@ -67,6 +67,9 @@ class Integrator : public Node {
 
   NODE_SOCKET_API(bool, volume_ray_marching)
   NODE_SOCKET_API(int, volume_max_steps)
+  NODE_SOCKET_API(bool, use_volume_ior)
+  NODE_SOCKET_API(float, volume_ior_step_rate)
+  NODE_SOCKET_API(int, volume_ior_max_steps)
   NODE_SOCKET_API(float, volume_step_rate)
 
   NODE_SOCKET_API(bool, use_guiding);

@@ -1083,6 +1083,54 @@ class PrincipledVolumeNode : public VolumeNode {
   NODE_SOCKET_API(float, blackbody_intensity)
   NODE_SOCKET_API(float3, blackbody_tint)
   NODE_SOCKET_API(float, temperature)
+  /* Index of refraction of the volume, and how much of the refraction of hot air the
+   * temperature causes. See VolumeIORNode. */
+  NODE_SOCKET_API(float, IOR)
+  NODE_SOCKET_API(float, heat_refraction)
+
+  bool has_volume_ior() override;
+  bool has_volume_medium() override;
+};
+
+/* Index of refraction of a volume, which bends the rays that cross it where it varies. */
+class VolumeIORNode : public ShaderNode {
+ public:
+  SHADER_NODE_CLASS(VolumeIORNode)
+  void attributes(Shader *shader, AttributeRequestSet *attributes) override;
+  /* Not folded away when it has no effect: a volume shader without closures makes its object a
+   * surface that nothing passes through. */
+  bool has_attribute_dependency() override
+  {
+    return !attribute.empty();
+  }
+  bool has_volume_support() override
+  {
+    return true;
+  }
+  uint64_t get_feature() override
+  {
+    return ShaderNode::get_feature() | KERNEL_FEATURE_NODE_VOLUME;
+  }
+  bool has_volume_ior() override;
+  float get_volume_ior_step_size() override
+  {
+    return step_size;
+  }
+  bool has_volume_medium() override
+  {
+    return false;
+  }
+
+  NODE_SOCKET_API(NodeVolumeIORMode, mode)
+  NODE_SOCKET_API(ustring, attribute)
+  NODE_SOCKET_API(float, IOR)
+  NODE_SOCKET_API(float, temperature)
+  NODE_SOCKET_API(float, ambient_temperature)
+  NODE_SOCKET_API(float, pressure)
+  NODE_SOCKET_API(float, gas_ior)
+  NODE_SOCKET_API(float, strength)
+  NODE_SOCKET_API(float, step_size)
+  NODE_SOCKET_API(float, volume_mix_weight)
 };
 
 class FastVolumeNode : public VolumeNode {

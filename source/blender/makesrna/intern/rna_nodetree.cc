@@ -6451,6 +6451,44 @@ static void def_scatter(BlenderRNA * /*brna*/, StructRNA *srna)
   RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
 }
 
+static void def_volume_ior(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  static const EnumPropertyItem mode_items[] = {
+      {SHD_VOLUME_IOR_DIRECT,
+       "IOR",
+       0,
+       "IOR",
+       "Index of refraction given directly, by a texture or an attribute"},
+      {SHD_VOLUME_IOR_TEMPERATURE,
+       "TEMPERATURE",
+       0,
+       "Temperature",
+       "Index of refraction of a gas from its temperature and pressure: the refractivity is "
+       "proportional to the density of the gas, which hot gas has less of"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  PropertyRNA *prop;
+
+  prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "custom1");
+  RNA_def_property_enum_items(prop, mode_items);
+  RNA_def_property_ui_text(prop, "Mode", "What the index of refraction is derived from");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+
+  prop = RNA_def_property(srna, "step_size", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "custom3");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 1, 4);
+  RNA_def_property_ui_text(
+      prop,
+      "Detail Size",
+      "Size of the smallest features of the index of refraction that bend rays: the voxel size of "
+      "the grid it is evaluated on when the scene is prepared. Zero chooses it automatically: the "
+      "voxel size of a volume object, or a fraction of the size of a mesh");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+}
+
 static void def_volume_coefficients(BlenderRNA * /*brna*/, StructRNA *srna)
 {
   PropertyRNA *prop;
@@ -11030,6 +11068,7 @@ static void rna_def_nodes(BlenderRNA *brna)
   define("ShaderNode", "ShaderNodeVolumeScatter", def_scatter);
   define("ShaderNode", "ShaderNodeVolumeCoefficients", def_volume_coefficients);
   define("ShaderNode", "ShaderNodeVolumeFast", def_scatter);
+  define("ShaderNode", "ShaderNodeVolumeIOR", def_volume_ior);
   define("ShaderNode", "ShaderNodeWavelength");
   define("ShaderNode", "ShaderNodeWireframe", def_sh_tex_wireframe);
 

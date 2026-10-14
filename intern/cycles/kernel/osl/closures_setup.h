@@ -1629,6 +1629,24 @@ ccl_device void osl_closure_absorption_setup(
   volume_extinction_setup(sd, rgb_to_spectrum(weight * object_volume_density(kg, sd->object)));
 }
 
+ccl_device void osl_closure_volume_ior_setup(KernelGlobals /*kg*/,
+                                             ccl_private ShaderData *sd,
+                                             const PathRayVisibility /*path_visibility*/,
+                                             const uint32_t /*path_flag*/,
+                                             float3 weight,
+                                             const ccl_private VolumeIORClosure * /*closure*/,
+                                             float3 * /*layer_albedo*/)
+{
+#ifdef __VOLUME_IOR__
+  if ((sd->runtime_flag & SR_VOLUME_IOR_EVAL) && isfinite_safe(weight.x)) {
+    sd->volume_ior += weight.x;
+  }
+#else
+  (void)sd;
+  (void)weight;
+#endif
+}
+
 ccl_device void osl_closure_henyey_greenstein_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,

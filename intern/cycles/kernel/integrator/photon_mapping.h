@@ -12,6 +12,7 @@
 
 #include "kernel/bvh/bvh.h"
 #include "kernel/geom/shader_data.h"
+#include "kernel/integrator/volume_ior.h"
 #include "kernel/integrator/nested_dielectrics.h"
 #include "kernel/integrator/path_state.h"
 #include "kernel/integrator/surface_shader.h"
@@ -192,6 +193,13 @@ ccl_device_inline void photon_state_init(KernelGlobals kg,
    * previous path's values otherwise, and the CPU traces many light paths with one state: a
    * growing volume boundary count, for example, would eventually stop crossing into media. */
   INTEGRATOR_STATE_WRITE(state, path, volume_bounds_bounce) = 0;
+#ifdef __VOLUME_IOR__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) {
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_passes) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_bounce) = 0;
+  }
+#endif
   if (kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL) {
     INTEGRATOR_STATE_WRITE(state, path, portal_bounce) = 0;
   }
@@ -207,6 +215,17 @@ ccl_device_inline void photon_state_init(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, isect, object) = OBJECT_NONE;
   INTEGRATOR_STATE_WRITE(state, isect, prim) = PRIM_NONE;
   INTEGRATOR_STATE_WRITE(state, isect, type) = PRIMITIVE_NONE;
+  /* A scene can have the volume stack without any volume: a shader whose volume output folds
+   * away still requests the feature. integrator_volume_stack_init() is not called then, and
+   * copying a stack without its terminator to a shadow path runs past the end of the state. */
+  if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME) {
+    INTEGRATOR_STATE_ARRAY_WRITE(
+        state, volume_stack, 0, object) = kernel_data.background.object_index;
+    INTEGRATOR_STATE_ARRAY_WRITE(
+        state, volume_stack, 0, shader) = kernel_data.background.volume_shader;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, volume_stack, 1, object) = OBJECT_NONE;
+    INTEGRATOR_STATE_ARRAY_WRITE(state, volume_stack, 1, shader) = SHADER_NONE;
+  }
 #ifdef __LIGHT_LINKING__
   if (kernel_data.kernel_features & KERNEL_FEATURE_LIGHT_LINKING) {
     INTEGRATOR_STATE_WRITE(state, path, mis_ray_object) = kernel_data.background.object_index;
@@ -819,14 +838,23 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
   /* Deterministic coherent connections own declared source-to-detector
    * histories; a caustic photon following one must not be stored there too. */
   CoherentPathHistory coherent_history = coherent_history_begin();
+  /* Curved ray through a volume index of refraction, see volume_ior.h. */
+  VolumeIORState ior_state;
+  ior_state.steps = 0;
+  ior_state.pending = false;
   for (int bounce = 0; bounce < kernel_data.integrator.photon_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
-    const bool hit_surface = scene_intersect(kg, &ray, path_visibility, &isect);
+    bool ior_arrive;
+    const VolumeIORResult ior_result = volume_ior_light_path_intersect(
+        kg, state, &ray, path_visibility, &isect, &rng, &ior_state, &ior_arrive);
+    const bool hit_surface = (ior_result == VOLUME_IOR_HIT);
 
 #ifdef __VOLUME__
     if (kernel_data.integrator.use_volumes && !integrator_state_volume_stack_is_empty(kg, state)) {
-      ray.tmax = hit_surface ? isect.t : FLT_MAX;
+      if (ior_result != VOLUME_IOR_SEGMENT) {
+        ray.tmax = hit_surface ? isect.t : FLT_MAX;
+      }
       INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
       float3 scatter_P;
       int receiver_object = OBJECT_NONE;
@@ -855,6 +883,19 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
       }
     }
 #endif
+
+    if (ior_result == VOLUME_IOR_SEGMENT) {
+      /* Not a vertex of the subpath: the curve continues behind the chord, see
+       * volume_ior_light_path_intersect(). The recurrence converts the measure of the edge with
+       * the length of the whole path. New random numbers for the media of the next chord. */
+      INTEGRATOR_STATE_WRITE(state, path, rng_offset) += PRNG_BOUNCE_NUM;
+      bounce--;
+      continue;
+    }
+    if (ior_arrive) {
+      /* The media along the last chord are integrated: the direction the curve arrives with. */
+      volume_ior_arrive(&ray, &isect, hit_surface, ior_state.D);
+    }
 
     if (!hit_surface) {
       return;
@@ -1230,6 +1271,13 @@ photon_mapping_gather(KernelGlobals kg,
           packed_normal photon_direction;
           photon_direction.value = photon->direction;
           const float3 light_direction = -photon_direction.decode();
+          /* Photon power is flux, so the density over the surface is the irradiance through the
+           * geometric normal already, while BSDF evaluations include the cosine of their shading
+           * normal: take the geometric cosine out again, as vertex merging does. */
+          const float cos_geometric = fabsf(dot(sd->Ng, light_direction));
+          if (!(cos_geometric > 1.0e-4f)) {
+            continue;
+          }
           for (int i = 0; i < sd->num_closure; i++) {
             const ccl_private ShaderClosure *sc = &sd->closure[i];
             if (surface_shader_photon_mapping_receiver(kg, sc, sd->wi)) {
@@ -1238,7 +1286,7 @@ photon_mapping_gather(KernelGlobals kg,
             }
           }
           const float q = distance2 / radius2;
-          const float kernel_weight = 2.0f * (1.0f - q) / (M_PI_F * radius2);
+          const float kernel_weight = 2.0f * (1.0f - q) / (M_PI_F * radius2 * cos_geometric);
           Spectrum photon_power = rgb_to_spectrum(make_float3(photon->power));
 #ifdef __SPECTRAL__
           if (photon_is_spectral(photon->time_wavelength)) {

@@ -1601,6 +1601,17 @@ void OSLCompiler::generate_nodes(const ShaderNodeSet &nodes)
             if (node->has_spatial_varying()) {
               current_shader->has_volume_spatial_varying = true;
             }
+            /* Closure nodes, except for the ones that only combine other closures. */
+            bool is_closure = false;
+            for (const ShaderOutput *output : node->outputs) {
+              is_closure |= (output->type() == SocketType::CLOSURE);
+            }
+            for (const ShaderInput *input : node->inputs) {
+              is_closure &= (input->type() != SocketType::CLOSURE);
+            }
+            if (is_closure) {
+              current_shader->tag_volume_closure_node(node);
+            }
           }
         }
         else {

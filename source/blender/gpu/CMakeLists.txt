@@ -737,6 +737,7 @@ set(GLSL_SRC
   shaders/material/gpu_shader_material_volume_absorption.bsl.hh
   shaders/material/gpu_shader_material_volume_coefficients.bsl.hh
   shaders/material/gpu_shader_material_volume_fast.bsl.hh
+  shaders/material/gpu_shader_material_volume_ior.bsl.hh
   shaders/material/gpu_shader_material_volume_principled.bsl.hh
   shaders/material/gpu_shader_material_volume_scatter.bsl.hh
   shaders/material/gpu_shader_material_voronoi.bsl.hh

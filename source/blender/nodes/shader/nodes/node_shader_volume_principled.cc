@@ -53,6 +53,20 @@ static void node_declare(NodeDeclarationBuilder &b)
       .max(6500.0f)
       .subtype(PROP_COLOR_TEMPERATURE);
   b.add_input<decl::String>("Temperature Attribute"_ustr).default_value("temperature");
+  b.add_input<decl::Float>("IOR"_ustr)
+      .default_value(1.0f)
+      .min(0.01f)
+      .max(4.0f)
+      .description(
+          "Index of refraction of the volume. Rays bend where it varies in space, so it has an "
+          "effect only when linked to a field such as a texture or an attribute");
+  b.add_input<decl::Float>("Heat Refraction"_ustr)
+      .default_value(0.0f)
+      .min(0.0f)
+      .max(1000.0f)
+      .description(
+          "Refraction of light by hot air, from the temperature of the volume: 1 is physically "
+          "correct, which is subtle, and higher values exaggerate the distortion");
   b.add_input<decl::Float>("Weight"_ustr).available(is_gpu_internal);
   b.add_output<decl::Shader>("Volume"_ustr).translation_context(BLT_I18NCONTEXT_ID_ID);
 }

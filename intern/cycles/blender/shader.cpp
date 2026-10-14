@@ -875,6 +875,14 @@ static ShaderNode *add_node(Scene *scene,
     PrincipledVolumeNode *principled = graph->create_node<PrincipledVolumeNode>();
     node = principled;
   }
+  else if (b_node.is_type("ShaderNodeVolumeIOR"_ustr)) {
+    VolumeIORNode *volume_ior = graph->create_node<VolumeIORNode>();
+    volume_ior->set_mode((b_node.custom1 == blender::SHD_VOLUME_IOR_DIRECT) ?
+                             NODE_VOLUME_IOR_DIRECT :
+                             NODE_VOLUME_IOR_TEMPERATURE);
+    volume_ior->set_step_size(max(b_node.custom3, 0.0f));
+    node = volume_ior;
+  }
   else if (b_node.is_type("ShaderNodeVolumeFast"_ustr)) {
     FastVolumeNode *fast_volume = graph->create_node<FastVolumeNode>();
     switch (b_node.custom1) {

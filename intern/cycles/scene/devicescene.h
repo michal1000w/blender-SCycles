@@ -121,6 +121,10 @@ class DeviceScene {
   device_vector<KernelOctreeRoot> volume_tree_roots;
   device_vector<int> volume_tree_root_ids;
   device_vector<float> volume_step_size;
+  device_vector<int> volume_ior_object_grid;
+  device_vector<KernelVolumeIORGrid> volume_ior_grids;
+  device_vector<float> volume_ior_voxels;
+  device_vector<float4> volume_ior_blocks;
 
   /* Image textures */
   device_vector<KernelImageTexture> image_textures;

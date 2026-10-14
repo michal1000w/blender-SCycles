@@ -1060,6 +1060,29 @@ struct SVMNodeFastVolume {
 static_assert(alignof(SVMNodeFastVolume) <= alignof(uint));
 static_assert(sizeof(SVMNodeFastVolume) % sizeof(uint) == 0);
 
+/* NODE_VOLUME_IOR */
+enum NodeVolumeIORMode {
+  /* Index of refraction given directly. */
+  NODE_VOLUME_IOR_DIRECT = 0,
+  /* Index of refraction of a gas from its temperature and pressure. */
+  NODE_VOLUME_IOR_TEMPERATURE = 1,
+};
+
+struct SVMNodeVolumeIOR {
+  SVMInputFloat ior;
+  SVMInputFloat temperature;
+  SVMInputFloat ambient_temperature;
+  SVMInputFloat pressure;
+  SVMInputFloat gas_ior;
+  SVMInputFloat strength;
+  int attr_field;
+  uint8_t mode;
+  SVMStackOffset mix_weight_offset;
+  uint8_t _pad[2];
+};
+static_assert(alignof(SVMNodeVolumeIOR) <= alignof(uint));
+static_assert(sizeof(SVMNodeVolumeIOR) % sizeof(uint) == 0);
+
 /* NODE_CLOSURE_BSDF. Common header for all BSDFs, followed by data defined below. */
 struct SVMNodeClosureBsdf {
   ClosureType closure_type;

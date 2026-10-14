@@ -4353,11 +4353,33 @@ NODE_DEFINE(PrincipledVolumeNode)
   SOCKET_IN_FLOAT(blackbody_intensity, "Blackbody Intensity", 0.0f);
   SOCKET_IN_COLOR(blackbody_tint, "Blackbody Tint", one_float3());
   SOCKET_IN_FLOAT(temperature, "Temperature", 1000.0f);
+  SOCKET_IN_FLOAT(IOR, "IOR", 1.0f);
+  SOCKET_IN_FLOAT(heat_refraction, "Heat Refraction", 0.0f);
   SOCKET_IN_FLOAT(volume_mix_weight, "VolumeMixWeight", 0.0f, SocketType::SVM_INTERNAL);
 
   SOCKET_OUT_CLOSURE(volume, "Volume");
 
   return type;
+}
+
+/* Air at 15 degrees Celsius and one atmosphere, 550 nm (Ciddor 1996), and room temperature. */
+#define VOLUME_IOR_AIR 1.000278f
+#define VOLUME_IOR_AMBIENT_TEMPERATURE 293.15f
+
+bool PrincipledVolumeNode::has_volume_ior()
+{
+  /* A constant index does not bend anything. */
+  const bool direct = input("IOR")->link != nullptr;
+  const bool heat = (input("Heat Refraction")->link || heat_refraction != 0.0f) &&
+                    (input("Temperature")->link || !temperature_attribute.empty());
+  return direct || heat;
+}
+
+bool PrincipledVolumeNode::has_volume_medium()
+{
+  return input("Density")->link || density > 0.0f || input("Emission Strength")->link ||
+         emission_strength > 0.0f || input("Blackbody Intensity")->link ||
+         blackbody_intensity > 0.0f;
 }
 
 PrincipledVolumeNode::PrincipledVolumeNode() : VolumeNode(get_node_type())
@@ -4376,7 +4398,9 @@ void PrincipledVolumeNode::attributes(Shader *shader, AttributeRequestSet *attri
       attributes->add_name_or_standard(color_attribute);
     }
 
-    if (input("Blackbody Intensity")->link || blackbody_intensity > 0.0f) {
+    if (input("Blackbody Intensity")->link || blackbody_intensity > 0.0f ||
+        input("Heat Refraction")->link || heat_refraction != 0.0f)
+    {
       attributes->add_name_or_standard(temperature_attribute);
     }
 
@@ -4422,6 +4446,42 @@ void PrincipledVolumeNode::compile(SVMCompiler &compiler)
           .attr_temperature = (int)compiler.attribute_standard(temperature_attribute),
           .mix_weight_offset = compiler.closure_mix_weight_offset(),
       });
+
+  /* Index of refraction, as the Volume IOR node. */
+  const SVMInputFloat one = SVMInputFloat{__float_as_uint(1.0f)};
+  if (input("IOR")->link) {
+    compiler.add_node(this,
+                      NODE_VOLUME_IOR,
+                      SVMNodeVolumeIOR{
+                          .ior = compiler.input_float("IOR"),
+                          .temperature = one,
+                          .ambient_temperature = one,
+                          .pressure = one,
+                          .gas_ior = one,
+                          .strength = one,
+                          .attr_field = (int)ATTR_STD_NOT_FOUND,
+                          .mode = NODE_VOLUME_IOR_DIRECT,
+                          .mix_weight_offset = compiler.closure_mix_weight_offset(),
+                      });
+  }
+  if ((input("Heat Refraction")->link || heat_refraction != 0.0f) &&
+      (input("Temperature")->link || !temperature_attribute.empty()))
+  {
+    compiler.add_node(
+        this,
+        NODE_VOLUME_IOR,
+        SVMNodeVolumeIOR{
+            .ior = one,
+            .temperature = compiler.input_float("Temperature"),
+            .ambient_temperature = SVMInputFloat{__float_as_uint(VOLUME_IOR_AMBIENT_TEMPERATURE)},
+            .pressure = one,
+            .gas_ior = SVMInputFloat{__float_as_uint(VOLUME_IOR_AIR)},
+            .strength = compiler.input_float("Heat Refraction"),
+            .attr_field = (int)compiler.attribute_standard(temperature_attribute),
+            .mode = NODE_VOLUME_IOR_TEMPERATURE,
+            .mix_weight_offset = compiler.closure_mix_weight_offset(),
+        });
+  }
 }
 
 void PrincipledVolumeNode::compile(OSLCompiler &compiler)
@@ -4431,6 +4491,85 @@ void PrincipledVolumeNode::compile(OSLCompiler &compiler)
   temperature_attribute = Attribute::osl_name(temperature_attribute);
 
   compiler.add(this, "node_principled_volume");
+}
+
+/* Volume Index of Refraction */
+
+NODE_DEFINE(VolumeIORNode)
+{
+  NodeType *type = NodeType::add("volume_ior", create, NodeType::SHADER);
+
+  static NodeEnum mode_enum;
+  mode_enum.insert("ior", NODE_VOLUME_IOR_DIRECT);
+  mode_enum.insert("temperature", NODE_VOLUME_IOR_TEMPERATURE);
+  SOCKET_ENUM(mode, "Mode", mode_enum, NODE_VOLUME_IOR_TEMPERATURE);
+
+  SOCKET_IN_STRING(attribute, "Attribute", ustring());
+  SOCKET_IN_FLOAT(IOR, "IOR", 1.0f);
+  SOCKET_IN_FLOAT(temperature, "Temperature", 1000.0f);
+  SOCKET_IN_FLOAT(ambient_temperature, "Ambient Temperature", VOLUME_IOR_AMBIENT_TEMPERATURE);
+  SOCKET_IN_FLOAT(pressure, "Pressure", 1.0f);
+  SOCKET_IN_FLOAT(gas_ior, "Gas IOR", VOLUME_IOR_AIR);
+  SOCKET_IN_FLOAT(strength, "Strength", 1.0f);
+  SOCKET_FLOAT(step_size, "Step Size", 0.0f);
+  SOCKET_IN_FLOAT(volume_mix_weight, "VolumeMixWeight", 0.0f, SocketType::SVM_INTERNAL);
+
+  SOCKET_OUT_CLOSURE(volume, "Volume");
+
+  return type;
+}
+
+VolumeIORNode::VolumeIORNode() : ShaderNode(get_node_type()) {}
+
+bool VolumeIORNode::has_volume_ior()
+{
+  if (!input("Strength")->link && strength == 0.0f) {
+    return false;
+  }
+  /* A constant index does not bend anything. */
+  if (!attribute.empty()) {
+    return true;
+  }
+  if (mode == NODE_VOLUME_IOR_TEMPERATURE) {
+    return input("Temperature")->link || input("Ambient Temperature")->link ||
+           input("Pressure")->link || input("Gas IOR")->link || input("Strength")->link;
+  }
+  return input("IOR")->link || input("Strength")->link;
+}
+
+void VolumeIORNode::attributes(Shader *shader, AttributeRequestSet *attributes)
+{
+  if (shader->has_volume && !attribute.empty()) {
+    attributes->add_name_or_standard(attribute);
+    attributes->add(ATTR_STD_GENERATED_TRANSFORM);
+  }
+  ShaderNode::attributes(shader, attributes);
+}
+
+void VolumeIORNode::compile(SVMCompiler &compiler)
+{
+  compiler.add_node(this,
+                    NODE_VOLUME_IOR,
+                    SVMNodeVolumeIOR{
+                        .ior = compiler.input_float("IOR"),
+                        .temperature = compiler.input_float("Temperature"),
+                        .ambient_temperature = compiler.input_float("Ambient Temperature"),
+                        .pressure = compiler.input_float("Pressure"),
+                        .gas_ior = compiler.input_float("Gas IOR"),
+                        .strength = compiler.input_float("Strength"),
+                        .attr_field = (attribute.empty()) ?
+                                          (int)ATTR_STD_NOT_FOUND :
+                                          (int)compiler.attribute_standard(attribute),
+                        .mode = uint8_t(mode),
+                        .mix_weight_offset = compiler.closure_mix_weight_offset(),
+                    });
+}
+
+void VolumeIORNode::compile(OSLCompiler &compiler)
+{
+  attribute = Attribute::osl_name(attribute);
+  compiler.parameter(this, "mode");
+  compiler.add(this, "node_volume_ior");
 }
 
 /* Fast Volume Closure */

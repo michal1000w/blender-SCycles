@@ -835,6 +835,9 @@ void SVMCompiler::generate_closure_node(ShaderNode *node, CompilerState *state)
       current_shader->has_spectral_transmission = true;
     }
   }
+  else if (current_type == SHADER_TYPE_VOLUME) {
+    current_shader->tag_volume_closure_node(node);
+  }
 }
 
 void SVMCompiler::generated_shared_closure_nodes(ShaderNode *root_node,

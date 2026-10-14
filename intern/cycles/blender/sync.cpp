@@ -407,6 +407,9 @@ void BlenderSync::sync_integrator(blender::ViewLayer &b_view_layer,
 
   integrator->set_volume_ray_marching(get_boolean(cscene, "volume_biased"));
   integrator->set_volume_max_steps(get_int(cscene, "volume_max_steps"));
+  integrator->set_use_volume_ior(get_boolean(cscene, "use_volume_ior"));
+  integrator->set_volume_ior_step_rate(get_float(cscene, "volume_ior_step_rate"));
+  integrator->set_volume_ior_max_steps(get_int(cscene, "volume_ior_max_steps"));
   const float volume_step_rate = (preview) ? get_float(cscene, "volume_preview_step_rate") :
                                              get_float(cscene, "volume_step_rate");
   integrator->set_volume_step_rate(volume_step_rate);

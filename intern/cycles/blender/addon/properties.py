@@ -1129,6 +1129,28 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
         min=2, max=65536
     )
 
+    use_volume_ior: BoolProperty(
+        name="Refraction",
+        description="Bend light in volumes whose index of refraction varies in space, as set by the "
+        "Volume IOR node and the refraction inputs of the Principled Volume: heat haze and mirages",
+        default=True,
+    )
+    volume_ior_step_rate: FloatProperty(
+        name="Step Rate",
+        description="Scale of the distance between the points where rays change direction in "
+        "refracting volumes, in voxels of the grids their index of refraction is evaluated on. "
+        "Higher values render faster with less detail in the distortion",
+        default=1.0,
+        min=0.01, max=100.0, soft_min=0.25, soft_max=8.0, precision=2
+    )
+    volume_ior_max_steps: IntProperty(
+        name="Max Steps",
+        description="Number of points along a ray segment at which a refracting volume may change "
+        "its direction. The ray continues straight after them",
+        default=1024,
+        min=1, max=65536
+    )
+
     volume_biased: BoolProperty(
         name="Biased",
         description="Default volume rendering uses null scattering, which is unbiased and has less artifacts, "

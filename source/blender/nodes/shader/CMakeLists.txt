@@ -115,6 +115,7 @@ set(SRC
   nodes/node_shader_volume_absorption.cc
   nodes/node_shader_volume_coefficients.cc
   nodes/node_shader_volume_fast.cc
+  nodes/node_shader_volume_ior.cc
   nodes/node_shader_volume_info.cc
   nodes/node_shader_volume_principled.cc
   nodes/node_shader_volume_scatter.cc

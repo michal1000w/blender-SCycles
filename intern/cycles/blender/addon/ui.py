@@ -696,6 +696,13 @@ class CYCLES_RENDER_PT_volumes(CyclesButtonsPanel, Panel):
 
             layout.prop(cscene, "volume_max_steps", text="Max Steps")
 
+        col = layout.column(heading="Refraction", align=True)
+        col.prop(cscene, "use_volume_ior", text="")
+        sub = col.column(align=True)
+        sub.active = cscene.use_volume_ior
+        sub.prop(cscene, "volume_ior_step_rate", text="Step Rate")
+        sub.prop(cscene, "volume_ior_max_steps", text="Max Steps")
+
 
 class CYCLES_RENDER_PT_light_paths(CyclesButtonsPanel, Panel):
     bl_label = "Light Paths"

@@ -36,7 +36,13 @@ EXPECT = {
     "ShaderNodeBsdfRefraction": ["Diffraction Weight", "Diffraction Pitch", "Diffraction Depth", "Diffraction Duty Cycle", "Tangent"],
     "ShaderNodeBsdfDiffraction": [],
     "ShaderNodeVolumeFast": [],
+    "ShaderNodeVolumeIOR": ["IOR", "Temperature", "Attribute", "Ambient Temperature", "Pressure", "Gas IOR", "Strength"],
+    "ShaderNodeVolumePrincipled": ["IOR", "Heat Refraction"],
 }
+VOLUME_NODES = ("ShaderNodeVolumeFast", "ShaderNodeVolumeIOR", "ShaderNodeVolumePrincipled")
+if not hasattr(bpy.types, "ShaderNodeVolumeIOR"):
+    # A build from before the volume index of refraction.
+    del EXPECT["ShaderNodeVolumeIOR"], EXPECT["ShaderNodeVolumePrincipled"]
 for idname, expected in EXPECT.items():
     scene = setup()
     mat = bpy.data.materials.new(idname)
@@ -49,7 +55,7 @@ for idname, expected in EXPECT.items():
              "missing": [n for n in expected if n not in names],
              "duplicates": sorted({n for n in names if names.count(n) > 1}),
              "identifiers_unique": len({s.identifier for s in node.inputs}) == len(node.inputs)}
-    volume = idname == "ShaderNodeVolumeFast"
+    volume = idname in VOLUME_NODES
     for s in node.inputs:
         if s.name == "Diffraction Weight":
             s.default_value = 0.5
