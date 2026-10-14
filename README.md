@@ -4,6 +4,14 @@ linking to external resources instead of including content in-line.
 See 'release/text/readme.html' for the end user read-me.
 -->
 
+Michal1000w's branch information
+=======
+
+1. This branch is free and open source.
+2. Most hard work is done by me by hand.
+3. Some comments in the code, merging with main blender branch, and some stupid bugs are sometimes done by AI as I don't have time or will for that. But all AI committed code is marked with the AI used so you know when something is done by that tool. I've done few first merges myself but I don't like it and probably AI would do it better anyway as I'm not a master of blender's code. So sorry for that
+4. Later I'll do a list of new features but for now I don't have time for that
+
 Blender
 =======
 
