@@ -1911,6 +1911,33 @@ struct KernelLightTreeNode {
 };
 static_assert_align(KernelLightTreeNode, 16);
 
+/* Grid of the index of refraction of the volume of an object, see integrator/volume_ior.h. */
+
+/* Voxels per block of its three coarse levels, as shifts of the voxel index. */
+#define VOLUME_IOR_BLOCK_SHIFT_1 2
+#define VOLUME_IOR_BLOCK_SHIFT_2 4
+#define VOLUME_IOR_BLOCK_SHIFT_3 6
+
+struct KernelVolumeIORGrid {
+  /* Space of the geometry of the object to the voxel index space of the grid. */
+  Transform tfm;
+  /* Number of voxels, and where they start in `volume_ior_voxels`. */
+  int res_x, res_y, res_z;
+  int voxel_offset;
+  /* Where the blocks of the three coarse levels start in `volume_ior_blocks`: two entries per
+   * block. */
+  int block_offset_1;
+  int block_offset_2;
+  int block_offset_3;
+  /* Volume shader the grid is of, and the next grid of the same object, -1 at the last. */
+  int shader;
+  int next;
+  /* Step along a ray in voxels, along every axis of the grid: more than one where the voxels
+   * are finer than the steps need them, see volume_ior_grid_refine(). */
+  float step_x, step_y, step_z;
+};
+static_assert_align(KernelVolumeIORGrid, 16);
+
 struct KernelOctreeRoot {
   packed_float3 scale;
   int id;

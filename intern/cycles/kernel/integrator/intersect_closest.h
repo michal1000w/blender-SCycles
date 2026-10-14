@@ -407,11 +407,11 @@ ccl_device_forceinline void integrator_intersect_closest_mnee_setup(KernelGlobal
 /* Intersection of a path inside of a volume that bends it, and the kernel that follows.
  *
  * A volume with nothing but an index of refraction is crossed here, up to the next surface. One
- * that also absorbs, scatters or emits is crossed one straight segment at a time, each followed
- * by the volume kernel: a path state with `volume_ior_segment` set is in between two of them.
+ * that also absorbs, scatters or emits is crossed one chord of the curve at a time, each followed
+ * by the volume kernel: a path state with `volume_ior_segment` set is at such a chord.
  *
- * Not inlined on Metal: the kernel of scenes without such volumes would carry the shader data
- * and the loop of this function through every intersection. */
+ * Not inlined on Metal: the kernel of scenes without such volumes would carry the loop of this
+ * function through every intersection. */
 ccl_device_outline_metal void integrator_intersect_closest_volume_ior(
     KernelGlobals kg,
     IntegratorState state,
@@ -420,31 +420,16 @@ ccl_device_outline_metal void integrator_intersect_closest_volume_ior(
     ccl_private Intersection *ccl_restrict isect,
     const uint visibility,
     const int last_isect_prim,
-    const int last_isect_object)
+    const int last_isect_object,
+    const bool only_ior)
 {
   const int segment = INTEGRATOR_STATE(state, path, volume_ior_segment);
-  const bool pending = segment != 0;
+  const bool pending = segment >= 2;
   VolumeIORState ior;
-  ior.pending = pending;
-  ior.steps = (pending) ? segment - 1 : 0;
-  if (pending) {
-    ior.D = INTEGRATOR_STATE(state, path, volume_ior_D);
-    ior.resume = INTEGRATOR_STATE(state, path, volume_ior_resume);
-  }
-
-  uint16_t rng_offset = INTEGRATOR_STATE(state, path, rng_offset);
-  if (pending) {
-    /* Continue behind the segment the volume kernel has integrated, with the limit of an ambient
-     * occlusion bounce if the caller has set one. */
-    const float segment_end = INTEGRATOR_STATE(state, ray, tmax);
-    ray->tmax = (path_state_ao_bounce(kg, state)) ? ray->tmax : FLT_MAX;
-    ray->tmin = segment_end;
-    if (!(ray->tmax > ray->tmin)) {
-      ray->tmax = ray->tmin;
-    }
-    /* New random numbers for the volume kernel of the next segment. */
-    rng_offset += PRNG_BOUNCE_NUM;
-  }
+  ior.pending = false;
+  ior.steps = (pending) ? segment - 2 : 0;
+  ior.D = ray->D;
+  ray->dD = volume_ior_path_footprint(state, ray->dD);
 
   const PathRayVisibility path_visibility = INTEGRATOR_STATE(state, path, visibility);
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
@@ -458,23 +443,27 @@ ccl_device_outline_metal void integrator_intersect_closest_volume_ior(
   lights.path_visibility = path_visibility;
   lights.path_flag = path_flag;
 
+  uint16_t rng_offset = INTEGRATOR_STATE(state, path, rng_offset);
+  if (pending) {
+    /* Continue behind the chord the volume kernel has integrated, with the limit of an ambient
+     * occlusion bounce if the caller has set one. */
+    const float t_limit = (path_state_ao_bounce(kg, state)) ? ray->tmax : FLT_MAX;
+    ray->tmax = INTEGRATOR_STATE(state, ray, tmax);
+    volume_ior_resume(ray, INTEGRATOR_STATE(state, path, volume_ior_D), t_limit);
+    /* Not at the surface or light the ray left any more. */
+    lights.last_prim = PRIM_NONE;
+    lights.last_object = OBJECT_NONE;
+    lights.last_type = 0;
+    /* New random numbers for the volume kernel of the next chord. */
+    rng_offset += PRNG_BOUNCE_NUM;
+  }
+
   RNGState rng_state;
   path_state_rng_load(state, &rng_state);
   const float rand = path_state_rng_1D(kg, &rng_state, PRNG_VOLUME_IOR_OFFSET);
 
-  const VolumeIORResult result = volume_ior_intersect(kg,
-                                                      state,
-                                                      ray,
-                                                      (PathRayVisibility)visibility,
-                                                      isect,
-                                                      rand,
-                                                      &ior,
-                                                      &lights);
-  if (result == VOLUME_IOR_CACHE_MISS) {
-    /* Nothing of the state has changed. */
-    integrator_path_cache_miss(state, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
-    return;
-  }
+  const VolumeIORResult result = volume_ior_intersect(
+      kg, state, ray, (PathRayVisibility)visibility, isect, rand, &ior, &lights);
 
   const bool hit = (result == VOLUME_IOR_HIT);
   const bool is_segment = (result == VOLUME_IOR_SEGMENT);
@@ -483,32 +472,33 @@ ccl_device_outline_metal void integrator_intersect_closest_volume_ior(
     integrator_intersect_closest_mnee_setup(kg, state, last_isect_object);
   }
 
-  /* The ray is the last straight segment of the path now. */
+  if (only_ior) {
+    /* No media to integrate along the chord: the ray arrives right away. */
+    volume_ior_arrive(ray, isect, hit, ior.D);
+  }
+
   INTEGRATOR_STATE_WRITE(state, ray, P) = ray->P;
   INTEGRATOR_STATE_WRITE(state, ray, D) = ray->D;
   INTEGRATOR_STATE_WRITE(state, ray, tmin) = ray->tmin;
   INTEGRATOR_STATE_WRITE(state, ray, tmax) = ray->tmax;
   INTEGRATOR_STATE_WRITE(state, path, rng_offset) = rng_offset;
-  INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = (is_segment) ?
-                                                                 uint16_t(
-                                                                     min(ior.steps, 65534) + 1) :
-                                                                 0;
-  if (is_segment) {
+  INTEGRATOR_STATE_WRITE(
+      state, path, volume_ior_segment) = (only_ior)   ? 0 :
+                                         (is_segment) ? uint16_t(min(ior.steps, 65533) + 2) :
+                                                        1;
+  if (!only_ior) {
     INTEGRATOR_STATE_WRITE(state, path, volume_ior_D) = ior.D;
-    INTEGRATOR_STATE_WRITE(state, path, volume_ior_resume) = ior.resume;
   }
   integrator_state_write_isect(state, isect);
 
   if (!pending && !is_segment) {
     /* Nothing for the volume kernel to integrate if the index of refraction is all there is. */
-    bool only_ior;
-    volume_ior_stack_step_size(kg, state, &only_ior);
     integrator_intersect_next_kernel<DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST>(
         kg, state, isect, render_buffer, hit, only_ior);
     return;
   }
 
-  /* Path termination is decided once per bounce, at its first segment. What the path hits in
+  /* Path termination is decided once per bounce, at its first chord. What the path hits in
    * the end is not known there: continue to it as if it were an emitter, the path ends after
    * its emission then. */
   if (!pending &&
@@ -569,9 +559,19 @@ ccl_device void integrator_intersect_closest(KernelGlobals kg,
 
 #ifdef __VOLUME_IOR__
   /* Inside of a volume with an index of refraction the ray is curved, see volume_ior.h. */
-  if (volume_ior_stack_active(kg, state)) {
-    integrator_intersect_closest_volume_ior(
-        kg, state, render_buffer, &ray, &isect, visibility, last_isect_prim, last_isect_object);
+  bool only_ior;
+  if (volume_ior_stack_active(kg, state, &only_ior) &&
+      (INTEGRATOR_STATE(state, path, volume_ior_segment) >= 2 || volume_ior_path_bends(state)))
+  {
+    integrator_intersect_closest_volume_ior(kg,
+                                            state,
+                                            render_buffer,
+                                            &ray,
+                                            &isect,
+                                            visibility,
+                                            last_isect_prim,
+                                            last_isect_object,
+                                            only_ior);
     return;
   }
 #endif

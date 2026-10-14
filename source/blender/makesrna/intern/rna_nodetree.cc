@@ -6482,9 +6482,10 @@ static void def_volume_ior(BlenderRNA * /*brna*/, StructRNA *srna)
   RNA_def_property_ui_range(prop, 0.0f, 10.0f, 1, 4);
   RNA_def_property_ui_text(
       prop,
-      "Step Size",
-      "Distance between the points where rays change direction. Zero chooses it automatically: "
-      "the voxel size of a volume object, or a fraction of the size of a mesh");
+      "Detail Size",
+      "Size of the smallest features of the index of refraction that bend rays: the voxel size of "
+      "the grid it is evaluated on when the scene is prepared. Zero chooses it automatically: the "
+      "voxel size of a volume object, or a fraction of the size of a mesh");
   RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
 }
 

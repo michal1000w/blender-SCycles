@@ -3481,10 +3481,10 @@ ccl_device_inline void integrator_shade_volume_setup(KernelGlobals kg,
 
 #  ifdef __VOLUME_IOR__
   if ((kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) &&
-      INTEGRATOR_STATE(state, path, volume_ior_segment))
+      INTEGRATOR_STATE(state, path, volume_ior_segment) >= 2)
   {
-    /* Segment of a ray that a volume index of refraction bends: it ends at a step inside of the
-     * volume, where the path continues in another direction. */
+    /* Chord of a ray that a volume index of refraction bends: it ends inside of the volume,
+     * where the path continues in another direction. */
   }
   else
 #  endif
@@ -3520,16 +3520,28 @@ ccl_device_inline void integrator_next_kernel_after_shade_volume(
   }
 
 #ifdef __VOLUME_IOR__
-  if ((kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) &&
-      INTEGRATOR_STATE(state, path, volume_ior_segment))
-  {
-    if (event == VOLUME_PATH_ATTENUATED) {
-      /* Continue with the next segment of the curved ray. */
-      integrator_path_next(state, volume_kernel, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
-      return;
+  if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) {
+    const int segment = INTEGRATOR_STATE(state, path, volume_ior_segment);
+    if (segment) {
+      INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = 0;
+      if (event == VOLUME_PATH_ATTENUATED) {
+        if (segment >= 2) {
+          /* Continue with the next chord of the curved ray. */
+          INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = segment;
+          integrator_path_next(state, volume_kernel, DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST);
+          return;
+        }
+        /* The last chord: the ray gets the direction the curve arrives with. */
+        Ray arrival ccl_optional_struct_init;
+        integrator_state_read_ray(state, &arrival);
+        volume_ior_arrive(&arrival,
+                          isect,
+                          isect->prim != PRIM_NONE,
+                          INTEGRATOR_STATE(state, path, volume_ior_D));
+        INTEGRATOR_STATE_WRITE(state, ray, P) = arrival.P;
+        INTEGRATOR_STATE_WRITE(state, ray, D) = arrival.D;
+      }
     }
-    /* Scattered into a new ray. */
-    INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = 0;
   }
 #endif
 

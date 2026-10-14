@@ -2590,12 +2590,9 @@ ccl_device_inline void bdpt_light_generate_path(KernelGlobals kg,
   for (int bounce = 0; bounce < kernel_data.integrator.bdpt_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
+    bool ior_arrive;
     const VolumeIORResult ior_result = volume_ior_light_path_intersect(
-        kg, state, &ray, path_visibility, &isect, &rng, &ior_state);
-    if (ior_result == VOLUME_IOR_CACHE_MISS) {
-      kernel_integrator_state.queue_counter->cache_miss = true;
-      return;
-    }
+        kg, state, &ray, path_visibility, &isect, &rng, &ior_state, &ior_arrive);
     const bool hit_surface = (ior_result == VOLUME_IOR_HIT);
 
 #ifdef __VOLUME__
@@ -2663,14 +2660,16 @@ ccl_device_inline void bdpt_light_generate_path(KernelGlobals kg,
     }
 #endif
     if (ior_result == VOLUME_IOR_SEGMENT) {
-      /* Not a vertex of the subpath: the ray continues behind the segment in another direction.
-       * The recurrence converts the measure of the edge with the length of the whole path. */
-      ray.tmin = ray.tmax;
-      ray.tmax = FLT_MAX;
-      /* New random numbers for the media of the next segment. */
+      /* Not a vertex of the subpath: the curve continues behind the chord, see
+       * volume_ior_light_path_intersect(). The recurrence converts the measure of the edge with
+       * the length of the whole path. New random numbers for the media of the next chord. */
       INTEGRATOR_STATE_WRITE(state, path, rng_offset) += PRNG_BOUNCE_NUM;
       bounce--;
       continue;
+    }
+    if (ior_arrive) {
+      /* The media along the last chord are integrated: the direction the curve arrives with. */
+      volume_ior_arrive(&ray, &isect, hit_surface, ior_state.D);
     }
     if (!hit_surface) {
       break;

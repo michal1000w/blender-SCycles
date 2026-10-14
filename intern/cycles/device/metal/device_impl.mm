@@ -841,11 +841,6 @@ void MetalDevice::refresh_source_and_kernels_md5(MetalPipelineType pso_type)
   MD5Hash md5;
   md5.append(constant_values);
   md5.append(source[pso_type]);
-  if (scene_kernel_features & KERNEL_FEATURE_VOLUME_IOR) {
-    /* The closest intersection kernel links the shading functions in these scenes only, see
-     * metal_kernel_uses_shading_functions(): no pipeline of another scene can be reused. */
-    md5.append("volume_ior_shading=1");
-  }
   if (use_metalrt_for_current_scene()) {
     /* Ordinary surface shading needs custom intersections only in coherent
      * scenes. Include the active choice even in the otherwise generic key so

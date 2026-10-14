@@ -755,7 +755,7 @@ void Integrator::tag_update(Scene *scene, const uint32_t flag)
     scene->shader_manager->tag_update(scene, ShaderManager::SHADER_MODIFIED);
   }
   if (use_volume_ior_is_modified() || volume_ior_step_rate_is_modified()) {
-    scene->volume_manager->need_update_ior_step_size = true;
+    scene->volume_manager->tag_update_ior();
   }
 
   if (volume_ray_marching_is_modified()) {

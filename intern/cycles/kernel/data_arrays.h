@@ -118,9 +118,15 @@ KERNEL_DATA_ARRAY(KernelOctreeNode, volume_tree_nodes)
 KERNEL_DATA_ARRAY(KernelOctreeRoot, volume_tree_roots)
 KERNEL_DATA_ARRAY(int, volume_tree_root_ids)
 KERNEL_DATA_ARRAY(float, volume_step_size)
-/* Two per object: the step along a ray bent by the index of refraction of its volume, and the
- * size of the detail of that index. */
-KERNEL_DATA_ARRAY(float, volume_ior_step_size)
+/* Volume index of refraction: the first grid of every object (-1 for none), the grids, their
+ * voxels (the squared index minus one) and the blocks of their coarse levels. Two entries per
+ * block: the mean of half the gradient of the squared index in index space with a bound of the
+ * distance of that gradient from the mean, and a bound of its distance from a linear function
+ * of the position. */
+KERNEL_DATA_ARRAY(int, volume_ior_object_grid)
+KERNEL_DATA_ARRAY(KernelVolumeIORGrid, volume_ior_grids)
+KERNEL_DATA_ARRAY(float, volume_ior_voxels)
+KERNEL_DATA_ARRAY(float4, volume_ior_blocks)
 
 /* image textures */
 KERNEL_DATA_ARRAY(KernelImageTexture, image_textures)

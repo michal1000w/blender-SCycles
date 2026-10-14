@@ -52,8 +52,10 @@ class VolumeManager {
   /* Check whether the shader is a homogeneous volume. */
   static bool is_homogeneous_volume(const Object *, const Shader *);
 
+  /* Tag the grids of the volume index of refraction for update. */
+  void tag_update_ior();
+
   bool need_update_step_size;
-  bool need_update_ior_step_size;
 
  private:
   /* Initialize octrees from the volumes in the scene. */
@@ -81,8 +83,12 @@ class VolumeManager {
   /* Step size for ray marching. */
   void update_step_size(const Scene *, DeviceScene *, Progress &progress);
 
-  /* Step size along the rays that a volume index of refraction bends. */
-  void update_ior_step_size(const Scene *, DeviceScene *, Progress &progress);
+  /* Grids of the index of refraction of the volumes that have one, for the rays they bend:
+   * see kernel/integrator/volume_ior.h. */
+  void update_ior_grids(Device *, DeviceScene *, const Scene *, Progress &progress);
+  bool need_update_ior_ = true;
+  /* The world has such a grid, which covers the bounds of all objects. */
+  bool has_world_ior_ = false;
 
   /* One octree per object per shader. */
   std::map<std::pair<const Object *, const Shader *>, std::shared_ptr<Octree>> object_octrees_;

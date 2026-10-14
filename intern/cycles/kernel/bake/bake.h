@@ -53,11 +53,10 @@ ccl_device void kernel_displace_evaluate(KernelGlobals kg,
     const float u = compare_image ? in.u : float(packed_u & 15) * inv_grid;
     const float v = compare_image ? in.v : in.v * inv_grid;
     bool missed = false;
-    const float3 D = compare_image ?
-                         pixel_displacement_eval_object_direct<false, true>(
-                             kg, object, prim, u, v, 0.5f, false, verts, &missed) :
-                         pixel_displacement_eval_object_direct<false>(
-                             kg, object, prim, u, v, 0.5f, false, verts, &missed);
+    const float3 D = compare_image ? pixel_displacement_eval_object_direct<false, true>(
+                                         kg, object, prim, u, v, 0.5f, false, verts, &missed) :
+                                     pixel_displacement_eval_object_direct<false>(
+                                         kg, object, prim, u, v, 0.5f, false, verts, &missed);
     if (missed) {
       *cache_miss = true;
     }
@@ -243,6 +242,33 @@ ccl_device void kernel_volume_density_evaluate(KernelGlobals kg,
   const VolumeStack entry = {sd.object, shader};
 
   const float3 voxel_size = make_float3(__int_as_float(in.prim), in.u, in.v);
+
+#  ifdef __VOLUME_IOR__
+  if (voxel_size.x < 0.0f) {
+    /* The refractivity `n - 1` at the position, for the grids of the volume index of refraction:
+     * see VolumeManager::update_ior_grids(). */
+    sd.P = ray.P;
+    if (!(kernel_data_fetch(object_flag, sd.object) & SD_OBJECT_TRANSFORM_APPLIED)) {
+      const Transform tfm = object_fetch_transform(kg, sd.object, OBJECT_TRANSFORM);
+      sd.P = transform_point(&tfm, sd.P);
+    }
+    sd.runtime_flag = SR_IS_VOLUME_SHADER_EVAL | SR_VOLUME_IOR_EVAL;
+    sd.volume_ior = 0.0f;
+
+    ConstIntegratorBakeState state;
+    volume_shader_eval_entry<false,
+                             KERNEL_FEATURE_NODE_MASK_VOLUME & ~KERNEL_FEATURE_NODE_LIGHT_PATH>(
+        kg, state, &sd, entry, path_visibility, path_flag);
+    if (sd.runtime_flag & SR_CACHE_MISS) {
+      *cache_miss = true;
+    }
+
+    output[offset * 2 + 0] = sd.volume_ior;
+    output[offset * 2 + 1] = 0.0f;
+    return;
+  }
+#  endif
+
   Extrema<float> extrema = {FLT_MAX, -FLT_MAX};
   /* For heterogeneous volume, we take 16 samples per grid;
    * for homogeneous volume, only 1 sample is needed. */
