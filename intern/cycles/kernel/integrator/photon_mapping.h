@@ -193,6 +193,13 @@ ccl_device_inline void photon_state_init(KernelGlobals kg,
    * previous path's values otherwise, and the CPU traces many light paths with one state: a
    * growing volume boundary count, for example, would eventually stop crossing into media. */
   INTEGRATOR_STATE_WRITE(state, path, volume_bounds_bounce) = 0;
+#ifdef __VOLUME_IOR__
+  if (kernel_data.kernel_features & KERNEL_FEATURE_VOLUME_IOR) {
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_segment) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_passes) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, volume_ior_bounce) = 0;
+  }
+#endif
   if (kernel_data.kernel_features & KERNEL_FEATURE_NODE_PORTAL) {
     INTEGRATOR_STATE_WRITE(state, path, portal_bounce) = 0;
   }
@@ -838,11 +845,9 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
   for (int bounce = 0; bounce < kernel_data.integrator.photon_max_bounces; bounce++) {
     Intersection isect;
     const PathRayVisibility path_visibility = path_state_ray_visibility(state);
+    bool ior_arrive;
     const VolumeIORResult ior_result = volume_ior_light_path_intersect(
-        kg, state, &ray, path_visibility, &isect, &rng, &ior_state);
-    if (ior_result == VOLUME_IOR_CACHE_MISS) {
-      return;
-    }
+        kg, state, &ray, path_visibility, &isect, &rng, &ior_state, &ior_arrive);
     const bool hit_surface = (ior_result == VOLUME_IOR_HIT);
 
 #ifdef __VOLUME__
@@ -880,13 +885,16 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
 #endif
 
     if (ior_result == VOLUME_IOR_SEGMENT) {
-      /* Not a transport bounce: the ray continues behind the segment in another direction. */
-      ray.tmin = ray.tmax;
-      ray.tmax = FLT_MAX;
-      /* New random numbers for the media of the next segment. */
+      /* Not a vertex of the subpath: the curve continues behind the chord, see
+       * volume_ior_light_path_intersect(). The recurrence converts the measure of the edge with
+       * the length of the whole path. New random numbers for the media of the next chord. */
       INTEGRATOR_STATE_WRITE(state, path, rng_offset) += PRNG_BOUNCE_NUM;
       bounce--;
       continue;
+    }
+    if (ior_arrive) {
+      /* The media along the last chord are integrated: the direction the curve arrives with. */
+      volume_ior_arrive(&ray, &isect, hit_surface, ior_state.D);
     }
 
     if (!hit_surface) {

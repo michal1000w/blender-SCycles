@@ -1138,7 +1138,8 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
     volume_ior_step_rate: FloatProperty(
         name="Step Rate",
         description="Scale of the distance between the points where rays change direction in "
-        "refracting volumes. Higher values render faster with less detail in the distortion",
+        "refracting volumes, in voxels of the grids their index of refraction is evaluated on. "
+        "Higher values render faster with less detail in the distortion",
         default=1.0,
         min=0.01, max=100.0, soft_min=0.25, soft_max=8.0, precision=2
     )

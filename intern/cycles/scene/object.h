@@ -128,12 +128,6 @@ class Object : public Node {
 
   /* Compute step size from attributes, shaders, transforms. */
   float compute_volume_step_size(Progress &progress) const;
-  /* Step along the rays that the index of refraction of the volume of this object bends, FLT_MAX
-   * if it has none, and the size of the detail of that index: of a voxel, or a fraction of the
-   * object. */
-  float compute_volume_ior_step_size(const Scene *scene,
-                                     Progress &progress,
-                                     float *detail_size) const;
 
   /* Check whether this object can be used as light-emissive. */
   bool usable_as_light() const;
