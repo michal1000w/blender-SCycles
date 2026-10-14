@@ -8,6 +8,14 @@ See 'release/text/readme.html' for the end user read-me.
 > Cloning from this [GitHub mirror](https://github.com/blender/blender) may cause Git LFS errors. To avoid this, use `GIT_LFS_SKIP_SMUDGE=1` when doing your initial clone.  
 > See [the documentation](https://developer.blender.org/docs/handbook/contributing/using_git/clone_update/#github-mirror) for full instructions.
 
+Michal1000w's branch information
+=======
+
+1. This branch is free and open source.
+2. Most hard work is done by me by hand.
+3. Some comments in the code, merging with main blender branch, and some stupid bugs are sometimes done by AI as I don't have time or will for that. But all AI committed code is marked with the AI used so you know when something is done by that tool. I've done few first merges myself but 4. I don't like it and probably AI would do it better anyway as I'm not a master of blender's code. So sorry for that
+Later I'll do a list of new features but for now I don't have time for that
+
 Blender
 =======
 
