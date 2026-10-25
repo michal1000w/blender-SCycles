@@ -579,6 +579,36 @@ class DiffractionSmoothBsdfNode : public BsdfNode {
   bool register_index_tables(Scene *scene, Progress &progress);
 };
 
+/* Grating model of the Diffraction BSDF: 1D or 2D periodic reflection grating with a
+ * sinusoidal or rectangular groove profile and GGX spread per order. */
+class DiffractionGratingBsdfNode : public BsdfNode {
+ public:
+  SHADER_NODE_CLASS(DiffractionGratingBsdfNode)
+
+  ClosureType get_closure_type() override
+  {
+    return closure;
+  }
+  bool has_dispersion() override
+  {
+    return true;
+  }
+  void attributes(Shader *shader, AttributeRequestSet *attributes) override;
+  bool has_attribute_dependency() override
+  {
+    return true;
+  }
+
+  NODE_SOCKET_API(float3, tangent)
+  NODE_SOCKET_API(float, roughness)
+  NODE_SOCKET_API(float3, pitch)        /* Micrometers, .x = X axis, .y = Y axis (2D only). */
+  NODE_SOCKET_API(float3, groove_depth) /* Nanometers, per axis. */
+  NODE_SOCKET_API(float3, duty_cycle)   /* Per axis, rectangular profile only. */
+  NODE_SOCKET_API(float3, rotation)     /* Turns, per axis. */
+  NODE_SOCKET_API(NodeDiffractionGratingProfile, profile)
+  NODE_SOCKET_API(NodeDiffractionGratingType, grating_type)
+};
+
 class DiffuseBsdfNode : public BsdfNode {
  public:
   SHADER_NODE_CLASS(DiffuseBsdfNode)

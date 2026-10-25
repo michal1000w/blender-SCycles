@@ -4384,17 +4384,73 @@ static void def_diffraction(BlenderRNA * /*brna*/, StructRNA *srna)
                           "Embedded CSV with wavelength_nm,n,k columns for the ridge and absorbing "
                           "substrate; must cover 380 to 780 nm with positive extinction");
   RNA_def_property_update(table, NC_NODE | NA_EDITED, "rna_Node_update");
+
+  /* Grating model settings, stored in the node like in builds where it is the only model. */
+  static const EnumPropertyItem profile_items[] = {
+      {SHD_DIFFRACTION_SINUSOIDAL,
+       "SINUSOIDAL",
+       0,
+       "Sinusoidal",
+       "Continuous cosine groove profile (thin phase grating)"},
+      {SHD_DIFFRACTION_RECTANGULAR,
+       "RECTANGULAR",
+       0,
+       "Rectangular",
+       "Two-level pit/land groove profile, matching a stamped CD/DVD track or holographic foil"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *prop = RNA_def_property(srna, "profile", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "custom1");
+  RNA_def_property_enum_items(prop, profile_items);
+  RNA_def_property_enum_default(prop, SHD_DIFFRACTION_RECTANGULAR);
+  RNA_def_property_ui_text(prop, "Profile", "Cross-section shape of the diffraction grooves");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+
+  static const EnumPropertyItem grating_items[] = {
+      {SHD_DIFFRACTION_GRATING_1D,
+       "GRATING_1D",
+       0,
+       "1D",
+       "A single periodic direction, set by the surface tangent (a CD/DVD track)"},
+      {SHD_DIFFRACTION_GRATING_2D,
+       "GRATING_2D",
+       0,
+       "2D",
+       "Two independent periodic directions at once (a crossed/rectangular pit lattice)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "grating_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "custom2");
+  RNA_def_property_enum_items(prop, grating_items);
+  RNA_def_property_ui_text(
+      prop, "Grating Type", "Whether the grating repeats along one axis or two");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+
   RNA_def_struct_sdna_from(srna, "NodeShaderDiffraction", "storage");
   static const EnumPropertyItem quality_items[] = {
-      {1, "FAST", 0, "Fast", "Scalar reflection and transmission approximation without cache preparation"},
-      {0, "REALISTIC", 0, "Realistic", "Electromagnetic relief model with a prepared response cache"},
+      {SHD_DIFFRACTION_MODEL_GRATING,
+       "GRATING",
+       0,
+       "Grating",
+       "Rough 1D or 2D reflection grating with sinusoidal or rectangular grooves and textured "
+       "parameters, for optical discs, holographic foils and fabrics"},
+      {SHD_DIFFRACTION_MODEL_FAST,
+       "FAST",
+       0,
+       "Fast",
+       "Scalar reflection and transmission approximation without cache preparation"},
+      {SHD_DIFFRACTION_MODEL_REALISTIC,
+       "REALISTIC",
+       0,
+       "Realistic",
+       "Electromagnetic relief model with a prepared response cache"},
       {0, nullptr, 0, nullptr, nullptr}};
   PropertyRNA *quality = RNA_def_property(srna, "quality", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(quality, nullptr, "quality");
   RNA_def_property_enum_items(quality, quality_items);
-  RNA_def_property_enum_default(quality, 1);
-  RNA_def_property_ui_text(quality, "Quality", "Diffraction material model");
-  RNA_def_property_update(quality, NC_NODE | NA_EDITED, "rna_Node_update");
+  RNA_def_property_enum_default(quality, SHD_DIFFRACTION_MODEL_GRATING);
+  RNA_def_property_ui_text(quality, "Model", "Diffraction material model");
+  RNA_def_property_update(quality, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
   const auto define_float = [&](const char *identifier, const char *name,
                                 const char *description, const float minimum,
                                 const float maximum, const float default_value) {

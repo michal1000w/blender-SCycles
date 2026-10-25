@@ -34,6 +34,7 @@ set(SRC
   kernel_camera_projection_test.cpp
   kernel_diffraction_test.cpp
   kernel_diffraction_bsdf_test.cpp
+  kernel_diffraction_grating_test.cpp
   kernel_guiding_distribution_test.cpp
   kernel_guiding_mixture_fit_test.cpp
   kernel_guiding_parallax_test.cpp
@@ -43,6 +44,7 @@ set(SRC
   scene_displacement_image_test.cpp
   diffraction_boundary_fixture.h
   diffraction_reference_fixture.h
+  diffraction_grating_branch_fixture.h
   scene_diffraction_test.cpp
   util_aligned_malloc_test.cpp
   util_boundbox_test.cpp

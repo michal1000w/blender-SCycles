@@ -1,0 +1,36 @@
+/* SPDX-FileCopyrightText: 2011-2026 Blender Authors
+ *
+ * SPDX-License-Identifier: Apache-2.0 */
+
+#include "stdcycles.h"
+
+/* Grating model of the Diffraction BSDF. Vector inputs: X = first axis, Y = second axis (2D). */
+shader node_diffraction_grating_bsdf(color Color = color(0.9, 0.9, 0.9),
+                                     float Roughness = 0.05,
+                                     vector Pitch = vector(1.6, 1.6, 1.6),
+                                     vector GrooveDepth = vector(110.0, 110.0, 110.0),
+                                     vector DutyCycle = vector(0.45, 0.45, 0.45),
+                                     vector Rotation = vector(0.0, 0.25, 0.0),
+                                     string profile = "rectangular",
+                                     string grating_type = "1d",
+                                     normal Normal = N,
+                                     normal Tangent = 0.0,
+                                     output closure color BSDF = 0)
+{
+  int profile_id = (profile == "rectangular") ? 1 : 0;
+  int grating_id = (grating_type == "2d") ? 1 : 0;
+
+  BSDF = Color * diffraction_grating(Normal,
+                                     Tangent,
+                                     Roughness,
+                                     Pitch[0],
+                                     Pitch[1],
+                                     GrooveDepth[0],
+                                     GrooveDepth[1],
+                                     DutyCycle[0],
+                                     DutyCycle[1],
+                                     Rotation[0],
+                                     Rotation[1],
+                                     profile_id,
+                                     grating_id);
+}

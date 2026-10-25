@@ -31,6 +31,7 @@ set(SRC_KERNEL_CLOSURE_HEADERS
   closure/bsdf_diffraction_interface.h
   closure/bsdf_diffraction_smooth.h
   closure/bsdf_diffraction.h
+  closure/bsdf_diffraction_grating.h
   closure/bsdf_diffraction_ashikhmin.h
   closure/bsdf_diffraction_conductor.h
   closure/bsdf_diffraction_dielectric.h

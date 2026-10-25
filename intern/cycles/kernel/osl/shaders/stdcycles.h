@@ -27,6 +27,19 @@ closure color diffuse_toon(normal N, float size, float smooth) BUILTIN;
 closure color glossy_toon(normal N, float size, float smooth) BUILTIN;
 closure color ashikhmin_velvet(normal N, float sigma) BUILTIN;
 closure color ambient_occlusion() BUILTIN;
+closure color diffraction_grating(normal N,
+                                  vector T,
+                                  float roughness,
+                                  float pitch_x,
+                                  float pitch_y,
+                                  float groove_depth_x,
+                                  float groove_depth_y,
+                                  float duty_cycle_x,
+                                  float duty_cycle_y,
+                                  float rotation_x,
+                                  float rotation_y,
+                                  int profile,
+                                  int grating_type) BUILTIN;
 closure color diffraction_smooth(normal N, vector T, int cache_handle,
                                  float pitch, float upper_index, float lower_index) BUILTIN;
 closure color diffraction_fast(normal N, vector T, float pitch, float upper_index,

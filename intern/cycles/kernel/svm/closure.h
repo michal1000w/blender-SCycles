@@ -64,6 +64,9 @@ ccl_device_inline int svm_node_closure_bsdf_skip(int offset, const uint type)
     case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID:
       offset += sizeof(SVMNodeDiffractionSmoothBsdfData) / sizeof(uint);
       break;
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      offset += sizeof(SVMNodeDiffractionGratingBsdfData) / sizeof(uint);
+      break;
     case CLOSURE_BSDF_MICROFACET_GGX_REFRACTION_ID:
     case CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID:
       offset += sizeof(SVMNodeRefractionBsdfData) / sizeof(uint);
@@ -737,6 +740,51 @@ ccl_device
                                     data.reflection_budget, data.transmission_budget,
                                     data.ridge_extinction,
                                     data.ridge_table, data.groove_table, data.substrate_table);
+      break;
+    }
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID: {
+      const ccl_global SVMNodeDiffractionGratingBsdfData &bsdf_data =
+          svm_node_get<SVMNodeDiffractionGratingBsdfData>(kg, &offset);
+
+#ifdef __CAUSTICS_TRICKS__
+      if (!kernel_data.integrator.caustics_reflective &&
+          (ray_visibility & PATH_RAY_VISIBILITY_DIFFUSE))
+      {
+        break;
+      }
+#endif
+      float3 N = stack_load_float3_default(stack, bsdf_data.normal_offset, sd->N);
+      N = safe_normalize_fallback(N, sd->N);
+
+      /* Tint at the hero wavelength of the path, like the other diffraction closures. */
+      const Spectrum weight = bsdf_spectral_transmission_color(
+          kg, sd, closure_weight * mix_weight);
+      ccl_private DiffractionGratingBsdf *bsdf = (ccl_private DiffractionGratingBsdf *)bsdf_alloc(
+          sd, sizeof(DiffractionGratingBsdf), weight);
+      if (!bsdf) {
+        break;
+      }
+
+      const float3 pitch = stack_load(stack, bsdf_data.pitch);
+      const float3 groove_depth = stack_load(stack, bsdf_data.groove_depth);
+      const float3 duty_cycle = stack_load(stack, bsdf_data.duty_cycle);
+      const float3 rotation = stack_load(stack, bsdf_data.rotation);
+      const float3 T = stack_valid(bsdf_data.tangent_offset) ?
+                           stack_load_float3(stack, bsdf_data.tangent_offset) :
+                           zero_float3();
+
+      bsdf->N = maybe_ensure_valid_specular_reflection(sd, N);
+      sd->runtime_flag |= bsdf_diffraction_grating_setup(
+          sd,
+          bsdf,
+          T,
+          stack_load(stack, bsdf_data.roughness),
+          make_float2(pitch.x, pitch.y),
+          make_float2(groove_depth.x, groove_depth.y),
+          make_float2(duty_cycle.x, duty_cycle.y),
+          make_float2(rotation.x, rotation.y),
+          bsdf_data.profile == NODE_DIFFRACTION_GRATING_RECTANGULAR,
+          bsdf_data.grating_type == NODE_DIFFRACTION_GRATING_2D);
       break;
     }
     case CLOSURE_BSDF_MICROFACET_GGX_ID:

@@ -869,6 +869,7 @@ void ShaderGraph::default_inputs(bool do_osl)
   GeometryNode *geom = nullptr;
   TextureCoordinateNode *texco = nullptr;
   VectorTransformNode *normal_transform = nullptr;
+  TangentNode *uv_tangent = nullptr;
 
   for (size_t i = 0; i < nodes.size(); i++) {
     ShaderNode *node = nodes[i];
@@ -937,6 +938,14 @@ void ShaderGraph::default_inputs(bool do_osl)
           }
 
           connect(geom->output("Tangent"), input);
+        }
+        else if (input->flags() & SocketType::LINK_TANGENT_UV) {
+          if (!uv_tangent) {
+            uv_tangent = create_node<TangentNode>();
+            uv_tangent->set_direction_type(NODE_TANGENT_UVMAP);
+          }
+
+          connect(uv_tangent->output("Tangent"), input);
         }
       }
     }

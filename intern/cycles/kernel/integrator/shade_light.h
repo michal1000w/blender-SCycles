@@ -72,9 +72,10 @@ ccl_device_inline ShaderEvalResult integrate_light_forward(
   float mis_weight;
 #ifdef __BDPT__
   const ccl_global KernelLight *klight = &kernel_data_fetch(lights, isect.prim);
-  const bool bdpt_emitter_supported = !(
-      (klight->type == LIGHT_POINT || klight->type == LIGHT_SPOT) && !klight->spot.is_sphere &&
-      klight->spot.radius > 0.0f);
+  const bool bdpt_emitter_supported =
+      !((klight->type == LIGHT_POINT || klight->type == LIGHT_SPOT) && !klight->spot.is_sphere &&
+        klight->spot.radius > 0.0f) &&
+      !(klight->type == LIGHT_AREA && area_light_is_collimated(&klight->area));
   mis_weight = (bdpt_enabled_for_emission(kg, state) && bdpt_emitter_supported) ?
                    bdpt_emission_mis_weight_lamp(
                        kg, state, klight, ray_P, ray_D, isect.t, light_eval.pdf) :

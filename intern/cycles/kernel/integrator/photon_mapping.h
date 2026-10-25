@@ -536,17 +536,27 @@ ccl_device_inline bool photon_sample_emitter(KernelGlobals kg,
                                                   rpos));
       const float area = ellipse ? M_PI_F * klight->area.len_u * klight->area.len_v * 0.25f :
                                    klight->area.len_u * klight->area.len_v;
+      /* A collimated beam is left to the camera path strategies, see bdpt_nee_mis_weight(). */
+      if (area_light_is_collimated(&klight->area)) {
+        return false;
+      }
       float direction_pdf;
-      sample_cos_hemisphere(klight->area.dir,
-                            make_float2(lcg_step_float(rng), lcg_step_float(rng)),
-                            &ray->D,
-                            &direction_pdf);
-      emission_cosine = direction_pdf * M_PI_F;
+      const float2 rand_direction = make_float2(lcg_step_float(rng), lcg_step_float(rng));
+      if (area_light_emission_cone_sin2(&klight->area) >= 1.0f) {
+        /* Whole hemisphere: the same samples as before cone sampling existed. */
+        sample_cos_hemisphere(klight->area.dir, rand_direction, &ray->D, &direction_pdf);
+        emission_cosine = direction_pdf * M_PI_F;
+      }
+      else {
+        emission_cosine = area_light_sample_emission_direction(
+            &klight->area, rand_direction, &ray->D, &direction_pdf);
+      }
       ray_pdf = direction_pdf / max(area, 1.0e-20f);
       eval_fac = M_1_PI_F * fabsf(klight->area.invarea);
       if (klight->area.normalize_spread > 0.0f) {
+        /* The attenuation takes the direction towards the light. */
         eval_fac *= area_light_spread_attenuation(
-            ray->D, klight->area.dir, klight->area.tan_half_spread, klight->area.normalize_spread);
+            -ray->D, klight->area.dir, klight->area.tan_half_spread, klight->area.normalize_spread);
       }
     }
     else if (type == LIGHT_POINT || type == LIGHT_SPOT) {

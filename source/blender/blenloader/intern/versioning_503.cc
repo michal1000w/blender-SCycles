@@ -15,8 +15,7 @@
 #include "DNA_curves_types.h"
 #include "DNA_grease_pencil_types.h"
 #include "DNA_mesh_types.h"
-#include "DNA_modifier_types.h"
-#include "DNA_node_tree_interface_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_scene_types.h"
@@ -27,6 +26,7 @@
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector_c.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_sys_types.hh"
 
@@ -346,6 +346,72 @@ void do_versions_after_linking_503(FileData * /*fd*/, Main *bmain)
    *
    * \note Keep this message at the bottom of the function.
    */
+}
+
+/* The Grating model (Al-Toto's Diffraction BSDF) is the default of the Diffraction BSDF node:
+ * nodes saved with the physical Fast or Realistic models by builds where those were the default
+ * are switched to it. The settings that have a meaning in the Grating model are carried over: a 1D
+ * rectangular (lamellar) grating with the same pitch, depth and duty cycle, grooves across the same
+ * tangent and no roughness, like the smooth physical models. The color is scaled by the
+ * normal-incidence reflectance of the substrate so that the brightness stays similar; the
+ * transmission of dielectric gratings is lost, the Grating model only reflects. Nodes marked with
+ * #SHD_DIFFRACTION_FLAG_GRATING_DEFAULT were created (or already converted) by a build with this
+ * default and keep the model they were saved with. */
+static void version_diffraction_bsdf_grating_default(Main *bmain)
+{
+  FOREACH_NODETREE_BEGIN (bmain, ntree, id) {
+    if (ntree->type != NTREE_SHADER) {
+      continue;
+    }
+    for (bNode &node : ntree->nodes) {
+      if (!STREQ(node.idname, "ShaderNodeBsdfDiffraction") || node.storage == nullptr) {
+        continue;
+      }
+      NodeShaderDiffraction &storage = *static_cast<NodeShaderDiffraction *>(node.storage);
+      if (storage.flag & SHD_DIFFRACTION_FLAG_GRATING_DEFAULT) {
+        continue;
+      }
+      storage.flag |= SHD_DIFFRACTION_FLAG_GRATING_DEFAULT;
+      if (storage.quality == SHD_DIFFRACTION_MODEL_GRATING) {
+        continue;
+      }
+      storage.quality = SHD_DIFFRACTION_MODEL_GRATING;
+      node.custom1 = SHD_DIFFRACTION_RECTANGULAR;
+      node.custom2 = SHD_DIFFRACTION_GRATING_1D;
+
+      const auto set_vector = [&](const char *name, const int subtype, const float3 value) {
+        bNodeSocket *socket = version_node_add_socket_if_not_exist(
+            ntree, &node, SOCK_IN, SOCK_VECTOR, subtype, name, name);
+        copy_v3_v3(socket->default_value_typed<bNodeSocketValueVector>()->value, value);
+      };
+      const float pitch_um = std::max(storage.pitch, 50.0f) / 1000.0f;
+      set_vector("Pitch", PROP_NONE, float3(pitch_um));
+      set_vector("Groove Depth", PROP_NONE, float3(std::max(storage.depth, 0.0f)));
+      set_vector("Duty Cycle", PROP_NONE, float3(std::clamp(storage.duty_cycle, 0.01f, 0.99f)));
+      /* Zero rotation: grooves across the tangent, as in the physical models. */
+      set_vector("Rotation", PROP_FACTOR, float3(0.0f, 0.25f, 0.0f));
+      bNodeSocket *roughness = version_node_add_socket_if_not_exist(
+          ntree, &node, SOCK_IN, SOCK_FLOAT, PROP_FACTOR, "Roughness", "Roughness");
+      roughness->default_value_typed<bNodeSocketValueFloat>()->value = 0.0f;
+
+      /* Reflectance of the substrate seen from the incident medium. An optical constants table
+       * describes a conductor, which reflects most light. */
+      if (node.id == nullptr) {
+        const float n1 = std::max(storage.incident_ior, 1e-3f);
+        const float n2 = storage.substrate_ior;
+        const float k2 = storage.substrate_extinction;
+        const float reflectance = std::clamp(
+            ((n2 - n1) * (n2 - n1) + k2 * k2) / std::max((n2 + n1) * (n2 + n1) + k2 * k2, 1e-6f),
+            0.0f,
+            1.0f);
+        if (bNodeSocket *color = bke::node_find_socket(node, SOCK_IN, UString("Color"))) {
+          float *value = color->default_value_typed<bNodeSocketValueRGBA>()->value;
+          mul_v3_fl(value, reflectance);
+        }
+      }
+    }
+  }
+  FOREACH_NODETREE_END;
 }
 
 void blo_do_versions_503(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
@@ -741,6 +807,11 @@ void blo_do_versions_503(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   for (Mesh &mesh : bmain->meshes) {
     bke::mesh_skin_to_generic(mesh);
   }
+
+  /* Like the conversion above, this runs for every file: the Diffraction BSDF nodes it converts
+   * are marked by a flag instead of the file version, so that this fork's file version stays the
+   * one of upstream. */
+  version_diffraction_bsdf_grating_default(bmain);
 }
 
 }  // namespace blender

@@ -2798,8 +2798,37 @@ struct NodeShaderDiffraction {
   float groove_ior = 1.0f;
   float substrate_ior = 1.5f;
   float substrate_extinction = 0.0f;
-  /* Zero preserves the physical model in files written before this selector. */
+  /* eNodeDiffraction_Model. Zero preserves the physical model in files written before this
+   * selector. */
   int quality = 0;
+  /* eNodeDiffraction_Flag. */
+  int flag = 0;
+};
+
+/* NodeShaderDiffraction::flag. */
+enum eNodeDiffraction_Flag {
+  /* The model was chosen in a build where Grating is the default model. Nodes without it are
+   * converted to the Grating model when a file is read, see #blo_do_versions_503. */
+  SHD_DIFFRACTION_FLAG_GRATING_DEFAULT = (1 << 0),
+};
+
+/* NodeShaderDiffraction::quality: model of the Diffraction BSDF node. */
+enum eNodeDiffraction_Model {
+  SHD_DIFFRACTION_MODEL_REALISTIC = 0,
+  SHD_DIFFRACTION_MODEL_FAST = 1,
+  SHD_DIFFRACTION_MODEL_GRATING = 2,
+};
+
+/* Groove cross section of the Grating model (Diffraction BSDF node custom1). */
+enum eNodeDiffraction_Profile : short {
+  SHD_DIFFRACTION_SINUSOIDAL = 0,
+  SHD_DIFFRACTION_RECTANGULAR = 1,
+};
+
+/* Periodic directions of the Grating model (Diffraction BSDF node custom2). */
+enum eNodeDiffraction_Grating : short {
+  SHD_DIFFRACTION_GRATING_1D = 0,
+  SHD_DIFFRACTION_GRATING_2D = 1,
 };
 
 struct NodeShaderHairPrincipled {
