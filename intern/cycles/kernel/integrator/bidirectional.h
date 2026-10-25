@@ -571,7 +571,10 @@ ccl_device_inline_transport float bdpt_emission_mis_weight_lamp(
   }
 
   const float direct_pdf_a = kernel_data.integrator.distribution_pdf_lights / area;
-  const float emission_pdf_w = direct_pdf_a * cos_at_light * M_1_PI_F;
+  const float emission_pdf_w = direct_pdf_a *
+                               (klight->type == LIGHT_AREA ?
+                                    area_light_emission_direction_pdf(&klight->area, -ray_D) :
+                                    cos_at_light * M_1_PI_F);
   const BDPTMISWeight d_vcm = BDPTMISWeight::from_encoded(
                                   INTEGRATOR_STATE(state, path, bdpt_d_vcm)) *
                               sqr(distance) / cos_at_light;
@@ -719,6 +722,20 @@ ccl_device_inline_transport BDPTMISWeight bdpt_camera_vertex_alternatives(
  * The current implementation evaluates the exact emission density for triangle and area lights;
  * other analytic lights retain the regular two-strategy balance weight until their singular
  * measures are handled explicitly. */
+/* Density of a light subpath leaving an area light in direction `D`, divided by the cosine to
+ * the light normal: 1 / pi without spread, see area_light_emission_direction_pdf(). */
+ccl_device_inline float bdpt_area_emission_direction_ratio(const ccl_global KernelLight *klight,
+                                                           const float3 D)
+{
+  const float cos_theta = dot(klight->area.dir, D);
+  if (!(cos_theta > 0.0f)) {
+    return 0.0f;
+  }
+  return area_light_emission_cone_sin2(&klight->area) >= 1.0f ?
+             M_1_PI_F :
+             area_light_emission_direction_pdf(&klight->area, D) / cos_theta;
+}
+
 ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
                                                       IntegratorState state,
                                                       ccl_private ShaderData *sd,
@@ -727,6 +744,13 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
 {
   if (vcm_merge_only(kg)) {
     return 0.0f;
+  }
+  if (ls->type == LIGHT_AREA &&
+      area_light_is_collimated(&kernel_data_fetch(lights, ls->prim).area))
+  {
+    /* No light subpath leaves a collimated beam (see photon_sample_emitter()) and the emission
+     * hit of the camera path uses the regular weight: keep the regular two-strategy partition. */
+    return light_sample_mis_weight_nee(kg, ls->pdf, bsdf_pdf);
   }
   const float direct_pdf = bdpt_safe_pdf(ls->pdf);
   BDPTMISWeight w_light = BDPTMISWeight(bsdf_pdf) / direct_pdf;
@@ -745,6 +769,9 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
 
   float emission_position_pdf = 0.0f;
   float emission_side_pdf = 1.0f;
+  /* Emission direction density divided by the cosine at the emitter: 1 / pi for cosine-weighted
+   * hemispheres. */
+  float emission_direction_ratio = M_1_PI_F;
   BDPTMISWeight w_camera = 0.0f;
   if (ls->type == LIGHT_TRIANGLE) {
     float flat_selection;
@@ -762,6 +789,7 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
                                  klight->area.len_u * klight->area.len_v;
     emission_position_pdf = kernel_data.integrator.distribution_pdf_lights /
                             max(area, 1.0e-20f);
+    emission_direction_ratio = bdpt_area_emission_direction_ratio(klight, -ls->D);
   }
   else if (ls->type == LIGHT_BACKGROUND || ls->type == LIGHT_SUN) {
     if (ls->type == LIGHT_SUN) {
@@ -808,7 +836,8 @@ ccl_device_inline_transport float bdpt_nee_mis_weight(KernelGlobals kg,
     const float reverse_pdf = needs_reverse_pdf ? bdpt_reverse_pdf(kg, state, sd, ls->D) : 0.0f;
     const float cos_camera = max(fabsf(dot(sd->Ng, ls->D)), 1.0e-8f);
     const BDPTMISWeight emission_to_direct = BDPTMISWeight(emission_position_pdf) *
-                                             emission_side_pdf * cos_camera / M_PI_F / direct_pdf;
+                                             emission_side_pdf * cos_camera *
+                                             emission_direction_ratio / direct_pdf;
     w_camera = emission_to_direct *
                bdpt_camera_vertex_alternatives(kg, state, sd, reverse_pdf, true, merge_here);
   }
@@ -836,6 +865,43 @@ ccl_device_inline float3 bdpt_perspective_image_point(KernelGlobals kg,
     }
   }
   return image_P;
+}
+
+/* Raster position of a point of the perspective image plane: solves
+ * `image_delta = raster.x * image_dx + raster.y * image_dy` in the least squares sense.
+ *
+ * The image plane of `rastertocamera` lies at the near clipping distance, where one pixel is as
+ * small as 1e-6 with a near clip of 1 mm, so the determinant of the 2x2 system goes down to
+ * 1e-24. Scale everything to the plane at unit distance, where a pixel spans its view angle,
+ * and only reject pixel axes that are (nearly) parallel. An absolute threshold here made light
+ * subpath connections to the sensor fail for every pixel at small clip starts, while MIS still
+ * weighted that strategy: BDPT lost up to 20% of the energy, depending on resolution, clip
+ * start and light. */
+ccl_device_inline bool bdpt_image_plane_to_raster(const float3 image_dx,
+                                                  const float3 image_dy,
+                                                  const float3 image_delta,
+                                                  const float image_distance,
+                                                  ccl_private float3 *raster)
+{
+  if (!(image_distance > 0.0f)) {
+    return false;
+  }
+  const float inv_distance = 1.0f / image_distance;
+  const float3 dx = image_dx * inv_distance;
+  const float3 dy = image_dy * inv_distance;
+  const float3 delta = image_delta * inv_distance;
+  const float xx = dot(dx, dx);
+  const float xy = dot(dx, dy);
+  const float yy = dot(dy, dy);
+  const float determinant = xx * yy - xy * xy;
+  if (!(xx > 0.0f) || !(yy > 0.0f) || !(determinant > 1.0e-6f * xx * yy)) {
+    return false;
+  }
+  const float rx = dot(delta, dx);
+  const float ry = dot(delta, dy);
+  *raster = make_float3(
+      (rx * yy - ry * xy) / determinant, (ry * xx - rx * xy) / determinant, 0.0f);
+  return isfinite_safe(*raster);
 }
 
 ccl_device_inline_transport void bdpt_recursive_mis_before_measure_conversion(
@@ -946,6 +1012,12 @@ ccl_device_inline_transport float bdpt_volume_nee_mis_weight(
     const ccl_private LightSample *ls,
     const float phase_pdf)
 {
+  if (ls->type == LIGHT_AREA &&
+      area_light_is_collimated(&kernel_data_fetch(lights, ls->prim).area))
+  {
+    /* See bdpt_nee_mis_weight(). */
+    return light_sample_mis_weight_nee(kg, ls->pdf, phase_pdf);
+  }
   const float direct_pdf = bdpt_safe_pdf(ls->pdf);
   BDPTMISWeight w_light = BDPTMISWeight(phase_pdf) / direct_pdf;
 
@@ -981,6 +1053,9 @@ ccl_device_inline_transport float bdpt_volume_nee_mis_weight(
 
   float emission_position_pdf = 0.0f;
   float emission_side_pdf = 1.0f;
+  /* Emission direction density divided by the cosine at the emitter: 1 / pi for cosine-weighted
+   * hemispheres. */
+  float emission_direction_ratio = M_1_PI_F;
   BDPTMISWeight w_camera = 0.0f;
   if (ls->type == LIGHT_TRIANGLE) {
     float flat_selection;
@@ -998,6 +1073,7 @@ ccl_device_inline_transport float bdpt_volume_nee_mis_weight(
                            klight->area.len_u * klight->area.len_v;
     emission_position_pdf = kernel_data.integrator.distribution_pdf_lights /
                             max(area, 1.0e-20f);
+    emission_direction_ratio = bdpt_area_emission_direction_ratio(klight, -ls->D);
   }
   else if (ls->type == LIGHT_BACKGROUND || ls->type == LIGHT_SUN) {
     if (ls->type == LIGHT_SUN) {
@@ -1033,7 +1109,8 @@ ccl_device_inline_transport float bdpt_volume_nee_mis_weight(
 
   if (emission_position_pdf > 0.0f) {
     const BDPTMISWeight emission_to_direct = BDPTMISWeight(emission_position_pdf) *
-                                             emission_side_pdf / M_PI_F / direct_pdf;
+                                             emission_side_pdf * emission_direction_ratio /
+                                             direct_pdf;
     w_camera = emission_to_direct * (d_vcm + d_vc * reverse_pdf);
   }
   return (BDPTMISWeight(1.0f) + w_light + w_camera).inverse();
@@ -1596,17 +1673,9 @@ ccl_device_inline bool bdpt_sample_camera_endpoint(KernelGlobals kg,
     const float3 projected_on_image = projection_camera *
                                       (image_origin.z / projection_camera.z);
     const float3 image_delta = projected_on_image - image_origin;
-    const float xx = dot(image_dx, image_dx);
-    const float xy = dot(image_dx, image_dy);
-    const float yy = dot(image_dy, image_dy);
-    const float determinant = xx * yy - xy * xy;
-    if (!(determinant > 1.0e-20f)) {
+    if (!bdpt_image_plane_to_raster(image_dx, image_dy, image_delta, image_origin.z, raster)) {
       return false;
     }
-    const float rx = dot(image_delta, image_dx);
-    const float ry = dot(image_delta, image_dy);
-    *raster = make_float3(
-        (rx * yy - ry * xy) / determinant, (ry * xx - rx * xy) / determinant, 0.0f);
     *sensor_P = transform_point(&camera_to_world, lens_P);
 
     const float3 image_P = bdpt_perspective_image_point(kg, *raster, vertex_time);
@@ -1748,17 +1817,9 @@ ccl_device_inline bool bdpt_perspective_ray_to_raster(KernelGlobals kg,
   const float3 projected_on_image = projection_camera *
                                     (image_origin.z / projection_camera.z);
   const float3 image_delta = projected_on_image - image_origin;
-  const float xx = dot(image_dx, image_dx);
-  const float xy = dot(image_dx, image_dy);
-  const float yy = dot(image_dy, image_dy);
-  const float determinant = xx * yy - xy * xy;
-  if (!(determinant > 1.0e-20f)) {
+  if (!bdpt_image_plane_to_raster(image_dx, image_dy, image_delta, image_origin.z, raster)) {
     return false;
   }
-  const float rx = dot(image_delta, image_dx);
-  const float ry = dot(image_delta, image_dy);
-  *raster = make_float3(
-      (rx * yy - ry * xy) / determinant, (ry * xx - rx * xy) / determinant, 0.0f);
 
   const float3 image_P = bdpt_perspective_image_point(kg, *raster, time);
   const float3 image_X = bdpt_perspective_image_point(

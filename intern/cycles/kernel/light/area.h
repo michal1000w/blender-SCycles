@@ -101,6 +101,66 @@ ccl_device_inline float area_light_rect_sample(const float3 P,
   return 1.0f / S;
 }
 
+/* Emission directions of light subpaths (BDPT, photon mapping, VCM).
+ *
+ * An area light emits cosine-weighted into its hemisphere, and with a spread below 180 degrees
+ * only inside the cone of half angle `atan(tan_half_spread)` around its normal, attenuated
+ * towards its border (see area_light_spread_attenuation()). Light subpaths are launched
+ * cosine-weighted inside that cone: the hemisphere outside of it carries no light. A spread of
+ * zero is a collimated beam, a direction that no light subpath can sample. */
+
+ccl_device_inline bool area_light_is_collimated(const ccl_global KernelAreaLight *light)
+{
+  return light->normalize_spread > 0.0f && light->tan_half_spread == 0.0f;
+}
+
+/* Squared sine of the half angle of the emission cone, or 1 for the whole hemisphere. */
+ccl_device_inline float area_light_emission_cone_sin2(const ccl_global KernelAreaLight *light)
+{
+  if (!(light->normalize_spread > 0.0f) || !(light->tan_half_spread < 1e18f)) {
+    return 1.0f;
+  }
+  const float tan2 = sqr(light->tan_half_spread);
+  return tan2 / (1.0f + tan2);
+}
+
+/* Solid angle density of an emission direction `D` (pointing away from the light). */
+ccl_device_inline float area_light_emission_direction_pdf(const ccl_global KernelAreaLight *light,
+                                                          const float3 D)
+{
+  const float cos_theta = dot(light->dir, D);
+  if (!(cos_theta > 0.0f)) {
+    return 0.0f;
+  }
+  const float sin2 = area_light_emission_cone_sin2(light);
+  if (sin2 >= 1.0f) {
+    return cos_theta * M_1_PI_F;
+  }
+  if (1.0f - sqr(cos_theta) > sin2) {
+    return 0.0f;
+  }
+  return cos_theta / (M_PI_F * sin2);
+}
+
+/* Sample an emission direction with area_light_emission_direction_pdf(). Returns its cosine
+ * to the light normal. */
+ccl_device_inline float area_light_sample_emission_direction(
+    const ccl_global KernelAreaLight *light,
+    const float2 rand,
+    ccl_private float3 *D,
+    ccl_private float *pdf)
+{
+  const float sin2 = area_light_emission_cone_sin2(light);
+  /* Uniform on the disk below the cone: cosine-weighted directions inside it. */
+  const float2 disk = sample_uniform_disk(rand) * sqrtf(sin2);
+  const float cos_theta = safe_sqrtf(1.0f - sqr(disk.x) - sqr(disk.y));
+  float3 T, B;
+  make_orthonormals(light->dir, &T, &B);
+  *D = disk.x * T + disk.y * B + cos_theta * light->dir;
+  *pdf = cos_theta / (M_PI_F * sin2);
+  return cos_theta;
+}
+
 /* Light spread. */
 
 ccl_device float area_light_spread_attenuation(const float3 D,

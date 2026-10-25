@@ -39,6 +39,10 @@ EXPECT = {
     "ShaderNodeVolumeIOR": ["IOR", "Temperature", "Attribute", "Ambient Temperature", "Pressure", "Gas IOR", "Strength"],
     "ShaderNodeVolumePrincipled": ["IOR", "Heat Refraction"],
 }
+if "grating_type" in bpy.types.ShaderNodeBsdfDiffraction.bl_rna.properties:
+    # New nodes use the Grating model.
+    EXPECT["ShaderNodeBsdfDiffraction"] = ["Roughness", "Pitch", "Groove Depth", "Duty Cycle",
+                                           "Rotation", "Tangent"]
 VOLUME_NODES = ("ShaderNodeVolumeFast", "ShaderNodeVolumeIOR", "ShaderNodeVolumePrincipled")
 if not hasattr(bpy.types, "ShaderNodeVolumeIOR"):
     # A build from before the volume index of refraction.

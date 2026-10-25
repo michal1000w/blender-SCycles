@@ -675,6 +675,22 @@ static ShaderNode *add_node(Scene *scene,
     }
     node = glossy;
   }
+  else if (b_node.is_type("ShaderNodeBsdfDiffraction"_ustr) &&
+           (b_node.storage == nullptr ||
+            static_cast<const blender::NodeShaderDiffraction *>(b_node.storage)->quality ==
+                blender::SHD_DIFFRACTION_MODEL_GRATING))
+  {
+    /* Grating model. Nodes without storage come from builds whose Diffraction BSDF only has this
+     * model (custom1 = profile, custom2 = grating type). */
+    DiffractionGratingBsdfNode *grating = graph->create_node<DiffractionGratingBsdfNode>();
+    grating->set_profile(b_node.custom1 == blender::SHD_DIFFRACTION_SINUSOIDAL ?
+                             NODE_DIFFRACTION_GRATING_SINUSOIDAL :
+                             NODE_DIFFRACTION_GRATING_RECTANGULAR);
+    grating->set_grating_type(b_node.custom2 == blender::SHD_DIFFRACTION_GRATING_2D ?
+                                  NODE_DIFFRACTION_GRATING_2D :
+                                  NODE_DIFFRACTION_GRATING_1D);
+    node = grating;
+  }
   else if (b_node.is_type("ShaderNodeBsdfDiffraction"_ustr)) {
     const auto &storage = *static_cast<const blender::NodeShaderDiffraction *>(b_node.storage);
     auto *grating = graph->create_node<DiffractionSmoothBsdfNode>();
@@ -1658,6 +1674,24 @@ static void add_nodes(Scene *scene,
   const bool polarization = effects && get_boolean(cscene, "use_polarization");
   const vector<ShaderNode *> authored_nodes(graph->nodes.begin(), graph->nodes.end());
   for (ShaderNode *node : authored_nodes) {
+    if (!material && node->type == DiffractionGratingBsdfNode::get_node_type()) {
+      /* Without material diffraction a grating reflects like its specular order: a glossy
+       * surface with the same roughness and color. */
+      auto *grating = static_cast<DiffractionGratingBsdfNode *>(node);
+      auto *glossy = graph->create_node<GlossyBsdfNode>();
+      glossy->set_distribution(CLOSURE_BSDF_MICROFACET_GGX_ID);
+      glossy->set_color(grating->get_color());
+      glossy->set_roughness(grating->get_roughness());
+      for (const char *name : {"Color", "Roughness", "Normal"}) {
+        const ShaderInput *from = grating->input(name);
+        ShaderInput *to = glossy->input(name);
+        if (from && to && from->link) {
+          graph->connect(from->link, to);
+        }
+      }
+      graph->relink(grating->output("BSDF"), glossy->output("BSDF"));
+      continue;
+    }
     if (!material && node->type == DiffractionSmoothBsdfNode::get_node_type()) {
       auto *grating = static_cast<DiffractionSmoothBsdfNode *>(node);
       BsdfNode *carrier;

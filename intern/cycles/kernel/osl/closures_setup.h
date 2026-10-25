@@ -735,6 +735,40 @@ ccl_device void osl_closure_thin_subsurface_setup(KernelGlobals kg,
 
 /* The cache is prepared by the host, shared with the SVM physical closure.
  * This closure requires the shader's sampled-wavelength metadata. */
+/* Grating model of the Diffraction BSDF, same setup as SVM (kernel/svm/closure.h). */
+ccl_device void osl_closure_diffraction_grating_setup(
+    KernelGlobals kg,
+    ccl_private ShaderData *sd,
+    const PathRayVisibility path_visibility,
+    const uint32_t /*path_flag*/,
+    const float3 weight,
+    const ccl_private DiffractionGratingClosure *closure,
+    float3 * /*layer_albedo*/)
+{
+  if (osl_closure_skip(kg, path_visibility, LABEL_GLOSSY | LABEL_REFLECT)) {
+    return;
+  }
+
+  ccl_private DiffractionGratingBsdf *bsdf = (ccl_private DiffractionGratingBsdf *)bsdf_alloc(
+      sd, sizeof(DiffractionGratingBsdf), bsdf_spectral_transmission_color(kg, sd, weight));
+  if (!bsdf) {
+    return;
+  }
+
+  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  sd->runtime_flag |= bsdf_diffraction_grating_setup(
+      sd,
+      bsdf,
+      closure->T,
+      closure->roughness,
+      make_float2(closure->pitch_x, closure->pitch_y),
+      make_float2(closure->groove_depth_x, closure->groove_depth_y),
+      make_float2(closure->duty_cycle_x, closure->duty_cycle_y),
+      make_float2(closure->rotation_x, closure->rotation_y),
+      closure->profile == NODE_DIFFRACTION_GRATING_RECTANGULAR,
+      closure->grating_type == NODE_DIFFRACTION_GRATING_2D);
+}
+
 ccl_device void osl_closure_diffraction_smooth_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,

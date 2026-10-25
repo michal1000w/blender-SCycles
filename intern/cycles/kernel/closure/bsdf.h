@@ -12,6 +12,7 @@
 #include "kernel/closure/bsdf_diffuse_ramp.h"
 #include "kernel/closure/bsdf_microfacet.h"
 #include "kernel/closure/bsdf_diffraction.h"
+#include "kernel/closure/bsdf_diffraction_grating.h"
 #include "kernel/closure/bsdf_diffraction_dielectric.h"
 #include "kernel/closure/bsdf_diffraction_conductor.h"
 #include "kernel/closure/bsdf_diffraction_ashikhmin.h"
@@ -53,8 +54,10 @@ ccl_device_inline float bsdf_get_specular_roughness_squared(const ccl_private Sh
         (const ccl_private DiffractionThinSheetBsdf *)sc;
     return b->return_only ? 1.0f : sqr(b->port.alpha);
   }
-  if (sc->type == CLOSURE_BSDF_DIFFRACTION_ID ||
-      sc->type == CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID) {
+  if (sc->type == CLOSURE_BSDF_DIFFRACTION_GRATING_ID) {
+    return sqr(((const ccl_private DiffractionGratingBsdf *)sc)->alpha);
+  }
+  if (sc->type == CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID) {
     const ccl_private DiffractionBsdf *bsdf = (const ccl_private DiffractionBsdf *)sc;
     return bsdf->param.alpha_x * bsdf->param.alpha_y;
   }
@@ -333,8 +336,9 @@ ccl_device_inline int bsdf_sample(KernelGlobals kg,
     case CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID:
       label=bsdf_diffraction_ashikhmin_sample(sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
       break;
-    case CLOSURE_BSDF_DIFFRACTION_ID:
-      label = bsdf_diffraction_sample(sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      label = bsdf_diffraction_grating_sample(
+          sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
       break;
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID:
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID:
@@ -510,9 +514,10 @@ ccl_device_inline void bsdf_roughness_eta(const ccl_private ShaderClosure *sc,
       *roughness=make_float2(b->extra->param.alpha_x,b->extra->param.alpha_y);*eta=1;
       break;
     }
-    case CLOSURE_BSDF_DIFFRACTION_ID: {
-      const ccl_private DiffractionBsdf *bsdf = (const ccl_private DiffractionBsdf *)sc;
-      *roughness = make_float2(bsdf->param.alpha_x, bsdf->param.alpha_y);
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID: {
+      const ccl_private DiffractionGratingBsdf *bsdf =
+          (const ccl_private DiffractionGratingBsdf *)sc;
+      *roughness = make_float2(bsdf->alpha, bsdf->alpha);
       *eta = 1.0f;
       break;
     }
@@ -658,8 +663,8 @@ ccl_device_inline int bsdf_label(const KernelGlobals kg,
       label=LABEL_REFLECT | (max(b->param.alpha_x,b->param.alpha_y)<=1e-4f ? LABEL_SINGULAR : LABEL_GLOSSY);
       break;
     }
-    case CLOSURE_BSDF_DIFFRACTION_ID:
-      label = bsdf_diffraction_label((const ccl_private DiffractionBsdf *)sc);
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      label = LABEL_REFLECT | LABEL_GLOSSY;
       break;
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
       label = LABEL_REFLECT | LABEL_GLOSSY;
@@ -983,8 +988,8 @@ ccl_device_inline
       eval=bsdf_diffraction_conductor_eval(kg,sc,sd->wi,wo,pdf);break;
     case CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID:
       eval=bsdf_diffraction_ashikhmin_eval(sc,sd->wi,wo,pdf);break;
-    case CLOSURE_BSDF_DIFFRACTION_ID:
-      eval = bsdf_diffraction_eval(sc, sd->wi, wo, pdf);
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      eval = bsdf_diffraction_grating_eval(sc, sd->wi, wo, pdf);
       break;
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID:
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID:
@@ -1092,12 +1097,9 @@ ccl_device void bsdf_blur(ccl_private ShaderClosure *sc, const float roughness)
       b->extra->carrier.alpha_y=b->extra->param.alpha_y;
       break;
     }
-    case CLOSURE_BSDF_DIFFRACTION_ID: {
-      ccl_private DiffractionBsdf *bsdf = (ccl_private DiffractionBsdf *)sc;
-      bsdf->param.alpha_x = max(bsdf->param.alpha_x, roughness);
-      bsdf->param.alpha_y = max(bsdf->param.alpha_y, roughness);
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      bsdf_diffraction_grating_blur(sc, roughness);
       break;
-    }
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
       bsdf_ashikhmin_shirley_blur(sc, roughness);
       break;

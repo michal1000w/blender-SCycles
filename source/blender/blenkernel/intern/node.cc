@@ -1988,6 +1988,15 @@ static void remove_unsupported_sockets(ListBaseT<bNodeSocket> *sockets,
 static void node_blend_read_data_storage(BlendDataReader *reader, bNodeTree *ntree, bNode *node)
 {
   if (!node->storage) {
+    if (STREQ(node->idname, "ShaderNodeBsdfDiffraction")) {
+      /* Builds where the Grating model is the only model of the Diffraction BSDF keep its
+       * settings in custom1/custom2 and write no storage. Without storage the node would become
+       * undefined (see node_set_typeinfo), so create the storage of that model. */
+      NodeShaderDiffraction *storage = MEM_new<NodeShaderDiffraction>(__func__);
+      storage->quality = SHD_DIFFRACTION_MODEL_GRATING;
+      storage->flag = SHD_DIFFRACTION_FLAG_GRATING_DEFAULT;
+      node->storage = storage;
+    }
     return;
   }
 

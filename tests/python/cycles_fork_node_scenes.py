@@ -72,7 +72,24 @@ def main():
     names = args.scenes.split(",") if args.scenes != "all" else None
     def want(n): return names is None or n in names
     if want("diffraction_node"):
-        node_scene(args, "ShaderNodeBsdfDiffraction", tangent=True); finish(args, "diffraction_node")
+        # The Fast model, the default of new nodes before the Grating model was added.
+        node_scene(args, "ShaderNodeBsdfDiffraction", {"Color": (1.0, 1.0, 1.0, 1.0)}, tangent=True,
+                   props={"quality": "FAST"})
+        finish(args, "diffraction_node")
+    grating = "grating_type" in bpy.types.ShaderNodeBsdfDiffraction.bl_rna.properties
+    if want("diffraction_grating_1d") and grating:
+        node_scene(args, "ShaderNodeBsdfDiffraction",
+                   {"Roughness": 0.15, "Pitch": (1.2, 1.2, 1.2), "Groove Depth": (140, 140, 140)},
+                   tangent=True, props={"quality": "GRATING", "profile": "RECTANGULAR"})
+        finish(args, "diffraction_grating_1d")
+    if want("diffraction_grating_2d") and grating:
+        # Default (UV map) tangent of the sphere.
+        node_scene(args, "ShaderNodeBsdfDiffraction",
+                   {"Roughness": 0.2, "Pitch": (1.5, 2.2, 1.0), "Groove Depth": (120, 90, 0),
+                    "Rotation": (0.1, 0.3, 0.0)},
+                   props={"quality": "GRATING", "profile": "SINUSOIDAL",
+                          "grating_type": "GRATING_2D"})
+        finish(args, "diffraction_grating_2d")
     if want("fast_volume"):
         node_scene(args, "ShaderNodeVolumeFast", volume=True); finish(args, "fast_volume")
     if want("volume_ior") and hasattr(bpy.types, "ShaderNodeVolumeIOR"):

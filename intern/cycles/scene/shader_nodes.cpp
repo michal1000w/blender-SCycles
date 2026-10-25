@@ -2439,6 +2439,78 @@ void DiffractionSmoothBsdfNode::compile(OSLCompiler &compiler)
   compiler.add(this, "node_diffraction_smooth_bsdf");
 }
 
+/* Diffraction BSDF, Grating model */
+
+NODE_DEFINE(DiffractionGratingBsdfNode)
+{
+  NodeType *type = NodeType::add("diffraction_grating_bsdf", create, NodeType::SHADER);
+
+  SOCKET_IN_COLOR(color, "Color", make_float3(0.9f, 0.9f, 0.9f));
+  SOCKET_IN_NORMAL(normal, "Normal", zero_float3(), SocketType::LINK_NORMAL);
+  SOCKET_IN_FLOAT(surface_mix_weight, "SurfaceMixWeight", 0.0f, SocketType::SVM_INTERNAL);
+  /* The lattice follows the tangent of the default UV map unless a tangent is linked. */
+  SOCKET_IN_VECTOR(tangent, "Tangent", zero_float3(), SocketType::LINK_TANGENT_UV);
+
+  SOCKET_IN_FLOAT(roughness, "Roughness", 0.05f);
+  SOCKET_IN_VECTOR(pitch, "Pitch", make_float3(1.6f, 1.6f, 1.6f));
+  SOCKET_IN_VECTOR(groove_depth, "Groove Depth", make_float3(110.0f, 110.0f, 110.0f));
+  SOCKET_IN_VECTOR(duty_cycle, "Duty Cycle", make_float3(0.45f, 0.45f, 0.45f));
+  SOCKET_IN_VECTOR(rotation, "Rotation", make_float3(0.0f, 0.25f, 0.0f));
+
+  static NodeEnum profile_enum;
+  profile_enum.insert("sinusoidal", NODE_DIFFRACTION_GRATING_SINUSOIDAL);
+  profile_enum.insert("rectangular", NODE_DIFFRACTION_GRATING_RECTANGULAR);
+  SOCKET_ENUM(profile, "Profile", profile_enum, NODE_DIFFRACTION_GRATING_RECTANGULAR);
+
+  static NodeEnum grating_type_enum;
+  grating_type_enum.insert("1d", NODE_DIFFRACTION_GRATING_1D);
+  grating_type_enum.insert("2d", NODE_DIFFRACTION_GRATING_2D);
+  SOCKET_ENUM(grating_type, "Grating Type", grating_type_enum, NODE_DIFFRACTION_GRATING_1D);
+
+  SOCKET_OUT_CLOSURE(BSDF, "BSDF");
+
+  return type;
+}
+
+DiffractionGratingBsdfNode::DiffractionGratingBsdfNode() : BsdfNode(get_node_type())
+{
+  closure = CLOSURE_BSDF_DIFFRACTION_GRATING_ID;
+}
+
+void DiffractionGratingBsdfNode::attributes(Shader *shader, AttributeRequestSet *attributes)
+{
+  if (shader->has_surface_link() && !input("Tangent")->link) {
+    /* ShaderGraph::default_inputs() links a UV map Tangent node (LINK_TANGENT_UV). */
+    attributes->add(ATTR_STD_UV);
+    attributes->add(ATTR_STD_UV_TANGENT);
+  }
+
+  ShaderNode::attributes(shader, attributes);
+}
+
+void DiffractionGratingBsdfNode::compile(SVMCompiler &compiler)
+{
+  BsdfNode::compile(compiler,
+                    SVMNodeDiffractionGratingBsdfData{
+                        .roughness = compiler.input_float("Roughness"),
+                        .pitch = compiler.input_float3("Pitch"),
+                        .groove_depth = compiler.input_float3("Groove Depth"),
+                        .duty_cycle = compiler.input_float3("Duty Cycle"),
+                        .rotation = compiler.input_float3("Rotation"),
+                        .normal_offset = compiler.input_link("Normal"),
+                        .tangent_offset = compiler.input_link("Tangent"),
+                        .profile = (uint8_t)profile,
+                        .grating_type = (uint8_t)grating_type,
+                    });
+}
+
+void DiffractionGratingBsdfNode::compile(OSLCompiler &compiler)
+{
+  compiler.parameter(this, "profile");
+  compiler.parameter(this, "grating_type");
+  compiler.add(this, "node_diffraction_grating_bsdf");
+}
+
 /* Metallic BSDF Closure */
 
 NODE_DEFINE(MetallicBsdfNode)

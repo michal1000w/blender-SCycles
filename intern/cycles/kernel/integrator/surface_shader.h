@@ -534,9 +534,6 @@ ccl_device_inline bool surface_shader_gpu_guiding_continuous(const ccl_private S
   }
   if ((sc->type == CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID || sc->type == CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID)) return !bsdf_microfacet_has_delta(sc);
   if (bsdf_is_diffraction_conductor(sc->type)) return !bsdf_microfacet_has_delta(sc);
-  if (sc->type == CLOSURE_BSDF_DIFFRACTION_ID) {
-    return (bsdf_diffraction_label((const ccl_private DiffractionBsdf *)sc) & LABEL_SINGULAR) == 0;
-  }
   if (sc->type == CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID ||
       sc->type == CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID) {
     return !bsdf_microfacet_has_delta(sc);

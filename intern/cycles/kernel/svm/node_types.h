@@ -1165,6 +1165,21 @@ struct SVMNodeDiffractionSmoothBsdfData {
 static_assert(alignof(SVMNodeDiffractionSmoothBsdfData) <= alignof(uint));
 static_assert(sizeof(SVMNodeDiffractionSmoothBsdfData) % sizeof(uint) == 0);
 
+/* Diffraction BSDF, Grating model. Vector inputs: .x = X axis, .y = Y axis (2D only). */
+struct SVMNodeDiffractionGratingBsdfData {
+  SVMInputFloat roughness;
+  SVMInputFloat3 pitch;
+  SVMInputFloat3 groove_depth;
+  SVMInputFloat3 duty_cycle;
+  SVMInputFloat3 rotation;
+  SVMStackOffset normal_offset;
+  SVMStackOffset tangent_offset;
+  uint8_t profile;      /* NodeDiffractionGratingProfile. */
+  uint8_t grating_type; /* NodeDiffractionGratingType. */
+};
+static_assert(alignof(SVMNodeDiffractionGratingBsdfData) <= alignof(uint));
+static_assert(sizeof(SVMNodeDiffractionGratingBsdfData) % sizeof(uint) == 0);
+
 /* Refraction BSDF. */
 struct SVMNodeRefractionBsdfData {
   SVMInputFloat roughness;
