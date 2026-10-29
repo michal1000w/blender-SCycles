@@ -26,7 +26,14 @@ folders into one `JCycles` folder.
 Zip the `JCycles` folder (or use the zip from `--zip`). In an official Blender (5.0 or newer):
 Edit > Preferences > Add-ons > (menu) Install from Disk, choose the zip, enable
 "JCycles Render Engine". Preferences of the add-on show the bundled build and the render devices
-(GPU selection works like in Cycles).
+(GPU selection works like in Cycles). It installs as a regular add-on (Add-ons list, folder
+`scripts/addons/JCycles`), not as an extension.
+
+Packages made before 2026-10-29 15:30 contained Blender's extension manifest template and were
+installed as a broken extension "my_example_extension" (startup error "module loaded with no
+associated file"). Remove it in Preferences > Get Extensions (installed, user_default > Uninstall)
+or delete `extensions/user_default/my_example_extension` in the Blender user folder, then install
+a new package.
 
 ## How it works
 
