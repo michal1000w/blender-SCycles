@@ -313,17 +313,47 @@ def safe_reset_output(output):
     if os.path.exists(output):
         if os.path.isfile(output):
             raise BuildError("Output path is a file: " + output)
-        entries = os.listdir(output)
-        if entries and MARKER_FILE not in entries:
+        entries = set(os.listdir(output))
+        # A package, or what is left of one after an interrupted delete.
+        if entries and MARKER_FILE not in entries and not entries <= {".DS_Store", "runtime"}:
             raise BuildError("Refusing to replace {:s}: it is not a JCycles package.".format(output))
-        shutil.rmtree(output)
-    os.makedirs(output)
+        # Finder may write .DS_Store files while the folder is being deleted: retry.
+        import time
+        for attempt in range(10):
+            try:
+                shutil.rmtree(output)
+                break
+            except OSError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.5)
+    os.makedirs(output, exist_ok=True)
+
+
+# Blender's "Install from Disk" treats a zip containing a blender_manifest.toml at ANY depth as an
+# extension and installs that sub-folder. The Blender build ships one as a Text Editor template
+# (scripts/templates_toml), so it must stay out of the package or it hijacks the installation.
+EXTENSION_MANIFEST = "blender_manifest.toml"
 
 
 def copy_tree(source, target):
     def ignore(directory, names):
-        return [n for n in names if n == "__pycache__" or n.endswith((".pyc", ".pyo")) or n == ".DS_Store"]
+        return [n for n in names if n == "__pycache__" or n.endswith((".pyc", ".pyo")) or n == ".DS_Store"
+                or n == EXTENSION_MANIFEST]
     shutil.copytree(source, target, symlinks=False, ignore=ignore, dirs_exist_ok=True)
+
+
+def check_installable(output):
+    """The package must install as a regular add-on: bl_info in __init__.py and no manifest."""
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(output):
+        if EXTENSION_MANIFEST in filenames:
+            found.append(os.path.relpath(os.path.join(dirpath, EXTENSION_MANIFEST), output))
+    if found:
+        raise BuildError("The package contains extension manifests, Blender would install those instead "
+                         "of JCycles: " + ", ".join(found))
+    if "bl_info" not in open(os.path.join(output, "__init__.py"), encoding="utf-8").read():
+        raise BuildError("__init__.py has no bl_info")
 
 
 def git_info():
@@ -427,6 +457,7 @@ def write_package(output, runtime, exe, app_name, tag, info, copy_runtime):
             copy_tree(runtime, target)
     else:
         print("warning: --no-runtime: the package cannot render until a runtime is added")
+    check_installable(output)
 
 
 def make_zip(output, zip_path):
