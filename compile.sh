@@ -1,15 +1,36 @@
 #!/usr/bin/env bash
-# Build Blender for Apple Silicon macOS and install the complete app bundle to ./install.
+# Build Blender and install the complete build to ./install.
+#   macOS (Apple Silicon): ./install/Blender.app
+#   Linux (x64 or arm64):  ./install/blender (portable install with its resources next to it)
+# Windows uses compile.ps1.
 
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
+case "$(uname -s)" in
+  Darwin) PLATFORM="macos" ;;
+  Linux) PLATFORM="linux" ;;
+  *) PLATFORM="unsupported" ;;
+esac
+
+detect_arch() {
+  if [ "$PLATFORM" = "macos" ]; then
+    printf '%s\n' "arm64"
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64|amd64) printf '%s\n' "x64" ;;
+    aarch64|arm64) printf '%s\n' "arm64" ;;
+    *) uname -m ;;
+  esac
+}
+
 BUILD_TYPE="${BLENDER_BUILD_TYPE:-Release}"
-ARCH="${BLENDER_ARCH:-arm64}"
-BUILD_DIR="${BLENDER_BUILD_DIR:-${ROOT_DIR}/build/macos_${ARCH}_${BUILD_TYPE}}"
+ARCH="${BLENDER_ARCH:-$(detect_arch)}"
+BUILD_DIR="${BLENDER_BUILD_DIR:-${ROOT_DIR}/build/${PLATFORM}_${ARCH}_${BUILD_TYPE}}"
 RELEASE_DIR="${BLENDER_RELEASE_DIR:-${ROOT_DIR}/install}"
-LIBDIR="${BLENDER_LIBDIR:-${ROOT_DIR}/lib/macos_${ARCH}}"
+LIBDIR="${BLENDER_LIBDIR:-${ROOT_DIR}/lib/${PLATFORM}_${ARCH}}"
 JOBS="${BLENDER_JOBS:-}"
 FETCH_LIBRARIES="${BLENDER_FETCH_LIBRARIES:-auto}"
 USE_CCACHE="${BLENDER_USE_CCACHE:-auto}"
@@ -26,15 +47,17 @@ usage() {
   cat <<EOF
 Usage: ./compile.sh [options] [-- extra-cmake-args...]
 
-Builds Blender for Apple Silicon macOS and installs the complete app bundle to:
+Builds Blender and installs the complete build to:
   ${RELEASE_DIR}
+  macOS: Blender.app (Apple Silicon). Linux: portable install with the blender executable.
+  On Windows use compile.ps1 instead.
 
 Options:
   -j, --jobs N              Parallel build jobs. Default: detected CPU count.
-  --build-dir DIR           CMake build directory. Default: ./build/macos_arm64_Release.
+  --build-dir DIR           CMake build directory. Default: ./build/<platform>_<arch>_Release.
   --release-dir DIR         Install/artifact directory. Default: ./install.
-  --libdir DIR              Blender dependency library directory. Default: ./lib/macos_arm64.
-  --fetch-libraries         Fetch missing official macOS arm64 dependency libraries and LFS data.
+  --libdir DIR              Blender dependency library directory. Default: ./lib/<platform>_<arch>.
+  --fetch-libraries         Fetch missing official dependency libraries and LFS data.
   --no-fetch-libraries      Fail if dependency libraries or LFS data are missing.
   --clean-release           Remove ./install before installing.
   --package                 Also build Blender's package_archive target and copy zips to ./install.
@@ -156,7 +179,10 @@ detect_jobs() {
   local detected
 
   detected=""
-  if have sysctl; then
+  if have nproc; then
+    detected="$(nproc 2>/dev/null || true)"
+  fi
+  if [ -z "$detected" ] && have sysctl; then
     detected="$(sysctl -n hw.ncpu 2>/dev/null || true)"
   fi
   if [ -z "$detected" ] && have getconf; then
@@ -210,14 +236,14 @@ fetch_libraries_if_needed() {
   if [ "$FETCH_LIBRARIES" = "0" ]; then
     cat >&2 <<EOF
 
-error: macOS arm64 Blender dependencies are missing from:
+error: ${PLATFORM} ${ARCH} Blender dependencies are missing from:
   ${LIBDIR}
 
 Fetch them with:
   ./compile.sh --fetch-libraries
 
 or manually run:
-  python3 build_files/utils/make_update.py --no-blender --architecture=arm64
+  python3 build_files/utils/make_update.py --no-blender --architecture=${ARCH}
 EOF
     exit 1
   fi
@@ -226,10 +252,10 @@ EOF
   require_command python3
   git lfs version >/dev/null 2>&1 || die "Git LFS is required to fetch Blender's precompiled libraries."
 
-  log "Fetching official Blender macOS arm64 dependency libraries"
+  log "Fetching official Blender ${PLATFORM} ${ARCH} dependency libraries"
   (
     cd "$ROOT_DIR"
-    python3 build_files/utils/make_update.py --no-blender --architecture=arm64
+    python3 build_files/utils/make_update.py --no-blender --architecture="$ARCH"
   )
 
   libraries_ready || die "Dependency libraries are still incomplete after fetching: ${LIBDIR}"
@@ -322,15 +348,28 @@ configure_ccache() {
 }
 
 validate_host() {
-  [ "$(uname -s)" = "Darwin" ] || die "This script builds the macOS app bundle and must be run on macOS."
-  [ "$ARCH" = "arm64" ] || die "This script is intentionally scoped to Apple Silicon arm64 builds."
+  case "$PLATFORM" in
+    macos)
+      [ "$ARCH" = "arm64" ] || die "The macOS build is intentionally scoped to Apple Silicon arm64 builds."
 
-  if [ "$(uname -m)" != "arm64" ]; then
-    if ! sysctl -in hw.optional.arm64 2>/dev/null | grep -q '^1$'; then
-      die "This machine does not appear to be Apple Silicon."
-    fi
-    log "Running from a translated shell, still targeting arm64"
-  fi
+      if [ "$(uname -m)" != "arm64" ]; then
+        if ! sysctl -in hw.optional.arm64 2>/dev/null | grep -q '^1$'; then
+          die "This machine does not appear to be Apple Silicon."
+        fi
+        log "Running from a translated shell, still targeting arm64"
+      fi
+      ;;
+    linux)
+      case "$ARCH" in
+        x64|arm64) ;;
+        *) die "Unsupported Linux architecture: ${ARCH} (expected x64 or arm64)." ;;
+      esac
+      [ "$ARCH" = "$(detect_arch)" ] || die "Cross-compiling is not supported: host is $(detect_arch), requested ${ARCH}."
+      ;;
+    *)
+      die "This script builds on macOS and Linux. On Windows run compile.ps1."
+      ;;
+  esac
 }
 
 copy_package_archives() {
@@ -344,13 +383,44 @@ copy_package_archives() {
   fi
 }
 
-verify_installed_cycles_sources() {
-  local installed_source
+verify_installed_cycles_addon() {
+  local resources_dir="$1"
   local installed_addon
   local relative_path
   local source_file
   local installed_file
+
+  installed_addon="$(find "$resources_dir" -type d -path '*/scripts/addons_core/cycles' -print -quit)"
+  [ -n "$installed_addon" ] || die "Installed Cycles add-on directory was not found in ${resources_dir}."
+
+  for relative_path in properties.py ui.py; do
+    source_file="${ROOT_DIR}/intern/cycles/blender/addon/${relative_path}"
+    installed_file="${installed_addon}/${relative_path}"
+    [ -f "$installed_file" ] || die "Installed Cycles add-on file is missing: ${installed_file}"
+    cmp -s "$source_file" "$installed_file" || die \
+      "Installed Cycles add-on file is stale: ${relative_path}"
+  done
+
+  source_file="${BUILD_DIR}/intern/cycles/kernel/osl/shaders/node_glass_bsdf.oso"
+  if [ -f "$source_file" ]; then
+    installed_file="${installed_addon}/shader/node_glass_bsdf.oso"
+    cmp -s "$source_file" "$installed_file" || die \
+      "Installed Glass OSL shader is missing or stale."
+  fi
+}
+
+verify_installed_cycles_sources() {
+  local installed_source
+  local relative_path
+  local source_file
+  local installed_file
   local runtime_sources
+
+  if [ "$PLATFORM" = "linux" ]; then
+    # Linux installs no Metal runtime sources; check the add-on the build carries.
+    verify_installed_cycles_addon "$RELEASE_DIR"
+    return 0
+  fi
 
   installed_source="$(find "${RELEASE_DIR}/Blender.app/Contents/Resources" \
     -type d -path '*/scripts/addons_core/cycles/source' -print -quit)"
@@ -404,25 +474,22 @@ verify_installed_cycles_sources() {
   grep -Fq 'defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__)' "$installed_file" || die \
     "Installed Cycles runtime is missing pixel-displacement support in Metal shading kernels."
 
-  installed_addon="$(dirname "$installed_source")"
-  for relative_path in properties.py ui.py; do
-    source_file="${ROOT_DIR}/intern/cycles/blender/addon/${relative_path}"
-    installed_file="${installed_addon}/${relative_path}"
-    [ -f "$installed_file" ] || die "Installed Cycles add-on file is missing: ${installed_file}"
-    cmp -s "$source_file" "$installed_file" || die \
-      "Installed Cycles add-on file is stale: ${relative_path}"
-  done
-
-  source_file="${BUILD_DIR}/intern/cycles/kernel/osl/shaders/node_glass_bsdf.oso"
-  if [ -f "$source_file" ]; then
-    installed_file="${installed_addon}/shader/node_glass_bsdf.oso"
-    cmp -s "$source_file" "$installed_file" || die \
-      "Installed Glass OSL shader is missing or stale."
-  fi
+  verify_installed_cycles_addon "${RELEASE_DIR}/Blender.app/Contents/Resources"
 }
 
 launch_fresh_app() {
   [ "$RUN_APP" -eq 1 ] || return 0
+
+  if [ "$PLATFORM" = "linux" ]; then
+    log "Launching a fresh Blender instance"
+    if [ -n "$RUN_FILE" ]; then
+      [ -f "$RUN_FILE" ] || die "Blend file does not exist: ${RUN_FILE}"
+      nohup "$BLENDER_BIN" "$RUN_FILE" >/dev/null 2>&1 &
+    else
+      nohup "$BLENDER_BIN" >/dev/null 2>&1 &
+    fi
+    return 0
+  fi
 
   require_command open
   log "Launching a fresh Blender instance"
@@ -441,9 +508,11 @@ validate_positive_integer "$JOBS" || die "Invalid job count: ${JOBS}"
 
 validate_host
 require_command cmake
-require_command xcrun
-xcrun --find clang >/dev/null
-xcrun --sdk macosx --show-sdk-path >/dev/null
+if [ "$PLATFORM" = "macos" ]; then
+  require_command xcrun
+  xcrun --find clang >/dev/null
+  xcrun --sdk macosx --show-sdk-path >/dev/null
+fi
 
 fetch_libraries_if_needed
 fetch_root_lfs_data_if_needed
@@ -451,6 +520,7 @@ configure_generator
 WITH_CCACHE="$(configure_ccache)"
 
 log "Build configuration"
+printf '  Platform:    %s %s\n' "$PLATFORM" "$ARCH"
 printf '  Source:      %s\n' "$ROOT_DIR"
 printf '  Build dir:   %s\n' "$BUILD_DIR"
 printf '  Release dir: %s\n' "$RELEASE_DIR"
@@ -462,24 +532,42 @@ printf '  ccache:      %s\n' "$WITH_CCACHE"
 safe_rm_release_dir
 mkdir -p "$BUILD_DIR" "$RELEASE_DIR"
 
-CMAKE_ARGS=(
-  -S "$ROOT_DIR"
-  -B "$BUILD_DIR"
-  -G "$GENERATOR"
-  -C "$ROOT_DIR/build_files/buildbot/config/blender_macos.cmake"
-  -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
-  -DCMAKE_OSX_ARCHITECTURES="$ARCH"
-  -DCMAKE_INSTALL_PREFIX="$RELEASE_DIR"
-  -DLIBDIR="$LIBDIR"
-  -DWITH_COMPILER_CCACHE="$WITH_CCACHE"
-  -DWITH_CYCLES_PARALLEL_DEVICE_KERNEL_BUILD=ON
-  -DWITH_NINJA_POOL_JOBS=ON
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-  # Xcode 26's Metal headers reference newer macOS APIs without guarding their
-  # declarations. Keep Blender's macOS 11.2 deployment target, but do not
-  # promote those SDK-header warnings to errors.
-  -DCMAKE_CXX_FLAGS=-Wno-error=unguarded-availability-new
-)
+if [ "$PLATFORM" = "macos" ]; then
+  CMAKE_ARGS=(
+    -S "$ROOT_DIR"
+    -B "$BUILD_DIR"
+    -G "$GENERATOR"
+    -C "$ROOT_DIR/build_files/buildbot/config/blender_macos.cmake"
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DCMAKE_OSX_ARCHITECTURES="$ARCH"
+    -DCMAKE_INSTALL_PREFIX="$RELEASE_DIR"
+    -DLIBDIR="$LIBDIR"
+    -DWITH_COMPILER_CCACHE="$WITH_CCACHE"
+    -DWITH_CYCLES_PARALLEL_DEVICE_KERNEL_BUILD=ON
+    -DWITH_NINJA_POOL_JOBS=ON
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    # Xcode 26's Metal headers reference newer macOS APIs without guarding their
+    # declarations. Keep Blender's macOS 11.2 deployment target, but do not
+    # promote those SDK-header warnings to errors.
+    -DCMAKE_CXX_FLAGS=-Wno-error=unguarded-availability-new
+  )
+else
+  # The release feature set that `make release` uses. GPU kernel binaries (CUDA, HIP,
+  # oneAPI) are built when their compilers are installed, otherwise CMake skips them.
+  CMAKE_ARGS=(
+    -S "$ROOT_DIR"
+    -B "$BUILD_DIR"
+    -G "$GENERATOR"
+    -C "$ROOT_DIR/build_files/cmake/config/blender_release.cmake"
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DCMAKE_INSTALL_PREFIX="$RELEASE_DIR"
+    -DWITH_INSTALL_PORTABLE=ON
+    -DLIBDIR="$LIBDIR"
+    -DWITH_COMPILER_CCACHE="$WITH_CCACHE"
+    -DWITH_NINJA_POOL_JOBS=ON
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+  )
+fi
 
 # Xcode updates can remove an SDK while CMake keeps its discovered library paths.
 # Refresh compiler detection too: it caches the SDK's implicit include paths.
@@ -509,7 +597,11 @@ cmake --build "$BUILD_DIR" --target install --parallel "$JOBS"
 
 copy_package_archives
 
-BLENDER_BIN="${RELEASE_DIR}/Blender.app/Contents/MacOS/Blender"
+if [ "$PLATFORM" = "macos" ]; then
+  BLENDER_BIN="${RELEASE_DIR}/Blender.app/Contents/MacOS/Blender"
+else
+  BLENDER_BIN="${RELEASE_DIR}/blender"
+fi
 [ -x "$BLENDER_BIN" ] || die "Expected Blender executable was not created: ${BLENDER_BIN}"
 
 log "Verifying installed Cycles runtime sources"
@@ -521,11 +613,17 @@ if [ "$SMOKE_TEST" -eq 1 ]; then
 fi
 
 log "Done"
-printf 'Blender app: %s\n' "${RELEASE_DIR}/Blender.app"
+if [ "$PLATFORM" = "macos" ]; then
+  printf 'Blender app: %s\n' "${RELEASE_DIR}/Blender.app"
+fi
 printf 'Blender bin: %s\n' "$BLENDER_BIN"
 if [ "$RUN_APP" -eq 0 ]; then
   printf 'Fresh launch: ./compile.sh --run\n'
-  printf 'Note: plain macOS open may reactivate an older running Blender instance.\n'
+  if [ "$PLATFORM" = "macos" ]; then
+    printf 'Note: plain macOS open may reactivate an older running Blender instance.\n'
+  fi
 fi
+printf 'JCycles add-on from this build: ./compileCycles.sh\n'
+
 
 launch_fresh_app
