@@ -267,7 +267,7 @@ struct GuidingField {
     }
     /* Failed reservations are rolled back. Only this kernel observes the transient count;
      * publication runs after all reservations complete. Failed indices never access storage. */
-    const uint first = atomic_fetch_and_add_uint32(&counts[0], 2);
+    const uint first = atomic_reserve_uint32(&counts[0], 2);
     if (first + 2 > capacity) {
       atomic_fetch_and_add_uint32(&counts[0], -2);
       return 0;

@@ -8,7 +8,10 @@ device parity check and a report.
 
   blender --background --factory-startup --python tests/python/jcycles_feature_demo.py -- \
       --output DIRECTORY [--devices CPU,CUDA,OPTIX] [--scenes a,b] [--samples N] \
-      [--resolution N] [--no-blend]
+      [--resolution N] [--no-blend] [--denoise]
+
+`--denoise` renders with denoising and adaptive sampling on, as production scenes do (the
+denoiser runs on the rendering device, which exercises its kernel loading).
 
 For every scene it:
   * saves the scene as DIRECTORY/blend/<scene>.blend, to open and inspect in Blender,
@@ -52,6 +55,8 @@ def parse_args():
                         help="Image width; height is 3/4 of it")
     parser.add_argument("--no-blend", action="store_true", help="Do not save .blend files")
     parser.add_argument("--list", action="store_true", help="List the scenes and exit")
+    parser.add_argument("--denoise", action="store_true",
+                        help="Render with denoising and adaptive sampling, as production scenes do")
     return parser.parse_args(argv)
 
 
@@ -71,8 +76,8 @@ def new_scene(args, name):
     scene.view_settings.view_transform = "Standard"
     cycles = scene.cycles
     cycles.samples = args.samples
-    cycles.use_adaptive_sampling = False
-    cycles.use_denoising = False
+    cycles.use_adaptive_sampling = args.denoise
+    cycles.use_denoising = args.denoise
     cycles.seed = 1
     cycles.max_bounces = 12
     cycles.caustics_reflective = True
@@ -458,6 +463,134 @@ def scene_path_guiding(args):
     return scene, "Path guiding with indirect light only (OpenPGL on the CPU)"
 
 
+# --------------------------------------------------------------------------------------------
+# Combinations: several features in one scene, as production scenes use them.
+
+
+def enable_guiding(scene):
+    """Guiding with the indirect sample clamp off. Clamping removes a different amount of energy
+    from each sampling strategy, and the CPU (OpenPGL) and the GPUs (GPU guiding field) guide
+    differently, so clamped guided renders do not converge to the same image."""
+    scene.cycles.use_guiding = True
+    scene.cycles.sample_clamp_indirect = 0.0
+
+
+def scene_bdpt_guiding(args):
+    scene, _ = scene_bdpt(args)
+    scene.name = "bdpt_guiding"
+    enable_guiding(scene)
+    # GPU guiding and OpenPGL learn differently; give both enough samples to converge.
+    scene.cycles.samples = max(args.samples, 256)
+    return scene, "BDPT with path guiding (GPU guiding field on CUDA/OptiX, OpenPGL on the CPU)"
+
+
+def scene_bdpt_volume_guiding(args):
+    scene, _ = scene_bdpt_volume(args)
+    scene.name = "bdpt_volume_guiding"
+    enable_guiding(scene)
+    scene.cycles.use_volume_guiding = True
+    scene.cycles.samples = max(args.samples, 256)
+    return scene, "BDPT, scattering volume and surface + volume guiding"
+
+
+def scene_photon_guiding(args):
+    scene, _ = scene_photon_mapping(args)
+    scene.name = "photon_guiding"
+    enable_guiding(scene)
+    scene.cycles.samples = max(args.samples, 256)
+    return scene, "Photon mapping with path guiding"
+
+
+def scene_vcm_volume(args):
+    scene, _ = scene_bdpt_volume(args)
+    scene.name = "vcm_volume"
+    scene.cycles.use_vertex_merging = True
+    return scene, "VCM (BDPT + vertex merging) with a scattering volume"
+
+
+def scene_prism(args):
+    """Close to the attached prism scenes: a spot light through a glass prism onto a floor
+    inside a scattering volume, with BDPT, guiding, polarization and diffraction enabled."""
+    scene = new_scene(args, "prism")
+    scene.world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.0
+    add_floor(principled("Screen", (0.8, 0.8, 0.8, 1), 0.9)[0])
+    mat, bsdf = principled("Prism glass", (1, 1, 1, 1), 0.0)
+    bsdf.inputs["Transmission Weight"].default_value = 1.0
+    bsdf.inputs["IOR"].default_value = 1.6
+    bpy.ops.mesh.primitive_cylinder_add(vertices=3, radius=0.6, depth=1.2, location=(0, 0, 1.1),
+                                        rotation=(math.radians(90), 0, 0))
+    bpy.context.object.name = "Prism"
+    bpy.context.object.data.materials.append(mat)
+    haze, nodes, links, output = material("Haze")
+    scatter = nodes.new("ShaderNodeVolumeScatter")
+    scatter.inputs["Density"].default_value = 0.05
+    links.new(scatter.outputs[0], output.inputs["Volume"])
+    add_cube(haze, (0.0, 0.0, 2.002), 4.0, "Haze")
+    add_light("SPOT", (-1.5, 0.0, 2.6), 3000.0, rotation=(0.0, math.radians(-60), 0.0),
+              spot_size=math.radians(8), shadow_soft_size=0.01)
+    cycles = scene.cycles
+    cycles.use_bidirectional_path_tracing = True
+    cycles.bdpt_light_paths = 65536
+    enable_guiding(scene)
+    cycles.use_polarization = True
+    cycles.use_diffraction_effects = True
+    cycles.use_coherent_interference = True
+    cycles.samples = max(args.samples, 256)
+    return scene, "Prism caustic in haze: BDPT, guiding, polarization, diffraction flags"
+
+
+def scene_nested_volume_ior_bdpt(args):
+    scene, _ = scene_nested_dielectrics(args)
+    scene.name = "nested_volume_ior_bdpt"
+    mat, nodes, links, output = material("Graded volume")
+    gradient = nodes.new("ShaderNodeTexGradient")
+    mapping = nodes.new("ShaderNodeMath")
+    mapping.operation = "MULTIPLY_ADD"
+    mapping.inputs[1].default_value = 0.1
+    mapping.inputs[2].default_value = 1.0
+    ior = nodes.new("ShaderNodeVolumeIOR")
+    ior.mode = "IOR"
+    links.new(gradient.outputs["Fac"], mapping.inputs[0])
+    links.new(mapping.outputs[0], ior.inputs["IOR"])
+    links.new(ior.outputs[0], output.inputs["Volume"])
+    add_cube(mat, (-1.4, -0.4, 0.802), 1.0, "IOR volume")
+    scene.cycles.use_volume_ior = True
+    scene.cycles.use_bidirectional_path_tracing = True
+    scene.cycles.bdpt_light_paths = 32768
+    return scene, "Nested dielectrics, a graded-index volume and BDPT together"
+
+
+def scene_displacement_guiding(args):
+    scene, _ = scene_pixel_displacement(args)
+    scene.name = "displacement_guiding"
+    enable_guiding(scene)
+    scene.cycles.samples = max(args.samples, 256)
+    return scene, "Pixel displacement with path guiding (CUDA kernels on OptiX)"
+
+
+def scene_grating_polarizer_bdpt(args):
+    scene, _ = scene_diffraction_grating(args)
+    scene.name = "grating_polarizer_bdpt"
+    mat, bsdf = glass("Analyzer")
+    bsdf.inputs["Polarizer"].default_value = True
+    bsdf.inputs["Polarizer Angle"].default_value = math.radians(30)
+    bpy.ops.mesh.primitive_plane_add(size=1.5, location=(0.0, -1.6, 1.0),
+                                     rotation=(math.radians(80), 0, 0))
+    bpy.context.object.data.materials.append(mat)
+    scene.cycles.use_polarization = True
+    scene.cycles.use_bidirectional_path_tracing = True
+    scene.cycles.bdpt_light_paths = 32768
+    return scene, "Diffraction grating seen through a polarizer, with BDPT"
+
+
+def scene_mnee_guiding(args):
+    scene, _ = scene_mnee(args)
+    scene.name = "mnee_guiding"
+    enable_guiding(scene)
+    scene.cycles.samples = max(args.samples, 256)
+    return scene, "MNEE shadow caustics with path guiding"
+
+
 SCENES = {
     "path_tracing": scene_path_tracing,
     "bdpt": scene_bdpt,
@@ -477,6 +610,15 @@ SCENES = {
     "volume_ior": scene_volume_ior,
     "volume_fast": scene_volume_fast,
     "path_guiding": scene_path_guiding,
+    "bdpt_guiding": scene_bdpt_guiding,
+    "bdpt_volume_guiding": scene_bdpt_volume_guiding,
+    "photon_guiding": scene_photon_guiding,
+    "vcm_volume": scene_vcm_volume,
+    "prism": scene_prism,
+    "nested_volume_ior_bdpt": scene_nested_volume_ior_bdpt,
+    "displacement_guiding": scene_displacement_guiding,
+    "grating_polarizer_bdpt": scene_grating_polarizer_bdpt,
+    "mnee_guiding": scene_mnee_guiding,
 }
 
 
@@ -550,14 +692,15 @@ def difference(a, b):
     return blurred, (float(a.mean()) - float(b.mean())) / mean
 
 
-def compare(gpu, cpu, cpu_other):
+def compare(gpu, cpu, cpu_other, denoise=False):
     noise_rmse, noise_mean = difference(cpu_other, cpu)
     rmse, mean = difference(gpu, cpu)
     # Same seed GPU and CPU renders follow the same sample sequence until floating point
     # differences let a path diverge, so they normally differ less than two CPU seeds. Allow a
     # margin over that noise, plus a floor for nearly noise free scenes.
-    rmse_limit = 1.5 * noise_rmse + 0.01
-    mean_limit = 3.0 * abs(noise_mean) + 0.015
+    # Denoisers on different devices differ slightly, and denoised seeds hardly differ.
+    rmse_limit = 1.5 * noise_rmse + (0.05 if denoise else 0.01)
+    mean_limit = 3.0 * abs(noise_mean) + (0.03 if denoise else 0.015)
     finite = bool(np.isfinite(gpu).all())
     passed = finite and rmse <= rmse_limit and abs(mean) <= mean_limit
     return {
@@ -623,7 +766,8 @@ def main():
         (output / directory).mkdir(exist_ok=True)
 
     report = {"blender": f"Blender {bpy.app.version_string} ({bpy.app.build_hash.decode()})",
-              "samples": args.samples, "backends": backends, "scenes": {}}
+              "samples": args.samples, "denoise": args.denoise, "backends": backends,
+              "scenes": {}}
     failures = 0
     for name in names:
         print(f"[jcycles-demo] scene {name}", flush=True)
@@ -654,7 +798,7 @@ def main():
             for backend in backends:
                 if backend == "CPU" or backend not in images:
                     continue
-                check = compare(images[backend], images["CPU"], images["CPU_seed2"])
+                check = compare(images[backend], images["CPU"], images["CPU_seed2"], args.denoise)
                 entry["renders"][backend]["comparison"] = check
                 if not check["passed"]:
                     failures += 1

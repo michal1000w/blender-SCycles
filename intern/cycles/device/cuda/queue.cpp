@@ -107,6 +107,11 @@ bool CUDADeviceQueue::enqueue(DeviceKernel kernel,
 
   /* Compute kernel launch parameters. */
   const CUDADeviceKernel &cuda_kernel = cuda_device_->kernels.get(kernel);
+  if (cuda_kernel.function == nullptr || cuda_kernel.num_threads_per_block <= 0) {
+    cuda_device_->set_error(string_printf("CUDA kernel %s is not loaded",
+                                          device_kernel_as_string(kernel)));
+    return false;
+  }
 
   int num_threads_per_block = cuda_kernel.num_threads_per_block;
   int shared_mem_bytes = 0;

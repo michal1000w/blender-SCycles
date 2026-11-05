@@ -335,3 +335,32 @@ ccl_device_inline int atomic_load_local(int *p)
 #  endif /* __KERNEL_ONEAPI__ */
 
 #endif /* __KERNEL_GPU__ */
+
+/* Atomic add for a reservation whose returned value is used more than once (an index into a
+ * buffer, then a bounds check, then stores).
+ *
+ * NVCC (seen with CUDA 11.8 in the transport kernels) can rematerialize the result of a
+ * warp-aggregated atomicAdd at each of its uses, which executes the atomic again for every use:
+ * the GPU guiding refinement reserved its children four times, wrote them at a different index
+ * than the one it linked, and grew the node count past the capacity of its buffer.
+ *
+ * Passing the result through a volatile local leaves the atomic a single use, the volatile
+ * store, and a volatile load cannot be repeated either, so the atomic is executed exactly once.
+ * Unlike inline assembly with a memory clobber, this does not act as a compiler barrier in the
+ * large shading kernels, and the compiler still aggregates the atomic over the warp. Other
+ * backends use the regular atomic.
+ *
+ * Only use it where the problem was seen. The large inlined shading kernels keep the regular
+ * atomic: their compiled code was checked free of the duplication (see
+ * tests/python/jcycles_check_cuda_atomics.py), and a volatile local there would change their
+ * code generation for no verified benefit. */
+#if defined(__KERNEL_CUDA__) && defined(__CUDA_ARCH__)
+ccl_device_forceinline unsigned int atomic_reserve_uint32(ccl_global unsigned int *p,
+                                                          const unsigned int x)
+{
+  volatile unsigned int old = atomicAdd(p, x);
+  return old;
+}
+#else
+#  define atomic_reserve_uint32(p, x) atomic_fetch_and_add_uint32((p), (x))
+#endif
