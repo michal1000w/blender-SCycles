@@ -313,6 +313,16 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
 #  endif
   const bool use_transport = kernel_features_use_optix_transport(kernel_features) &&
                              !use_osl_shading;
+  /* The OSL camera pipeline (load_osl_kernels()) has no transport programs, and its camera
+   * module initializes the path state without the transport state (guiding history, medium
+   * stack, volume IOR). */
+  if (use_osl_camera && use_transport) {
+    set_error(
+        "A custom (OSL) camera is not supported on OptiX together with bidirectional path "
+        "tracing, photon mapping, path guiding, coherent light, polarization, diffraction, nested "
+        "dielectrics or volume index of refraction. Use a regular camera or render on the CPU.");
+    return false;
+  }
   if (use_osl_shading && kernel_features_unsupported_with_osl(kernel_features)) {
     set_error(
         "Bidirectional path tracing, photon mapping, coherent light, polarization, diffraction, "
@@ -364,6 +374,12 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     return false;
   }
 
+  /* A request for denoising only (see Denoiser::load_kernels()) comes after the scene loaded
+   * its kernels on this device, and must keep the kernels and the state of the scene. */
+  if (!need_optix_kernels) {
+    return true;
+  }
+
   /* Scenes with pixel-level displacement render with the CUDA kernels and a BVH2, see
    * get_bvh_layout_mask(). */
   use_cuda_kernels_only = (kernel_features & KERNEL_FEATURE_PIXEL_DISPLACEMENT) != 0;
@@ -374,10 +390,6 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     }
     use_transport_module = false;
     return !have_error();
-  }
-
-  if (!need_optix_kernels) {
-    return true;
   }
 
   const CUDAContextScope scope(this);

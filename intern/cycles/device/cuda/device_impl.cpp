@@ -477,6 +477,13 @@ bool CUDADevice::load_kernels(const uint64_t kernel_features)
   const bool use_transport = kernel_features_use_transport(kernel_features);
 
   if (cuModule) {
+    /* The denoiser loads its kernels on the device which renders the scene, after the scene
+     * loaded its kernels, see Denoiser::load_kernels(). Every module contains the denoising
+     * kernels, so a request without rendering features must keep the kernels of the scene:
+     * switching to the regular module would drop the light-cache and guiding kernels. */
+    if (!(kernel_features & (KERNEL_FEATURE_PATH_TRACING | KERNEL_FEATURE_BAKING))) {
+      return true;
+    }
     if (use_adaptive_compilation()) {
       /* TODO(sergey): Support kernels re-load for CUDA devices adaptive compile. */
       LOG_INFO << "Skipping CUDA kernel reload for adaptive compilation, not currently supported.";
@@ -551,19 +558,57 @@ void CUDADevice::reserve_local_memory(const uint64_t kernel_features)
 
   {
     /* Use the biggest kernel for estimation. */
-    const DeviceKernel test_kernel = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) ?
-                                         DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE :
-                                         DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE;
+    DeviceKernel test_kernel = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) ?
+                                   DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE :
+                                   DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE;
+    if (kernels_use_transport_) {
+      /* In the transport module the light-cache kernels can need more stack than surface
+       * shading. Reserve for the largest one, a later launch would grow the reservation after
+       * scene memory was placed. */
+      const DeviceKernel candidates[] = {DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE,
+                                         DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE,
+                                         DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME,
+                                         DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE,
+                                         DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT,
+                                         DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE,
+                                         DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT};
+      const CUDAContextScope scope(this);
+      int max_local = -1;
+      for (const DeviceKernel candidate : candidates) {
+        if (!kernels.available(candidate)) {
+          continue;
+        }
+        int local = 0;
+        cuFuncGetAttribute(
+            &local, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, kernels.get(candidate).function);
+        if (local > max_local) {
+          max_local = local;
+          test_kernel = candidate;
+        }
+      }
+    }
 
     /* Launch kernel, using just 1 block appears sufficient to reserve memory for all
      * multiprocessors. It would be good to do this in parallel for the multi GPU case
      * still to make it faster. */
     CUDADeviceQueue queue(this);
 
+    /* Every candidate does nothing with a work size (or path count) of zero. The light-cache
+     * kernels take the count first, the shading kernels last. */
     device_ptr d_path_index = 0;
     device_ptr d_render_buffer = 0;
     int d_work_size = 0;
-    DeviceKernelArguments args(&d_path_index, &d_render_buffer, &d_work_size);
+    int d_zero = 0;
+    const bool light_cache = device_kernel_is_light_cache(test_kernel);
+    const bool sensor_connect = test_kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT;
+    DeviceKernelArguments args = !light_cache ?
+                                     DeviceKernelArguments(
+                                         &d_path_index, &d_render_buffer, &d_work_size) :
+                                 sensor_connect ?
+                                     DeviceKernelArguments(
+                                         &d_work_size, &d_zero, &d_zero, &d_render_buffer) :
+                                     DeviceKernelArguments(
+                                         &d_work_size, &d_zero, &d_zero, &d_zero);
 
     queue.init_execution();
     queue.enqueue(test_kernel, 1, args);

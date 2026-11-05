@@ -1206,9 +1206,36 @@ static void nested_find_overlaps(const vector<BoundBox> &bounds, vector<bool> &o
   }
 }
 
+static bool device_info_has_optix(const DeviceInfo &info)
+{
+  if (info.type == DEVICE_OPTIX) {
+    return true;
+  }
+  for (const DeviceInfo &subdevice : info.multi_devices) {
+    if (device_info_has_optix(subdevice)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ObjectManager::auto_nested_media_possible(const Scene *scene)
 {
   if (!scene->integrator->get_use_auto_nested_dielectrics()) {
+    return false;
+  }
+
+  /* OSL shading on OptiX runs the regular kernels, which have no nested dielectrics. Automatic
+   * media are an implicit refinement, so render without them there instead of refusing the
+   * scene; materials with an explicit nested priority still report the limitation. */
+  if (scene->shader_manager && scene->shader_manager->use_osl() && scene->device &&
+      device_info_has_optix(scene->device->info))
+  {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      LOG_WARNING << "Automatic nested dielectrics are not available with OSL shading on OptiX.";
+    }
     return false;
   }
 

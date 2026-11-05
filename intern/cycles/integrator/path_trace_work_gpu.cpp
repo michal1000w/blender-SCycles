@@ -1126,7 +1126,8 @@ void PathTraceWorkGPU::render_samples(RenderStatistics &statistics,
   if (integrator_state_gpu_.guiding_capacity > 0 && guiding_dump && guiding_dump[0]) {
     queue_->copy_from_device(guiding_counts_);
     if (queue_->synchronize()) {
-      const uint count = guiding_counts_.data()[0];
+      /* The buffers hold at most the capacity, whatever the count says. */
+      const uint count = min(guiding_counts_.data()[0], integrator_state_gpu_.guiding_capacity);
       const string prefix = string(guiding_dump) + "_" + std::to_string(guiding_trained_samples_);
       vector<uint8_t> storage;
       const auto write_snapshot = [&](device_memory &memory, const char *suffix, size_t bytes) {
