@@ -635,7 +635,14 @@ static int cuewNvrtcInit(void) {
   /* Library paths. */
 #ifdef _WIN32
   /* Expected in c:/windows/system or similar, no path needed. */
-  const char *nvrtc_paths[] = {"nvrtc64_101_0.dll",
+  /* Newest first. The installation of Blender can ship one next to the executable. */
+  const char *nvrtc_paths[] = {"nvrtc64_130_0.dll",
+                               "nvrtc64_120_0.dll",
+                               "nvrtc64_112_0.dll",
+                               "nvrtc64_111_0.dll",
+                               "nvrtc64_110_0.dll",
+                               "nvrtc64_102_0.dll",
+                               "nvrtc64_101_0.dll",
                                "nvrtc64_100_0.dll",
                                "nvrtc64_91.dll",
                                "nvrtc64_90.dll",
@@ -646,6 +653,9 @@ static int cuewNvrtcInit(void) {
   const char *nvrtc_paths[] = {"/usr/local/cuda/lib/libnvrtc.dylib", NULL};
 #else
   const char *nvrtc_paths[] = {"libnvrtc.so",
+                               "libnvrtc.so.13",
+                               "libnvrtc.so.12",
+                               "libnvrtc.so.11.2",
 #  if defined(__x86_64__) || defined(_M_X64)
                                "/usr/local/cuda/lib64/libnvrtc.so",
 #else

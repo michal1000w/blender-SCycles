@@ -305,7 +305,11 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
 
 #  ifdef WITH_OSL
   const bool use_osl_shading = (kernel_features & KERNEL_FEATURE_OSL_SHADING);
-  const bool use_osl_camera = (kernel_features & KERNEL_FEATURE_OSL_CAMERA);
+  /* Without OSL shading a custom camera runs the translation of its shader in the camera ray
+   * kernel, like on CUDA, see device/cuda/osl_camera.h. That works with every kernel module,
+   * while the OSL camera pipeline (load_osl_kernels()) only has the programs of the regular
+   * kernels. The scene does not set up the OSL camera for this device then. */
+  const bool use_osl_camera = (kernel_features & KERNEL_FEATURE_OSL_CAMERA) && use_osl_shading;
   const bool use_osl_volume = use_osl_shading && (kernel_features & KERNEL_FEATURE_VOLUME);
 #  else
   const bool use_osl_shading = false;
@@ -313,16 +317,6 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
 #  endif
   const bool use_transport = kernel_features_use_optix_transport(kernel_features) &&
                              !use_osl_shading;
-  /* The OSL camera pipeline (load_osl_kernels()) has no transport programs, and its camera
-   * module initializes the path state without the transport state (guiding history, medium
-   * stack, volume IOR). */
-  if (use_osl_camera && use_transport) {
-    set_error(
-        "A custom (OSL) camera is not supported on OptiX together with bidirectional path "
-        "tracing, photon mapping, path guiding, coherent light, polarization, diffraction, nested "
-        "dielectrics or volume index of refraction. Use a regular camera or render on the CPU.");
-    return false;
-  }
   if (use_osl_shading && kernel_features_unsupported_with_osl(kernel_features)) {
     set_error(
         "Bidirectional path tracing, photon mapping, coherent light, polarization, diffraction, "
@@ -1506,6 +1500,17 @@ bool OptiXDevice::load_osl_kernels()
 #  else
   return false;
 #  endif
+}
+
+bool OptiXDevice::set_osl_camera_source(const string &key, const string &source, string &error)
+{
+#  ifdef WITH_OSL
+  /* The shader manager updates before the camera shader. */
+  if (osl_globals.use_shading) {
+    return CUDADevice::set_osl_camera_source("", "", error);
+  }
+#  endif
+  return CUDADevice::set_osl_camera_source(key, source, error);
 }
 
 OSLGlobals *OptiXDevice::get_cpu_osl_memory()

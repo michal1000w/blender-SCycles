@@ -32,6 +32,9 @@ class CUDADevice : public GPUDevice {
    * which use them, see kernel_features_use_transport(). */
   CUmodule cuModuleTransport = nullptr;
   bool kernels_use_transport_ = false;
+  /* Camera ray kernel with a custom camera shader, built at runtime for the module in use, see
+   * osl_camera.h. The device runs its camera ray kernel instead of the one of the module. */
+  CUmodule cuModuleCamera = nullptr;
   bool integrated_gpu = false;
   int pitch_alignment;
   int max_shared_mem_bytes = 0;
@@ -68,6 +71,9 @@ class CUDADevice : public GPUDevice {
 
   bool load_kernels(uint64_t kernel_features) override;
   void reserve_local_memory(uint64_t kernel_features);
+
+  /* Custom (OSL) camera translated for devices without OSL, see osl_camera.h. */
+  bool set_osl_camera_source(const string &key, const string &source, string &error) override;
 
   /* All memory types. */
   void mem_alloc(device_memory &mem) override;
@@ -116,6 +122,18 @@ class CUDADevice : public GPUDevice {
  protected:
   bool get_device_attribute(CUdevice_attribute attribute, int *value);
   int get_device_default_attribute(CUdevice_attribute attribute, const int default_value);
+
+  /* Build or drop the camera module for the current camera shader and kernel module, and use
+   * its camera ray kernel. */
+  bool update_osl_camera_module(string &error);
+  void free_osl_camera_module();
+
+  string osl_camera_key_;
+  string osl_camera_source_;
+  /* Camera shader key and kernel module of cuModuleCamera. */
+  string osl_camera_module_key_;
+  /* Error of the last build, reported again for the same shader. */
+  string osl_camera_error_;
 };
 
 CCL_NAMESPACE_END

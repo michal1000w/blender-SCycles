@@ -151,6 +151,9 @@ class OptiXDevice : public CUDADevice {
                            OptixResult &failure_reason);
 
   bool load_kernels(uint64_t kernel_features) override;
+  /* With OSL shading the OSL camera pipeline runs custom cameras, otherwise the translation
+   * of the shader as on CUDA, see device/cuda/osl_camera.h. */
+  bool set_osl_camera_source(const string &key, const string &source, string &error) override;
 
   bool load_osl_kernels() override;
 

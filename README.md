@@ -48,6 +48,12 @@ which match standard Cycles in registers and memory use. On OptiX, scenes with p
 displacement render with the CUDA kernels. OSL shading on OptiX uses the standard Cycles kernels
 and does not support these features; the CPU supports them with OSL.
 
+Custom (OSL) cameras work on CUDA and OptiX together with all of these features, as on Metal: the
+compiled camera shader is translated, compiled at runtime with NVRTC (which ships with the build,
+next to `blender.exe` or in `lib/`) and linked into the camera ray kernel. The first render with a
+new camera shader takes a few seconds, later ones load it from the kernel cache.
+`tests/python/cycles_osl_camera_scenes.py --device CUDA|OPTIX` compares it with the CPU.
+
 Blender
 =======
 

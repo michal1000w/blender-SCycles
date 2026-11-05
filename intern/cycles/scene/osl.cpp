@@ -19,7 +19,7 @@
 #  include "kernel/osl/globals.h"
 #  include "kernel/osl/services.h"
 
-#  ifdef WITH_METAL
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
 #    include "device/metal/osl_camera.h"
 #  endif
 
@@ -143,89 +143,24 @@ void OSLManager::device_update_pre(Device * /*device*/, Scene *scene)
   }
 }
 
-/* Thread infos reused for optimizing multiple groups. Each thread info that
- * JITs creates a memory manager that OSL keeps as long as the shading system
- * exists. This only reduces the problem and does not solve it for repeated
- * compilation, and OSL's own optimize_all_groups() has the same problem. */
-class OSLThreadInfoPool {
- public:
-  ~OSLThreadInfoPool()
-  {
-    for (const auto &[ss, thread_info] : thread_infos_) {
-      ss->destroy_thread_info(thread_info);
-    }
-  }
-
-  OSL::PerThreadInfo *acquire(OSL::ShadingSystem *ss)
-  {
-    const thread_scoped_lock lock(mutex_);
-    for (auto it = thread_infos_.begin(); it != thread_infos_.end(); ++it) {
-      if (it->first == ss) {
-        OSL::PerThreadInfo *thread_info = it->second;
-        thread_infos_.erase(it);
-        return thread_info;
-      }
-    }
-    return ss->create_thread_info();
-  }
-
-  void release(OSL::ShadingSystem *ss, OSL::PerThreadInfo *thread_info)
-  {
-    const thread_scoped_lock lock(mutex_);
-    thread_infos_.emplace_back(ss, thread_info);
-  }
-
- private:
-  thread_mutex mutex_;
-  vector<std::pair<OSL::ShadingSystem *, OSL::PerThreadInfo *>> thread_infos_;
-};
-
-static void optimize_group(OSLThreadInfoPool &thread_infos,
-                           OSL::ShadingSystem *ss,
-                           ImageManager *image_manager,
-                           OSL::ShaderGroup *group)
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
+/* Devices that run the translation of a custom camera shader instead of the OSL runtime: Metal
+ * and CUDA, which have no OSL back end, and OptiX unless the scene shades with OSL. On OptiX the
+ * OSL camera pipeline only has the programs of the regular kernels, while the translation works
+ * with every kernel module, see `device/cuda/osl_camera.h`. */
+static bool device_runs_translated_camera(const Device *device, const bool use_osl_shading)
 {
-  /* Shading context for this group only, as it can't be shared between threads. It
-   * identifies the image manager in #OSLRenderServices::get_texture_handle(). */
-  OSLRenderServices *services = static_cast<OSLRenderServices *>(ss->renderer());
-  OSL::PerThreadInfo *thread_info = thread_infos.acquire(ss);
-  OSL::ShadingContext *context = ss->get_context(thread_info);
-  services->image_manager_add(context, image_manager);
-
-  ss->optimize_group(group, context, true);
-
-  services->image_manager_remove(context);
-  ss->release_context(context);
-  thread_infos.release(ss, thread_info);
+  switch (device->info.type) {
+    case DEVICE_METAL:
+    case DEVICE_CUDA:
+      return true;
+    case DEVICE_OPTIX:
+      return !use_osl_shading;
+    default:
+      return false;
+  }
 }
-
-static void optimize_group(TaskPool &pool,
-                           OSLThreadInfoPool &thread_infos,
-                           OSL::ShadingSystem *ss,
-                           ImageManager *image_manager,
-                           const OSL::ShaderGroupRef &group_ref)
-{
-  if (!group_ref) {
-    return;
-  }
-
-  /* Workaround #156348: depending on the system-wide `libgcc` version, EH frames
-   * registered and de-registered during OSL JIT might leave the process in a bad state.
-   * There is a bug report about it in the gcc:
-   * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=119151
-   *
-   * Note that it is the runtime libgcc version that matters, as it is linked dynamically.
-   */
-  OSL::ShaderGroup *group = group_ref.get();
-#  if defined(_WIN32) || defined(__APPLE__)
-  pool.push([&thread_infos, ss, image_manager, group]() {
-    optimize_group(thread_infos, ss, image_manager, group);
-  });
-#  else
-  optimize_group(thread_infos, ss, image_manager, group);
-  (void)pool;
 #  endif
-}
 
 void OSLManager::device_update_post(Device *device,
                                     Scene *scene,
@@ -238,6 +173,14 @@ void OSLManager::device_update_post(Device *device,
       return;
     }
     foreach_osl_device(device, [this, scene](Device *sub_device, OSLGlobals *og) {
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
+      if (device_runs_translated_camera(sub_device, scene->shader_manager->use_osl())) {
+        /* OptiX without OSL shading runs the translation instead. */
+        og->camera_state.reset();
+        og->use_camera = false;
+        return;
+      }
+#  endif
       OSL::ShadingSystem *ss = get_shading_system(sub_device);
 
       OSL::ShaderGroupRef group = ss->ShaderGroupBegin("camera_group");
@@ -303,9 +246,9 @@ void OSLManager::device_update_post(Device *device,
     });
   }
 
-#  ifdef WITH_METAL
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
   if (need_update()) {
-    device_update_camera_metal(device, scene);
+    device_update_camera_translated(device, scene);
   }
 #  endif
 
@@ -378,13 +321,15 @@ void OSLManager::device_update_post(Device *device,
   need_update_ = false;
 }
 
-#  ifdef WITH_METAL
-void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
+void OSLManager::device_update_camera_translated(Device *device, Scene *scene)
 {
-  bool has_metal = false;
-  device->foreach_device(
-      [&](Device *sub_device) { has_metal |= (sub_device->info.type == DEVICE_METAL); });
-  if (!has_metal) {
+  const bool use_osl_shading = scene->shader_manager->use_osl();
+  bool has_translated = false;
+  device->foreach_device([&](Device *sub_device) {
+    has_translated |= device_runs_translated_camera(sub_device, use_osl_shading);
+  });
+  if (!has_translated) {
     return;
   }
 
@@ -398,47 +343,49 @@ void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
     /* A custom camera without shader renders black. */
     device->set_osl_camera_source("", "", warning);
     dscene.camera_script_params.free();
-    camera_metal_images_.clear();
+    camera_translated_images_.clear();
     const thread_scoped_lock lock(camera_warning_mutex_);
     camera_warning_.clear();
     return;
   }
 
-  /* Metal devices have no OSL back end, they run a translation of the shader. It only depends
-   * on the bytecode and on which parameters have a value, not on the values of numbers. */
+  /* These devices have no OSL back end for cameras, they run a translation of the shader. It
+   * only depends on the bytecode and on which parameters have a value, not on the values of
+   * numbers. */
   const string colorspace = scene->shader_manager->get_scene_linear_interop_id();
   const string key = metal_osl_camera_program_key(
       camera->script_name, camera->script_params, colorspace);
-  if (!camera_metal_program_ || camera_metal_key_ != key) {
-    camera_metal_program_ = make_unique<MetalOSLCameraProgram>();
-    camera_metal_error_.clear();
-    camera_metal_key_ = key;
-    camera_metal_images_.clear();
+  if (!camera_translated_program_ || camera_translated_key_ != key) {
+    camera_translated_program_ = make_unique<MetalOSLCameraProgram>();
+    camera_translated_error_.clear();
+    camera_translated_key_ = key;
+    camera_translated_images_.clear();
     if (!metal_osl_camera_translate(info->bytecode,
                                     camera->script_params,
                                     colorspace,
-                                    *camera_metal_program_,
-                                    camera_metal_error_))
+                                    *camera_translated_program_,
+                                    camera_translated_error_))
     {
-      if (camera_metal_error_.empty()) {
-        camera_metal_error_ = "unknown error";
+      if (camera_translated_error_.empty()) {
+        camera_translated_error_ = "unknown error";
       }
     }
     else {
-      LOG_INFO << "Translated custom camera shader for Metal: "
-               << camera_metal_program_->source.size() << " bytes, "
-               << camera_metal_program_->params.size() << " parameters";
+      LOG_INFO << "Translated custom camera shader: "
+               << camera_translated_program_->source.size() << " bytes, "
+               << camera_translated_program_->params.size() << " parameters";
     }
   }
   /* A shader that cannot be used renders black, as when it fails to compile on other devices.
    * The render continues, so that the shader can be edited in a running session. */
-  string device_error = camera_metal_error_;
+  string device_error = camera_translated_error_;
   const bool ok = device_error.empty() ?
                       device->set_osl_camera_source(
-                          key, camera_metal_program_->source, device_error) :
+                          key, camera_translated_program_->source, device_error) :
                       device->set_osl_camera_source("", "", warning);
   if (!ok || !device_error.empty()) {
-    warning = "Custom camera shader is not supported on Metal and renders black: " + device_error;
+    warning = "Custom camera shader is not supported on this GPU and renders black: " +
+              device_error;
     LOG_ERROR << warning;
   }
   {
@@ -451,26 +398,26 @@ void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
    * this. */
   vector<int> image_ids;
   if (warning.empty()) {
-    const vector<MetalOSLCameraProgram::Image> &images = camera_metal_program_->images;
-    if (camera_metal_images_.size() != images.size()) {
-      camera_metal_images_.clear();
+    const vector<MetalOSLCameraProgram::Image> &images = camera_translated_program_->images;
+    if (camera_translated_images_.size() != images.size()) {
+      camera_translated_images_.clear();
       for (const MetalOSLCameraProgram::Image &image : images) {
-        camera_metal_images_.push_back(
+        camera_translated_images_.push_back(
             scene->image_manager->add_image(image.filename, ImageParams()));
       }
     }
-    for (const ImageHandle &handle : camera_metal_images_) {
+    for (const ImageHandle &handle : camera_translated_images_) {
       image_ids.push_back(handle.kernel_id());
     }
   }
   else {
-    camera_metal_images_.clear();
+    camera_translated_images_.clear();
   }
 
   /* Parameter values. */
   vector<uint> words;
   if (warning.empty()) {
-    metal_osl_camera_pack_params(*camera_metal_program_, camera->script_params, image_ids, words);
+    metal_osl_camera_pack_params(*camera_translated_program_, camera->script_params, image_ids, words);
   }
   if (words.empty()) {
     dscene.camera_script_params.free();
@@ -485,10 +432,10 @@ void OSLManager::device_update_camera_metal(Device *device, Scene *scene)
 
 void OSLManager::device_free(Device *device, DeviceScene *dscene, Scene *scene)
 {
-#  ifdef WITH_METAL
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
   /* Upload the parameters of the camera shader again on the next update. */
   dscene->camera_script_params.free();
-  camera_metal_images_.clear();
+  camera_translated_images_.clear();
   need_update_ = true;
 #  endif
 

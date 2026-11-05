@@ -362,3 +362,30 @@ endif()
 
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_DEVICE_CUDA}" ${CYCLES_INSTALL_PATH}/source/kernel/device/cuda)
 delayed_install(${CMAKE_CURRENT_SOURCE_DIR} "${SRC_KERNEL_DEVICE_CUDA_HEADERS}" ${CYCLES_INSTALL_PATH}/source/kernel/device/cuda)
+
+# NVRTC compiles custom (OSL) camera shaders at runtime, see `device/cuda/osl_camera.h`. Ship the
+# library of the toolkit, so that users do not need to install the CUDA toolkit. Blender looks
+# for it next to the executable on Windows, and in its `lib` directory on Linux.
+if(WITH_CYCLES_DEVICE_CUDA AND WITH_CUDA_DYNLOAD AND CUDA_TOOLKIT_ROOT_DIR)
+  if(WIN32)
+    file(GLOB _cycles_nvrtc_libraries
+      "${CUDA_TOOLKIT_ROOT_DIR}/bin/nvrtc64_*_0.dll"
+      "${CUDA_TOOLKIT_ROOT_DIR}/bin/nvrtc-builtins64_*.dll"
+    )
+    set(_cycles_nvrtc_destination ".")
+  elseif(UNIX AND NOT APPLE)
+    file(GLOB _cycles_nvrtc_libraries
+      "${CUDA_TOOLKIT_ROOT_DIR}/lib64/libnvrtc.so.*"
+      "${CUDA_TOOLKIT_ROOT_DIR}/lib64/libnvrtc-builtins.so.*"
+    )
+    set(_cycles_nvrtc_destination "lib")
+  endif()
+  if(_cycles_nvrtc_libraries)
+    install(FILES ${_cycles_nvrtc_libraries} DESTINATION ${_cycles_nvrtc_destination})
+  else()
+    message(STATUS "NVRTC not found in ${CUDA_TOOLKIT_ROOT_DIR}: custom cameras on CUDA and OptiX "
+                   "need the CUDA toolkit at runtime")
+  endif()
+  unset(_cycles_nvrtc_libraries)
+  unset(_cycles_nvrtc_destination)
+endif()

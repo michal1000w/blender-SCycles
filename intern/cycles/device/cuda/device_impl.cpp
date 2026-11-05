@@ -15,6 +15,7 @@
 #  endif
 
 #  include "device/cuda/device_impl.h"
+#  include "device/cuda/osl_camera.h"
 
 #  include "util/debug.h"
 #  include "util/log.h"
@@ -145,6 +146,7 @@ CUDADevice::CUDADevice(const DeviceInfo &info, Stats &stats, Profiler &profiler,
 CUDADevice::~CUDADevice()
 {
   image_info.free();
+  free_osl_camera_module();
   if (cuModuleTransport) {
     cuda_assert(cuModuleUnload(cuModuleTransport));
   }
@@ -513,6 +515,9 @@ bool CUDADevice::load_kernels(const uint64_t kernel_features)
     if (use_transport) {
       reserve_local_memory(kernel_features);
     }
+    /* The camera ray kernel of a custom camera must match the module. */
+    string camera_error;
+    update_osl_camera_module(camera_error);
     return !have_error();
   }
 
@@ -541,7 +546,120 @@ bool CUDADevice::load_kernels(const uint64_t kernel_features)
   kernels_use_transport_ = use_transport;
   reserve_local_memory(kernel_features);
 
+  string camera_error;
+  update_osl_camera_module(camera_error);
+
   return !have_error();
+}
+
+bool CUDADevice::set_osl_camera_source(const string &key, const string &source, string &error)
+{
+  if (key == osl_camera_key_ && (key.empty() || source == osl_camera_source_)) {
+    /* Unchanged, report a failure to build again. */
+    error = osl_camera_error_;
+    return osl_camera_error_.empty();
+  }
+  osl_camera_key_ = key;
+  osl_camera_source_ = source;
+  osl_camera_error_.clear();
+  return update_osl_camera_module(error);
+}
+
+void CUDADevice::free_osl_camera_module()
+{
+  if (cuModuleCamera == nullptr) {
+    return;
+  }
+  const CUDAContextScope scope(this);
+  /* Kernels of the module may still run. */
+  cuda_assert(cuCtxSynchronize());
+  cuda_assert(cuModuleUnload(cuModuleCamera));
+  cuModuleCamera = nullptr;
+  osl_camera_module_key_.clear();
+}
+
+bool CUDADevice::update_osl_camera_module(string &error)
+{
+  CUmodule active_module = kernels_use_transport_ ? cuModuleTransport : cuModule;
+  if (active_module == nullptr) {
+    /* Built when the kernels are loaded. */
+    return true;
+  }
+
+  if (osl_camera_key_.empty()) {
+    /* No custom camera shader: the camera ray kernel of the module renders custom cameras
+     * black, as on other devices. */
+    if (cuModuleCamera) {
+      free_osl_camera_module();
+      const CUDAContextScope scope(this);
+      kernels.load_kernel(this, active_module, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
+    }
+    return true;
+  }
+
+  const string module_key = osl_camera_key_ + (kernels_use_transport_ ? ":transport" :
+                                                                        ":regular");
+  if (cuModuleCamera && module_key == osl_camera_module_key_) {
+    /* Loading the kernels of a module replaced the camera ray kernel. */
+    const CUDAContextScope scope(this);
+    kernels.load_kernel(this, cuModuleCamera, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
+    return true;
+  }
+
+  /* Without a camera module the custom camera renders black. */
+  free_osl_camera_module();
+  {
+    const CUDAContextScope scope(this);
+    kernels.load_kernel(this, active_module, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
+  }
+
+  const double start_time = time_dt();
+  vector<uint8_t> cubin;
+  if (!cuda_osl_camera_build(this, osl_camera_source_, kernels_use_transport_, cubin, error)) {
+    osl_camera_error_ = error;
+    LOG_ERROR << "Custom camera shader cannot be used on " << info.description << ": " << error;
+    return false;
+  }
+
+  const CUDAContextScope scope(this);
+  CUmodule module = nullptr;
+  CUresult result = cuModuleLoadData(&module, cubin.data());
+  CUdeviceptr src = 0, dst = 0;
+  size_t src_bytes = 0, dst_bytes = 0;
+  if (result == CUDA_SUCCESS) {
+    result = cuModuleGetGlobal(&dst, &dst_bytes, module, "kernel_params");
+  }
+  if (result == CUDA_SUCCESS) {
+    result = cuModuleGetGlobal(&src, &src_bytes, active_module, "kernel_params");
+  }
+  if (result != CUDA_SUCCESS || dst_bytes != src_bytes || dst_bytes != sizeof(KernelParamsCUDA)) {
+    error = (result != CUDA_SUCCESS) ?
+                string_printf("loading the custom camera kernel failed (%s)",
+                              cuewErrorString(result)) :
+                "the custom camera kernel does not match the kernel parameters of this build";
+    if (module) {
+      cuModuleUnload(module);
+    }
+    osl_camera_error_ = error;
+    LOG_ERROR << "Custom camera shader cannot be used on " << info.description << ": " << error;
+    return false;
+  }
+  /* Constant data written so far went to the other modules only. */
+  cuda_assert(cuMemcpyDtoD(dst, src, src_bytes));
+
+  cuModuleCamera = module;
+  osl_camera_module_key_ = module_key;
+  if (!kernels.load_kernel(this, cuModuleCamera, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA)) {
+    error = "the custom camera module has no camera ray kernel";
+    osl_camera_error_ = error;
+    free_osl_camera_module();
+    kernels.load_kernel(this, active_module, DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA);
+    return false;
+  }
+  LOG_INFO << "Using custom camera shader on " << info.description << " ("
+           << (kernels_use_transport_ ? "transport" : "regular") << " kernels), ready in "
+           << time_dt() - start_time << " seconds";
+  return true;
 }
 
 void CUDADevice::reserve_local_memory(const uint64_t kernel_features)
@@ -867,7 +985,7 @@ void CUDADevice::const_copy_to(const char *name, void *host, const size_t size)
   }
 
   /* Update the launch parameters of every loaded module. */
-  for (CUmodule module : {cuModule, cuModuleTransport}) {
+  for (CUmodule module : {cuModule, cuModuleTransport, cuModuleCamera}) {
     if (module == nullptr) {
       continue;
     }

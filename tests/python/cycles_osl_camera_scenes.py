@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Blender Authors
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Render custom (OSL) camera scenes on the CPU or Metal to EXR.
+"""Render custom (OSL) camera scenes on the CPU, Metal, CUDA or OptiX to EXR.
 
-Metal has no OSL back end: it runs a translation of the compiled camera shader, see
-intern/cycles/device/metal/osl_camera.h. These scenes compare that translation with the OSL
-runtime of the CPU device.
+Metal and CUDA have no OSL back end: they run a translation of the compiled camera shader, see
+intern/cycles/device/metal/osl_camera.h and intern/cycles/device/cuda/osl_camera.h. OptiX runs it
+too unless the scene shades with OSL. These scenes compare that translation with the OSL runtime
+of the CPU device.
 
 Probe scenes evaluate one group of OSL operations per render and write the results as the
 throughput of a camera looking at a uniform white world, so the image holds the computed values:
@@ -16,11 +17,13 @@ rays through a stack of spherical lens surfaces, with arrays, loops and early ex
 statistically.
 
   blender -b --factory-startup --python tests/python/cycles_osl_camera_scenes.py -- \\
-      --output DIRECTORY [--device CPU|METAL|METAL_CPU] [--scenes a,b,c] [--samples N] \\
-      [--resolution N] [--session]
+      --output DIRECTORY [--device CPU|METAL|CUDA|OPTIX|METAL_CPU|CUDA_CPU|OPTIX_CPU] \\
+      [--scenes a,b,c] [--samples N] [--resolution N] [--session] [--features a,b]
 
-METAL_CPU renders with the GPU and the CPU together, where each runs its own implementation of
-the camera shader. --session instead renders a sequence of edits in one render session: parameter
+METAL_CPU, CUDA_CPU and OPTIX_CPU render with the GPU and the CPU together, where each runs its
+own implementation of the camera shader. --features enables features of this fork in every scene
+(bdpt, vcm, photons, guiding, polarization, volume_ior, diffraction), which the GPUs render with
+their transport kernels: compare with a CPU render with the same features. --session instead renders a sequence of edits in one render session: parameter
 changes, other shaders, a shader that Metal cannot translate, a regular camera and an animation.
 
 Compare two output directories with cycles_osl_camera_compare.py.
@@ -1256,7 +1259,10 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "METAL_CPU"))
+    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL", "CUDA", "OPTIX",
+                                                             "METAL_CPU", "CUDA_CPU", "OPTIX_CPU"))
+    parser.add_argument("--features", default="",
+                        help="Comma separated features of this fork to enable in every scene")
     parser.add_argument("--session", action="store_true")
     parser.add_argument("--scenes", default="all")
     parser.add_argument("--resolution", type=int, default=192)
@@ -1286,12 +1292,46 @@ def new_scene(args, resolution=None, samples=None):
     cycles.use_denoising = False
     cycles.seed = 7
     cycles.max_bounces = 6
+    enable_features(scene, args.features)
     world = bpy.data.worlds.new("World")
     world.use_nodes = True
     scene.world = world
     bpy.ops.object.camera_add(location=(0.0, -6.0, 1.6), rotation=(math.radians(84), 0.0, 0.0))
     scene.camera = bpy.context.object
     return scene
+
+
+# Devices that run the translation of the camera shader instead of the OSL runtime.
+TRANSLATED_DEVICES = {"METAL", "CUDA", "OPTIX"}
+
+
+def enable_features(scene, features):
+    """Features of this fork. On the GPUs they select the transport kernels, whose camera ray
+    kernel initializes more path state."""
+    cycles = scene.cycles
+    for feature in (f.strip() for f in features.split(",") if f.strip()):
+        if feature == "bdpt":
+            cycles.use_bidirectional_path_tracing = True
+            cycles.bdpt_light_paths = 32768
+        elif feature == "vcm":
+            cycles.use_bidirectional_path_tracing = True
+            cycles.use_vertex_merging = True
+            cycles.bdpt_light_paths = 32768
+        elif feature == "photons":
+            cycles.use_photon_mapping = True
+            cycles.photon_count = 65536
+        elif feature == "guiding":
+            cycles.use_guiding = True
+            # The CPU and the GPUs guide differently: clamping would bias them differently.
+            cycles.sample_clamp_indirect = 0.0
+        elif feature == "polarization":
+            cycles.use_polarization = True
+        elif feature == "volume_ior":
+            cycles.use_volume_ior = True
+        elif feature == "diffraction":
+            cycles.use_diffraction_effects = True
+        else:
+            raise ValueError(f"Unknown feature {feature}")
 
 
 def set_camera_shader(scene, source, params=None):
@@ -1453,7 +1493,7 @@ def texture_probe_scene(test):
         cam = bpy.context.scene.camera.data
         for name in ("file", "second", "missing"):
             cam.cycles_custom[name] = files[name]
-        cam.cycles_custom["dynamic_names"] = (args.device == "METAL")
+        cam.cycles_custom["dynamic_names"] = (args.device in TRANSLATED_DEVICES)
     return build
 
 
@@ -1624,11 +1664,13 @@ def check_expected(path, expected):
 def enable_device(args):
     if args.device == "CPU":
         return
+    backend = args.device.split("_")[0]
     prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "METAL"
+    prefs.compute_device_type = backend
     prefs.get_devices()
     for device in prefs.devices:
-        device.use = device.type == "METAL" or (args.device == "METAL_CPU" and device.type == "CPU")
+        device.use = (device.type == backend or
+                      (args.device.endswith("_CPU") and device.type == "CPU"))
 
 
 # Strings only exist while a shader is translated for Metal. A string that is made from a number
@@ -1693,7 +1735,7 @@ def run_session(args):
     # it, so the devices are not compared.
     set_camera_shader(scene, UNSUPPORTED_SHADER)
     path = render("step_05_unsupported", compared=False)
-    if args.device == "METAL" and image_maximum(path) > 1e-6:
+    if args.device in TRANSLATED_DEVICES and image_maximum(path) > 1e-6:
         raise RuntimeError("An untranslated camera shader must render black")
     # The session recovers with a supported shader.
     set_camera_shader(scene, LENS_STACK_SHADER, {"fstop": 11.0})
@@ -1737,7 +1779,7 @@ def main():
                         for pattern in args.scenes.split(","))]
     report = {}
     for name in names:
-        if name in NO_REFERENCE and args.device != "METAL":
+        if name in NO_REFERENCE and args.device not in TRANSLATED_DEVICES:
             print(f"SCENE {name} skipped: the OSL runtime of the CPU device cannot run it",
                   flush=True)
             continue

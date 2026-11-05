@@ -45,6 +45,9 @@ set(SRC_CUDA
   cuda/graphics_interop.h
   cuda/kernel.cpp
   cuda/kernel.h
+  cuda/osl_camera.cpp
+  cuda/osl_camera.h
+  cuda/osl_camera_compat.h
   cuda/queue.cpp
   cuda/queue.h
   cuda/util.cpp
@@ -114,11 +117,6 @@ set(SRC_METAL
   metal/kernel.h
   metal/metalfx.mm
   metal/metalfx.h
-  metal/osl_camera.cpp
-  metal/osl_camera.h
-  metal/osl_camera_prelude.h
-  metal/osl_camera_translate.cpp
-  metal/osl_camera_translate.h
   metal/queue.mm
   metal/queue.h
   metal/util.mm
@@ -133,6 +131,17 @@ set(SRC_OPTIX
   optix/queue.cpp
   optix/queue.h
   optix/util.h
+)
+
+# Translation of custom (OSL) camera shaders for devices without an OSL back end: Metal, and
+# CUDA and OptiX, see device/metal/osl_camera.h and device/cuda/osl_camera.h. The files guard
+# themselves for the devices that are built.
+set(SRC_OSL_CAMERA
+  metal/osl_camera.cpp
+  metal/osl_camera.h
+  metal/osl_camera_prelude.h
+  metal/osl_camera_translate.cpp
+  metal/osl_camera_translate.h
 )
 
 set(SRC_HEADERS
@@ -153,6 +162,7 @@ set(SRC
   ${SRC_DUMMY}
   ${SRC_MULTI}
   ${SRC_OPTIX}
+  ${SRC_OSL_CAMERA}
   ${SRC_HEADERS}
 )
 
@@ -281,6 +291,7 @@ source_group("hip" FILES ${SRC_HIP})
 source_group("hiprt" FILES ${SRC_HIPRT})
 source_group("multi" FILES ${SRC_MULTI})
 source_group("metal" FILES ${SRC_METAL})
+source_group("osl_camera" FILES ${SRC_OSL_CAMERA})
 source_group("optix" FILES ${SRC_OPTIX})
 source_group("oneapi" FILES ${SRC_ONEAPI})
 source_group("common" FILES ${SRC_BASE} ${SRC_HEADERS})

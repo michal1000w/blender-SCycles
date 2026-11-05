@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0 */
 
-#ifdef WITH_METAL
+#if defined(WITH_METAL) || defined(WITH_CUDA)
 
 #  include "device/metal/osl_camera.h"
 #  include "device/metal/osl_camera_translate.h"
@@ -260,4 +260,4 @@ void metal_osl_camera_pack_params(const MetalOSLCameraProgram &program,
 
 CCL_NAMESPACE_END
 
-#endif /* WITH_METAL */
+#endif /* WITH_METAL || WITH_CUDA */
