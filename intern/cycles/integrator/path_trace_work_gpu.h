@@ -60,6 +60,7 @@ class PathTraceWorkGPU : public PathTraceWork {
   /* Photon map of the light subpath vertices for vertex merging, of `light_paths` subpaths in
    * each of `cache_capacity` caches. */
   void alloc_vertex_merging(const uint light_paths, const uint cache_capacity);
+  void sync_before_integrator_state_update();
   void enqueue_photon_mapping(int start_sample);
   void alloc_bidirectional_path_tracing();
   void enqueue_bidirectional_light_paths(int start_sample, int batch_samples);

@@ -29,6 +29,7 @@
 #define ccl_device
 #define ccl_device_inline ccl_device __attribute__((always_inline))
 #define ccl_device_forceinline ccl_device __attribute__((always_inline))
+#define ccl_noinline __attribute__((noinline))
 #if defined(__KERNEL_METAL_APPLE__) && !defined(__KERNEL_METAL_LOW_MEMORY_COMPILE__)
 #  define ccl_device_noinline ccl_device
 #else

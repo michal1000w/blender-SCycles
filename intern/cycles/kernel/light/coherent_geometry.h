@@ -7,6 +7,12 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Error-free transforms below rely on ordered rounding. Clang is told so per function. MSVC
+ * builds the CPU kernels with /fp:fast, which would remove the rounding error terms. */
+#if (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
+#  pragma float_control(precise, on, push)
+#endif
+
 /* A bounded planar connector. The caller enumerates ordered patches and checks
  * scene visibility and material closures; this routine solves one sequence. */
 #define COHERENT_GEOMETRY_MAX_INTERFACES 4
@@ -767,5 +773,9 @@ ccl_device_inline bool coherent_geometry_connect_unfolded(
   path->spreading = solved.spreading;
   return isfinite_safe(path->spreading) && path->spreading > 0.0f;
 }
+
+#if (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
+#  pragma float_control(pop)
+#endif
 
 CCL_NAMESPACE_END

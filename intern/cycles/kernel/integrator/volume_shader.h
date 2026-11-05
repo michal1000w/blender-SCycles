@@ -218,7 +218,7 @@ ccl_device_inline float _volume_shader_phase_eval_mis(
   return (sum_sample_weight > 0.0f) ? sum_pdf / sum_sample_weight : 0.0f;
 }
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
 ccl_device_inline float volume_shader_gpu_guiding_probability(const float3 P,
                                                               const bool light_path)
 {
@@ -355,7 +355,7 @@ ccl_device float volume_shader_phase_eval(
   bsdf_eval_init(phase_eval, zero_spectrum());
 
   float pdf = _volume_shader_phase_eval_mis(sd, phases, wo, nullptr, phase_eval, 0.0f, 0.0f);
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
   pdf = volume_shader_gpu_guiding_pdf((ccl_private ShaderData *)sd,
                                       phases,
                                       guiding_P ? *guiding_P : sd->P,
@@ -416,7 +416,7 @@ ccl_device int volume_shader_phase_sample(const ccl_private ShaderData *sd,
   return label;
 }
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
 ccl_device int volume_shader_phase_gpu_guided_sample(const ccl_private ShaderData *sd,
                                                      const ccl_private ShaderVolumePhases *phases,
                                                      const ccl_private ShaderVolumeClosure *svc,

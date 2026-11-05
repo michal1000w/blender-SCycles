@@ -31,29 +31,61 @@
 
 CCL_NAMESPACE_BEGIN
 
-/* Light-cache transport and pixel-level displacement are scheduled by the Metal and CPU path
- * tracers. A multi-device render uses them only when every device supports them. */
-static bool device_supports_transport_features(const DeviceInfo &info)
+template<typename Predicate>
+static bool device_info_all(const DeviceInfo &info, const Predicate &predicate)
 {
-  if (info.type == DEVICE_METAL || info.type == DEVICE_CPU) {
-    return true;
-  }
-
   if (info.type == DEVICE_MULTI) {
     for (const DeviceInfo &subdevice : info.multi_devices) {
-      if (!device_supports_transport_features(subdevice)) {
+      if (!device_info_all(subdevice, predicate)) {
         return false;
       }
     }
     return !info.multi_devices.empty();
   }
+  return predicate(info.type);
+}
 
-  return false;
+/* OptiX runs the shading kernels of these features as ray generation programs, see
+ * kernel/device/optix/kernel_transport.cu. */
+static bool device_type_has_transport_features(const DeviceType type)
+{
+  return type == DEVICE_METAL || type == DEVICE_CPU || type == DEVICE_CUDA ||
+         type == DEVICE_OPTIX;
+}
+
+/* Kernels which intersect pixel displaced surfaces: Embree user geometry on the CPU, MetalRT
+ * and the BVH2 of CUDA. OptiX renders these scenes with the CUDA kernels. */
+static bool device_type_has_pixel_displacement(const DeviceType type)
+{
+  return type == DEVICE_METAL || type == DEVICE_CPU || type == DEVICE_CUDA ||
+         type == DEVICE_OPTIX;
+}
+
+bool device_supports_light_cache_transport(const DeviceInfo &info)
+{
+  return device_info_all(info, device_type_has_transport_features);
+}
+
+bool device_supports_pixel_displacement(const DeviceInfo &info)
+{
+  return device_info_all(info, device_type_has_pixel_displacement);
+}
+
+bool device_supports_coherent_specular(const DeviceInfo &info)
+{
+  return device_info_all(info, device_type_has_transport_features);
+}
+
+bool device_uses_transport_kernel_module(const DeviceInfo &info)
+{
+  /* Any device: the other devices of a multi-device render ignore the feature. */
+  return !device_info_all(
+      info, [](const DeviceType type) { return type != DEVICE_CUDA && type != DEVICE_OPTIX; });
 }
 
 static bool device_supports_transport_features(const Device *device)
 {
-  return device_supports_transport_features(device->info);
+  return device_supports_light_cache_transport(device->info);
 }
 
 bool Integrator::use_photon_mapping_on_device(const Device *device) const
@@ -559,7 +591,7 @@ void Integrator::device_update(Device *device, DeviceScene *dscene, Scene *scene
     kintegrator->filter_closures |= FILTER_CLOSURE_TRANSPARENT;
   }
 
-  const GuidingParams guiding_params = get_guiding_params(device);
+  const GuidingParams guiding_params = get_guiding_params(device, scene);
   kintegrator->use_guiding = guiding_params.use;
   kintegrator->guiding_training_samples = max(guiding_training_samples, 0);
   kintegrator->guiding_gpu_memory_mb = clamp(
@@ -874,9 +906,15 @@ DenoiseParams Integrator::get_denoise_params() const
   return denoise_params;
 }
 
-GuidingParams Integrator::get_guiding_params(const Device *device) const
+GuidingParams Integrator::get_guiding_params(const Device *device, const Scene *scene) const
 {
-  const bool use = use_guiding && device->info.has_guiding;
+  bool use = use_guiding && device->info.has_guiding;
+  /* OptiX shades with OSL in ray generation programs that do not record the guiding field. */
+  if (use && scene && scene->shader_manager && scene->shader_manager->use_osl() &&
+      !device_info_all(device->info, [](const DeviceType type) { return type != DEVICE_OPTIX; }))
+  {
+    use = false;
+  }
 
   GuidingParams guiding_params;
   guiding_params.use_surface_guiding = use && use_surface_guiding &&

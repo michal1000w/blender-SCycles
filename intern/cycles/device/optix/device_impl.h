@@ -41,6 +41,9 @@ enum {
   PG_RGEN_EVAL_CURVE_SHADOW_TRANSPARENCY,
   PG_RGEN_INIT_FROM_CAMERA,
   PG_RGEN_EVAL_VOLUME_DENSITY,
+  PG_RGEN_PHOTON_EMIT,
+  PG_RGEN_BDPT_LIGHT_GENERATE,
+  PG_RGEN_BDPT_SENSOR_CONNECT,
 
   /* Miss */
   PG_MISS,
@@ -100,6 +103,8 @@ class OptiXDevice : public CUDADevice {
   OptixModule optix_module = nullptr;
   OptixModule mnee_module = nullptr;
   OptixModule shader_raytrace_module = nullptr;
+  /* Surface shading of the transport module, see kernel_transport_surface.cu. */
+  OptixModule transport_surface_module = nullptr;
   OptixModule builtin_modules[4] = {};
   OptixPipeline pipelines[NUM_PIPELINES] = {};
   OptixProgramGroup groups[NUM_PROGRAM_GROUPS] = {};
@@ -118,6 +123,13 @@ class OptiXDevice : public CUDADevice {
 
   device_vector<SbtRecord> sbt_data;
   device_only_memory<KernelParamsOptiX> launch_params;
+
+  /* The transport module (kernel_transport.cu) is loaded instead of the regular OptiX module,
+   * and surface and volume shading run as ray generation programs. */
+  bool use_transport_module = false;
+  /* All kernels run as CUDA kernels on a BVH2, for scenes with pixel-level displacement. */
+  bool use_cuda_kernels_only = false;
+  static bool kernel_features_use_optix_transport(uint64_t kernel_features);
 
  private:
   OptixTraversableHandle tlas_handle = 0;

@@ -28,6 +28,10 @@ class CUDADevice : public GPUDevice {
   CUdevice cuDevice;
   CUcontext cuContext;
   CUmodule cuModule;
+  /* Module with light-cache transport and pixel displacement, loaded next to cuModule for scenes
+   * which use them, see kernel_features_use_transport(). */
+  CUmodule cuModuleTransport = nullptr;
+  bool kernels_use_transport_ = false;
   bool integrated_gpu = false;
   int pitch_alignment;
   int max_shared_mem_bytes = 0;
@@ -57,6 +61,10 @@ class CUDADevice : public GPUDevice {
   string compile_kernel_get_common_cflags(uint64_t kernel_features);
 
   string compile_kernel(const string &cflags, const char *name, bool optix = false);
+
+  /* Features which need the transport kernel module. */
+  static bool kernel_features_use_transport(uint64_t kernel_features);
+  bool load_module(const char *name, uint64_t kernel_features, CUmodule &module);
 
   bool load_kernels(uint64_t kernel_features) override;
   void reserve_local_memory(uint64_t kernel_features);

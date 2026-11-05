@@ -21,8 +21,28 @@ void OptiXDeviceQueue::init_execution()
   CUDADeviceQueue::init_execution();
 }
 
-static bool is_optix_specific_kernel(DeviceKernel kernel, bool osl_shading, bool osl_camera)
+/* Shading kernels which the transport module runs as ray generation programs. */
+static bool is_optix_transport_kernel(DeviceKernel kernel)
 {
+  return kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_VOLUME_RAY_MARCHING ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_MNEE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+         kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT;
+}
+
+static bool is_optix_specific_kernel(DeviceKernel kernel,
+                                     bool osl_shading,
+                                     bool osl_camera,
+                                     bool transport)
+{
+  if (transport && is_optix_transport_kernel(kernel)) {
+    return true;
+  }
+
 #  ifdef WITH_OSL
   /* OSL uses direct callables to execute, so shading needs to be done in OptiX if OSL is used. */
   if (osl_shading && device_kernel_has_shading(kernel)) {
@@ -54,7 +74,10 @@ bool OptiXDeviceQueue::enqueue(DeviceKernel kernel,
   const bool osl_camera = false;
 #  endif
 
-  if (!is_optix_specific_kernel(kernel, osl_shading, osl_camera)) {
+  const bool transport = optix_device->use_transport_module;
+  if (optix_device->use_cuda_kernels_only ||
+      !is_optix_specific_kernel(kernel, osl_shading, osl_camera, transport))
+  {
     return CUDADeviceQueue::enqueue(kernel, work_size, args);
   }
 
@@ -75,10 +98,28 @@ bool OptiXDeviceQueue::enqueue(DeviceKernel kernel,
         cuMemcpyHtoDAsync(launch_params_ptr + offset, args.values[arg], size, cuda_stream_));
   };
 
-  set_launch_param(offsetof(KernelParamsOptiX, path_index_array), sizeof(device_ptr), 0);
+  if (device_kernel_is_light_cache(kernel)) {
+    /* Arguments: work size, iteration, then the batch samples and the stage or render buffer of
+     * the BDPT kernels. The launch width is the work size. */
+    set_launch_param(offsetof(KernelParamsOptiX, light_cache_iteration), sizeof(int32_t), 1);
+    if (kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE) {
+      set_launch_param(
+          offsetof(KernelParamsOptiX, light_cache_batch_samples), sizeof(int32_t), 2);
+      set_launch_param(offsetof(KernelParamsOptiX, light_cache_stage), sizeof(int32_t), 3);
+    }
+    else if (kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT) {
+      set_launch_param(
+          offsetof(KernelParamsOptiX, light_cache_batch_samples), sizeof(int32_t), 2);
+      set_launch_param(offsetof(KernelParamsOptiX, render_buffer), sizeof(device_ptr), 3);
+    }
+  }
+  else {
+    set_launch_param(offsetof(KernelParamsOptiX, path_index_array), sizeof(device_ptr), 0);
 
-  if (kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST || device_kernel_has_shading(kernel)) {
-    set_launch_param(offsetof(KernelParamsOptiX, render_buffer), sizeof(device_ptr), 1);
+    if (kernel == DEVICE_KERNEL_INTEGRATOR_INTERSECT_CLOSEST || device_kernel_has_shading(kernel))
+    {
+      set_launch_param(offsetof(KernelParamsOptiX, render_buffer), sizeof(device_ptr), 1);
+    }
   }
   if (kernel == DEVICE_KERNEL_SHADER_EVAL_DISPLACE ||
       kernel == DEVICE_KERNEL_SHADER_EVAL_BACKGROUND ||
@@ -186,6 +227,19 @@ bool OptiXDeviceQueue::enqueue(DeviceKernel kernel,
     case DEVICE_KERNEL_INTEGRATOR_INIT_FROM_CAMERA:
       pipeline = optix_device->pipelines[PIP_SHADE];
       sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_INIT_FROM_CAMERA * sizeof(SbtRecord);
+      break;
+
+    case DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT:
+      pipeline = optix_device->pipelines[PIP_SHADE];
+      sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_PHOTON_EMIT * sizeof(SbtRecord);
+      break;
+    case DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE:
+      pipeline = optix_device->pipelines[PIP_SHADE];
+      sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_BDPT_LIGHT_GENERATE * sizeof(SbtRecord);
+      break;
+    case DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT:
+      pipeline = optix_device->pipelines[PIP_SHADE];
+      sbt_params.raygenRecord = sbt_data_ptr + PG_RGEN_BDPT_SENSOR_CONNECT * sizeof(SbtRecord);
       break;
 
     default:

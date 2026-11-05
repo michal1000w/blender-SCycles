@@ -27,6 +27,13 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Devices whose kernels train and sample the GPU guiding field, see
+ * `kernel/integrator/guiding_gpu.h`. CUDA and OptiX have it in their transport kernel module. */
+static bool device_type_has_gpu_guiding(const DeviceType type)
+{
+  return type == DEVICE_METAL || type == DEVICE_CUDA || type == DEVICE_OPTIX;
+}
+
 static bool use_bidirectional_path_tracing(const DeviceScene *device_scene)
 {
   return path_trace_use_bidirectional(device_scene);
@@ -76,7 +83,7 @@ static size_t estimate_single_state_size(const uint64_t kernel_features,
   }
 #define KERNEL_STRUCT_CPU_GUIDING_FEATURE 0
 #define KERNEL_STRUCT_GPU_GUIDING_FEATURE \
-  (device_type == DEVICE_METAL ? KERNEL_FEATURE_PATH_GUIDING : 0)
+  (device_type_has_gpu_guiding(device_type) ? KERNEL_FEATURE_PATH_GUIDING : 0)
 
 #include "kernel/integrator/state_template.h"
 
@@ -257,7 +264,7 @@ void PathTraceWorkGPU::alloc_integrator_soa()
    * pointer slots in the shared ABI, but do not allocate or copy unused arrays for every path. */
 #define KERNEL_STRUCT_CPU_GUIDING_FEATURE 0
 #define KERNEL_STRUCT_GPU_GUIDING_FEATURE \
-  (device_->info.type == DEVICE_METAL ? KERNEL_FEATURE_PATH_GUIDING : 0)
+  (device_type_has_gpu_guiding(device_->info.type) ? KERNEL_FEATURE_PATH_GUIDING : 0)
 
   bool shadow = false;
 #include "kernel/integrator/state_template.h"
@@ -388,11 +395,13 @@ void PathTraceWorkGPU::alloc_work_memory()
 
 void PathTraceWorkGPU::alloc_gpu_guiding()
 {
-  LOG_DEBUG << "Metal guiding allocation: device=" << device_->info.type
+  LOG_DEBUG << "GPU guiding allocation: device=" << device_->info.type
             << " enabled=" << device_scene_->data.integrator.use_guiding
             << " directional_sampling="
             << device_scene_->data.integrator.guiding_directional_sampling_type;
-  if (device_->info.type != DEVICE_METAL || !device_scene_->data.integrator.use_guiding) {
+  if (!device_type_has_gpu_guiding(device_->info.type) ||
+      !device_scene_->data.integrator.use_guiding)
+  {
     guiding_nodes_.free();
     guiding_accumulation_.free();
     guiding_sampling_.free();
@@ -557,6 +566,7 @@ void PathTraceWorkGPU::prepare_gpu_guiding()
     integrator_state_gpu_.guiding_force_fit = 0;
   }
   guiding_history_group_active_ = false;
+  sync_before_integrator_state_update();
   device_->const_copy_to(
       "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
 }
@@ -630,10 +640,12 @@ void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
   }
   if (integrator_state_gpu_.guiding_observation_capacity != 0) {
     integrator_state_gpu_.guiding_force_fit = 1;
+    sync_before_integrator_state_update();
     device_->const_copy_to(
         "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
     enqueue_gpu_guiding_mixture_fit();
     integrator_state_gpu_.guiding_force_fit = 0;
+    sync_before_integrator_state_update();
     device_->const_copy_to(
         "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
   }
@@ -660,12 +672,12 @@ void PathTraceWorkGPU::update_gpu_guiding(const int batch_samples)
     queue_->copy_from_device(guiding_counts_);
     queue_->synchronize();
     if (guiding_partition_.data()[guiding_partition_.size() - 1] != 0) {
-      device_->set_error("Metal guiding mixture publication failed");
+      device_->set_error("GPU guiding mixture publication failed");
       return;
     }
     guiding_live_nodes_ = max(int(guiding_counts_.data()[0]), 1);
   }
-  LOG_DEBUG << "Metal guiding publish: trained_samples=" << guiding_trained_samples_
+  LOG_DEBUG << "GPU guiding publish: trained_samples=" << guiding_trained_samples_
             << " spatial_nodes=" << guiding_live_nodes_;
 }
 
@@ -726,12 +738,18 @@ void PathTraceWorkGPU::alloc_bidirectional_path_tracing()
    * estimator carries the selection support explicitly, keeping memory linear in path count. */
   const uint capacity = light_paths;
   uint cache_capacity = 1;
-  if (device_->info.type == DEVICE_METAL && capacity > 0 &&
+  const bool device_batches_caches = device_->info.type == DEVICE_METAL ||
+                                     device_->info.type == DEVICE_CUDA ||
+                                     device_->info.type == DEVICE_OPTIX;
+  if (device_batches_caches && capacity > 0 &&
       device_scene_->data.integrator.bdpt_update_samples == 1)
   {
     /* Keep an override for controlled single-cache comparisons. Normal renders
      * batch independent caches within the existing path-state and memory bounds. */
-    const char *value = std::getenv("CYCLES_METAL_BDPT_BATCH_SIZE");
+    const char *value = std::getenv("CYCLES_BDPT_BATCH_SIZE");
+    if (value == nullptr) {
+      value = std::getenv("CYCLES_METAL_BDPT_BATCH_SIZE");
+    }
     const uint requested = value ? uint(clamp(std::atoi(value), 1, 4)) : 4u;
     const uint64_t cache_bytes = uint64_t(capacity) *
                                  (sizeof(KernelBDPTVertex) + sizeof(uint) +
@@ -1192,6 +1210,16 @@ void PathTraceWorkGPU::enqueue_reset()
   }
 }
 
+void PathTraceWorkGPU::sync_before_integrator_state_update()
+{
+  /* CUDA and OptiX update constant memory with a synchronous copy that is not ordered with the
+   * work queue. Wait for the kernels which are still using the previous state. Metal orders the
+   * update with its queue. */
+  if (device_->info.type != DEVICE_METAL) {
+    queue_->synchronize();
+  }
+}
+
 void PathTraceWorkGPU::enqueue_photon_mapping(const int start_sample)
 {
   if (!device_scene_->data.integrator.use_photon_mapping ||
@@ -1217,6 +1245,7 @@ void PathTraceWorkGPU::enqueue_photon_mapping(const int start_sample)
           device_scene_->data.integrator.photon_volume_radius_scale *
           powf(float(iteration + 1), -volume_decay),
       1.0e-6f);
+  sync_before_integrator_state_update();
   device_->const_copy_to(
       "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
 
@@ -1286,6 +1315,7 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
     integrator_state_gpu_.vcm_light_path_count = merging.light_paths;
     integrator_state_gpu_.vcm_eta_scale = merging.eta_scale;
   }
+  sync_before_integrator_state_update();
   device_->const_copy_to(
       "integrator_state", &integrator_state_gpu_, sizeof(integrator_state_gpu_));
   /* Without connections and with only the vertices of caustics kept, most light subpaths end
@@ -1355,7 +1385,12 @@ void PathTraceWorkGPU::enqueue_bidirectional_light_paths(const int start_sample,
     queue_->synchronize();
     return;
   }
-  const int order_threads = device_->info.type == DEVICE_METAL ? int(64 * cache_count) : 1;
+  /* One SIMD group compacts each cache. */
+  const int order_threads = device_->info.type == DEVICE_METAL ? int(64 * cache_count) :
+                            (device_->info.type == DEVICE_CUDA ||
+                             device_->info.type == DEVICE_OPTIX) ?
+                                                                   int(32 * cache_count) :
+                                                                   1;
   queue_->enqueue(DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER,
                   order_threads,
                   DeviceKernelArguments(&num_light_paths));

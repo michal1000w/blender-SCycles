@@ -348,7 +348,8 @@ RenderWork Session::run_update_for_next_iteration()
 
   /* Update path guiding. */
   {
-    const GuidingParams guiding_params = scene->integrator->get_guiding_params(device.get());
+    const GuidingParams guiding_params = scene->integrator->get_guiding_params(device.get(),
+                                                                                 scene.get());
     const bool guiding_reset = (guiding_params.use) ? reset_scene : false;
     path_trace_->set_guiding_params(guiding_params, guiding_reset);
   }

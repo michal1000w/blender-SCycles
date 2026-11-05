@@ -62,7 +62,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt", "photon", "vcm"))
     parser.add_argument("--guiding", action="store_true")
     parser.add_argument("--osl", action="store_true", help="Open Shading Language (CPU only)")
@@ -93,7 +93,7 @@ def new_scene(args, world_strength=0.0):
     scene.render.image_settings.color_depth = "32"
     scene.view_settings.view_transform = "Standard"
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
@@ -130,13 +130,13 @@ def new_scene(args, world_strength=0.0):
 
 
 def enable_device(args):
-    if args.device != "METAL":
+    if args.device == "CPU":
         return
     prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "METAL"
+    prefs.compute_device_type = args.device
     prefs.get_devices()
     for device in prefs.devices:
-        device.use = device.type == "METAL"
+        device.use = device.type == args.device
 
 
 def add_camera(scene, location, look_at, ortho_scale=None, lens=50.0):

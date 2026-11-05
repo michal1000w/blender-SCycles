@@ -15,8 +15,25 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* MSVC does not optimize a function beyond a size limit at all (warning C4883). Inlined into
+ * the triangle intersection, the ray solver and its shader evaluations make every BVH
+ * traversal function exceed it; unoptimized, they need megabytes of stack. MSVC keeps these
+ * functions out of line, other compilers keep their inlining. */
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__)
+#  define ccl_device_inline_pixel_displacement ccl_device ccl_never_inline
+#  define ccl_device_forceinline_pixel_displacement ccl_device ccl_never_inline
+/* The functions of this file that GPUs keep out of line too. */
+#  pragma push_macro("ccl_device_noinline")
+#  undef ccl_device_noinline
+#  define ccl_device_noinline ccl_device ccl_never_inline
+#  define PIXEL_DISPLACEMENT_MSVC_NOINLINE
+#else
+#  define ccl_device_inline_pixel_displacement ccl_device_inline
+#  define ccl_device_forceinline_pixel_displacement ccl_device_forceinline
+#endif
+
 template<typename ConstIntegratorGenericState>
-ccl_device_inline void pixel_displacement_shader_eval(KernelGlobals kg,
+ccl_device_inline_pixel_displacement void pixel_displacement_shader_eval(KernelGlobals kg,
                                                       ConstIntegratorGenericState state,
                                                       ccl_private ShaderData *sd)
 {
@@ -263,7 +280,7 @@ ccl_device_noinline Float3Type pixel_displacement_image_mapping(
   return transform_point(&mapping, co);
 }
 
-ccl_device_inline float4 pixel_displacement_resident_sample(
+ccl_device_inline_pixel_displacement float4 pixel_displacement_resident_sample(
     KernelGlobals kg, const float2 uv, const ccl_global SVMDisplacementImage &program)
 {
   const ccl_global KernelImageTexture &tex = kernel_data_fetch(image_textures, program.image.id);
@@ -1190,7 +1207,7 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
   float3 coefficients[3];
   for (int i = 0; i < 3; i++) {
     const int index = (ctx->object_flag & SD_OBJECT_HAS_CORNER_NORMALS) ? prim * 3 + i :
-                                                                          indices[i];
+                                                                          CCL_CHANNEL(uint, indices, i);
     float3 Q = attribute_data_fetch_normal(kg, normal_offset + index);
     if (ctx->object_flag & SD_OBJECT_TRANSFORM_APPLIED) {
       const Transform tfm = object_fetch_transform(kg, object, OBJECT_TRANSFORM);
@@ -1230,7 +1247,7 @@ ccl_device_inline void pixel_displacement_prepare_normal_projection(
       const bool corner = uint(record.x) == ATTR_ELEMENT_CORNER;
       for (int i = 0; i < 3; i++) {
         ctx->uv[i] = kernel_data_fetch(attributes_float2,
-                                       offset + (corner ? prim * 3 + i : indices[i]));
+                                       offset + (corner ? prim * 3 + i : CCL_CHANNEL(uint, indices, i)));
       }
     }
   }
@@ -1346,7 +1363,7 @@ ccl_device_inline bool pixel_displacement_clip_normal_prism(
 }
 
 template<typename T>
-ccl_device_inline float4
+ccl_device_inline_pixel_displacement float4
 pixel_displacement_context_sample(KernelGlobals kg,
                                   ccl_private ShaderData *sd,
                                   ccl_private const PixelDisplacementImageContext *ctx,
@@ -1563,7 +1580,7 @@ ccl_device_inline float pixel_displacement_normal_height(
   return dot(pixel_displacement_normal_eval(kg, object, bary, Ng, verts, ctx), Ng);
 }
 
-ccl_device_forceinline bool pixel_displacement_height_sample(
+ccl_device_forceinline_pixel_displacement bool pixel_displacement_height_sample(
     KernelGlobals kg,
     ccl_private const float3 verts[3],
     const int object,
@@ -2204,7 +2221,7 @@ ccl_device_noinline bool pixel_displacement_intersect_micro_patch(KernelGlobals 
                                                                ray_tmax,
                                                                r_t,
                                                                r_bary,
-                                                               int(roots[slot]));
+                                                               int(CCL_CHANNEL(float, roots, slot)));
         }
       }
     }
@@ -2374,7 +2391,7 @@ ccl_device_noinline bool pixel_displacement_direct_interval(
   return found;
 }
 
-ccl_device_forceinline bool pixel_displacement_solve_local_ray(KernelGlobals kg,
+ccl_device_forceinline_pixel_displacement bool pixel_displacement_solve_local_ray(KernelGlobals kg,
                                                                const int object,
                                                                const int prim,
                                                                const float3 ray_P,
@@ -3060,6 +3077,11 @@ ccl_device_noinline void pixel_displacement_shader_setup_from_ray(KernelGlobals 
 
 #  endif /* __PIXEL_DISPLACEMENT_INTERSECT__ */
 
+#endif
+
+#ifdef PIXEL_DISPLACEMENT_MSVC_NOINLINE
+#  pragma pop_macro("ccl_device_noinline")
+#  undef PIXEL_DISPLACEMENT_MSVC_NOINLINE
 #endif
 
 CCL_NAMESPACE_END

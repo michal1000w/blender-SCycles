@@ -23,7 +23,7 @@ import numpy as np
 def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt"))
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--resolution", type=int, default=96)
@@ -81,18 +81,18 @@ def main():
     scene.render.image_settings.color_depth = "32"
     scene.render.use_persistent_data = True
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
     cycles.max_bounces = cycles.transmission_bounces = cycles.glossy_bounces = 16
     cycles.use_bidirectional_path_tracing = args.integrator == "bdpt"
-    if args.device == "METAL":
+    if args.device != "CPU":
         prefs = bpy.context.preferences.addons["cycles"].preferences
-        prefs.compute_device_type = "METAL"
+        prefs.compute_device_type = args.device
         prefs.get_devices()
         for device in prefs.devices:
-            device.use = device.type == "METAL"
+            device.use = device.type == args.device
 
     world = bpy.data.worlds.new("World")
     world.use_nodes = True

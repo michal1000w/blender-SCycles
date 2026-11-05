@@ -148,16 +148,19 @@ struct GuidingParallaxMoments {
     atomic_add_and_fetch_float(moments + 3, harmonic_weight * harmonic_weight);
     for (int i = 0; i < 3; ++i) {
       atomic_add_and_fetch_float(moments + 4 + i,
-                                 harmonic_weight * position[i] + weight * direction[i]);
+                                 harmonic_weight * CCL_CHANNEL(float, position, i) +
+                                     weight * CCL_CHANNEL(float, direction, i));
     }
     int entry = 7;
     for (int i = 0; i < 3; ++i) {
       for (int j = i; j < 3; ++j) {
         atomic_add_and_fetch_float(
             moments + entry++,
-            harmonic_weight * position[i] * position[j] +
-                weight * (position[i] * direction[j] + direction[i] * position[j]) +
-                distance_weight * direction[i] * direction[j]);
+            harmonic_weight * CCL_CHANNEL(float, position, i) * CCL_CHANNEL(float, position, j) +
+                weight * (CCL_CHANNEL(float, position, i) * CCL_CHANNEL(float, direction, j) +
+                          CCL_CHANNEL(float, direction, i) * CCL_CHANNEL(float, position, j)) +
+                distance_weight * CCL_CHANNEL(float, direction, i) *
+                    CCL_CHANNEL(float, direction, j));
       }
     }
   }
@@ -196,7 +199,8 @@ struct GuidingParallaxMoments {
     for (int i = 0; i < 3; ++i) {
       for (int j = i; j < 3; ++j) {
         const float covariance = moments[7 + entry] * inverse_harmonic_weight -
-                                 result.target[i] * result.target[j];
+                                 CCL_CHANNEL(float, result.target, i) *
+                                     CCL_CHANNEL(float, result.target, j);
         if (!isfinite_safe(covariance)) {
           return result;
         }

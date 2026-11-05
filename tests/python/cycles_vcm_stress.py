@@ -31,7 +31,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt"))
     parser.add_argument("--cases", default="all")
     parser.add_argument("--samples", type=int, default=512)
@@ -52,12 +52,12 @@ def scene_args(args, vcm, samples, **overrides):
 
 
 def setup_device(args, scene):
-    if args.device == "METAL":
+    if args.device != "CPU":
         preferences = bpy.context.preferences.addons["cycles"].preferences
-        preferences.compute_device_type = "METAL"
+        preferences.compute_device_type = args.device
         preferences.get_devices()
         for device in preferences.devices:
-            device.use = device.type == "METAL"
+            device.use = device.type == args.device
         scene.cycles.device = "GPU"
 
 

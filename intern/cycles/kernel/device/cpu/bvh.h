@@ -689,7 +689,7 @@ ccl_device_inline bool kernel_embree_coherent_point_root(const RTCRay &ray,
                                              prim);
   const float3 P = make_float3(ray.org_x, ray.org_y, ray.org_z);
   const float3 D = make_float3(ray.dir_x, ray.dir_y, ray.dir_z);
-  const bool two_sided = kernel_data.integrator.coherent_specular_enabled &&
+  const bool two_sided = kernel_use_coherent_specular() &&
                          point_coherent_glass_two_sided(
                              true, kernel_data_fetch(object_flag, object), type);
   /* Root 0 is the front hit, root 1 the exit hit of a two-sided sphere.

@@ -1018,7 +1018,7 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     guiding_training_samples: IntProperty(
         name="Training Samples",
-        description="Maximum training field updates on CPU, or training camera samples on Metal. "
+        description="Maximum training field updates on CPU, or training camera samples on the GPU. "
         "A CPU update can contain several camera samples. More training may improve guiding "
         "but adds rendering cost. A value of 0 continues training until the last sample",
         min=0,
@@ -1028,14 +1028,14 @@ class CyclesRenderSettings(bpy.types.PropertyGroup):
 
     guiding_gpu_memory_mb: IntProperty(
         name="Guiding Memory",
-        description="Maximum memory in MiB for the Metal spatial and directional guiding fields",
+        description="Maximum memory in MiB for the GPU spatial and directional guiding fields",
         min=16, max=1024,
         default=256,
     )
 
     guiding_gpu_history_memory_mb: IntProperty(
         name="Guiding Training Memory",
-        description="Maximum memory in MiB for Metal path training histories. Larger budgets "
+        description="Maximum memory in MiB for GPU path training histories. Larger budgets "
         "allow more paths to train concurrently, including BDPT adjoint observations. "
         "The slider stays in the typical range; values up to 4096 MiB (4 GiB) can be typed",
         min=16, soft_max=1024, max=4096,

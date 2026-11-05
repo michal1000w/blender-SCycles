@@ -20,6 +20,10 @@ CCL_NAMESPACE_BEGIN
 bool device_kernel_has_shading(DeviceKernel kernel);
 bool device_kernel_has_intersection(DeviceKernel kernel);
 bool device_kernel_has_gpu_function(DeviceKernel kernel, bool metal = false);
+/* Light-cache kernels, which CUDA, OptiX and HIP only have in their transport kernel module. */
+bool device_kernel_is_light_cache(DeviceKernel kernel);
+/* GPU path guiding kernels, which Metal, CUDA and OptiX have. */
+bool device_kernel_is_gpu_guiding(DeviceKernel kernel);
 
 const char *device_kernel_as_string(DeviceKernel kernel);
 

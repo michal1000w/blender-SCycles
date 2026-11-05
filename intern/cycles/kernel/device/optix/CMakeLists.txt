@@ -14,6 +14,9 @@ set(SRC_KERNEL_DEVICE_OPTIX
   kernel.cu
   kernel_mnee.cu
   kernel_shader_raytrace.cu
+  kernel_transport.cu
+  kernel_transport_surface.cu
+  kernel_transport_surface_raytrace.cu
 )
 
 if(WITH_CYCLES_OSL)
@@ -75,6 +78,12 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
 
     cuda_add_common_flags(${cuda_version} ${arch} "${cuda_flags}" cuda_flags)
 
+    # Limit the kernels compiled at once by their memory use, see CYCLES_KERNEL_JOB_POOL.
+    set(job_pool)
+    if(CYCLES_KERNEL_JOB_POOL)
+      set(job_pool JOB_POOL ${CYCLES_KERNEL_JOB_POOL})
+    endif()
+
     add_custom_command(
       OUTPUT
         ${output}
@@ -90,6 +99,7 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
         ${input}
       WORKING_DIRECTORY
         "${CMAKE_CURRENT_SOURCE_DIR}"
+      ${job_pool}
     )
 
     add_custom_command(
@@ -117,6 +127,23 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
     kernel_optix_shader_raytrace
     "${cuda_nvcc_executable}" "${cuda_version}"
     "kernel_shader_raytrace.cu"
+    "--keep-device-functions")
+  # Light-cache transport and coherent light, see kernel_transport.cu. Its surface shading
+  # kernels are modules of their own, as one module of all of them needs over 20 GB to compile.
+  cycles_optix_kernel_add(
+    kernel_optix_transport
+    "${cuda_nvcc_executable}" "${cuda_version}"
+    "kernel_transport.cu"
+    "")
+  cycles_optix_kernel_add(
+    kernel_optix_transport_surface
+    "${cuda_nvcc_executable}" "${cuda_version}"
+    "kernel_transport_surface.cu"
+    "")
+  cycles_optix_kernel_add(
+    kernel_optix_transport_surface_raytrace
+    "${cuda_nvcc_executable}" "${cuda_version}"
+    "kernel_transport_surface_raytrace.cu"
     "--keep-device-functions")
   if(WITH_CYCLES_OSL)
     cycles_optix_kernel_add(

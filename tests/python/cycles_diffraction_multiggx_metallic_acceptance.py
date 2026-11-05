@@ -60,7 +60,7 @@ def sha256(path):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", choices=("CPU", "METAL"), default="CPU")
+    parser.add_argument("--device", choices=("CPU", "METAL", "CUDA", "OPTIX"), default="CPU")
     parser.add_argument("--principled", action="store_true", help="Test fully metallic Principled instead of Metallic")
     parser.add_argument("--osl", action="store_true", help="CPU OSL shading")
     parser.add_argument("--case", action="append", choices=tuple(CASES),
@@ -135,12 +135,12 @@ def configure_scene(args):
     material.node_tree.links.new(metallic.outputs["BSDF"], output.inputs["Surface"])
     sphere.data.materials.append(material)
 
-    if args.device == "METAL":
+    if args.device != "CPU":
         preferences = bpy.context.preferences.addons["cycles"].preferences
-        preferences.compute_device_type = "METAL"
+        preferences.compute_device_type = args.device
         preferences.get_devices()
         for device in preferences.devices:
-            device.use = device.type == "METAL"
+            device.use = device.type == args.device
         if not any(device.use for device in preferences.devices):
             raise RuntimeError("No enabled Metal device")
         scene.cycles.device = "GPU"

@@ -30,6 +30,24 @@ ccl_device_inline uint compact_indices(ccl_global uint *indices,
     }
     count += kept;
   }
+#elif defined(__KERNEL_CUDA__)
+  /* Same algorithm as Metal, with one CUDA warp. All 32 lanes run every iteration. */
+  const uint lanes_below = (lane == 0) ? 0u : (0xFFFFFFFFu >> (32u - lane));
+  for (uint begin = 0; begin < size; begin += width) {
+    const uint index = begin + lane;
+    const uint slot = index < size ? indices[index] : ~0u;
+    const bool keep = slot != ~0u;
+    const uint mask = __ballot_sync(0xFFFFFFFFu, keep);
+    const uint offset = uint(__popc(mask & lanes_below));
+    const uint kept = uint(__popc(mask));
+    /* Every lane has read its input before any lane writes into the compacted range. */
+    __syncwarp();
+    if (keep) {
+      indices[count + offset] = slot;
+    }
+    __syncwarp();
+    count += kept;
+  }
 #else
   (void)lane;
   (void)width;

@@ -38,6 +38,16 @@ struct KernelParamsCUDA {
 __constant__ KernelParamsCUDA kernel_params;
 #endif
 
+#if defined(__KERNEL_GPU__) && defined(__KERNEL_GPU_TRANSPORT__)
+/* Only rays of the intersection kernels intersect pixel displaced surfaces, as with the Metal
+ * `pixel_displacement_rays` function constant. Those kernels pass the address of this object as
+ * their KernelGlobals instead of nullptr, see ccl_gpu_intersect_kg. Both are constants in each
+ * kernel, so after inlining the test costs nothing. */
+__device__ KernelGlobalsGPU kernel_globals_intersect;
+#  define ccl_gpu_intersect_kg (&kernel_globals_intersect)
+#  define pixel_displacement_rays (kg != nullptr)
+#endif
+
 /* Abstraction macros */
 #define kernel_data kernel_params.data
 #define kernel_data_fetch(name, index) kernel_params.name[(index)]

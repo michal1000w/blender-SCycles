@@ -25,6 +25,14 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Diffraction weight of a BSDF node. Kernels without diffraction (see kernel/features.h) render
+ * the node without it, the device loads the kernels with diffraction for scenes that use it. */
+#ifdef __DIFFRACTION__
+#  define svm_diffraction_weight(stack, input) saturatef(stack_load(stack, input))
+#else
+#  define svm_diffraction_weight(stack, input) 0.0f
+#endif
+
 /* Closure Nodes */
 
 ccl_device_inline int svm_node_closure_bsdf_skip(int offset, const uint type)
@@ -225,7 +233,7 @@ ccl_device
           kg, sd, stack, data, N, ray_visibility, path_flag, mix_weight);
 
       float3 base_color_rgb = stack_load(stack, data.base_color);
-      if (kernel_data.integrator.coherent_specular_enabled &&
+      if (kernel_use_coherent_specular() &&
           (sd->object_flag & SD_OBJECT_COHERENT_DETECTOR))
       {
         base_color_rgb = coherent_detector_passive_color(base_color_rgb);
@@ -254,7 +262,7 @@ ccl_device
                                          sd, fmaxf(stack_load(stack, data.thin_film_ior), 1e-5f)) :
                                      0.0f;
 
-      const float diffraction=saturatef(stack_load(stack,data.diffraction_weight));
+      const float diffraction=svm_diffraction_weight(stack, data.diffraction_weight);
       float alpha_x = sqr(roughness);
       float alpha_y = sqr(roughness);
       float3 T = zero_float3();
@@ -572,7 +580,7 @@ ccl_device
       N = safe_normalize_fallback(N, sd->N);
 
       Spectrum weight = closure_weight;
-      if (kernel_data.integrator.coherent_specular_enabled &&
+      if (kernel_use_coherent_specular() &&
           (sd->object_flag & SD_OBJECT_COHERENT_DETECTOR))
       {
         weight = coherent_detector_passive_color(weight);
@@ -618,7 +626,7 @@ ccl_device
         break;
       }
 #endif
-      const float diffraction=saturatef(stack_load(stack,cdata.diffraction_weight));
+      const float diffraction=svm_diffraction_weight(stack, cdata.diffraction_weight);
       ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
           sd, sizeof(MicrofacetBsdf), rgb_to_spectrum(make_float3(mix_weight)));
 
@@ -724,6 +732,7 @@ ccl_device
     case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID: {
       const ccl_global SVMNodeDiffractionSmoothBsdfData &data =
           svm_node_get<SVMNodeDiffractionSmoothBsdfData>(kg, &offset);
+#ifdef __DIFFRACTION__
       const float3 N = stack_load_float3_default(stack, data.normal_offset, sd->N);
       const float3 T = stack_load_float3_default(stack, data.tangent_offset, sd->dPdu);
       bsdf_diffraction_smooth_setup(kg,
@@ -740,11 +749,18 @@ ccl_device
                                     data.reflection_budget, data.transmission_budget,
                                     data.ridge_extinction,
                                     data.ridge_table, data.groove_table, data.substrate_table);
+#else
+      (void)data;
+#endif
       break;
     }
     case CLOSURE_BSDF_DIFFRACTION_GRATING_ID: {
       const ccl_global SVMNodeDiffractionGratingBsdfData &bsdf_data =
           svm_node_get<SVMNodeDiffractionGratingBsdfData>(kg, &offset);
+#ifndef __DIFFRACTION__
+      (void)bsdf_data;
+      break;
+#endif
 
 #ifdef __CAUSTICS_TRICKS__
       if (!kernel_data.integrator.caustics_reflective &&
@@ -804,7 +820,7 @@ ccl_device
       float3 N = stack_load_float3_default(stack, bsdf_data.normal_offset, sd->N);
       N = safe_normalize_fallback(N, sd->N);
 
-      const float diffraction = saturatef(stack_load(stack, bsdf_data.diffraction_weight));
+      const float diffraction = svm_diffraction_weight(stack, bsdf_data.diffraction_weight);
       if (diffraction > 0.0f) {
         const float alpha = sqr(saturatef(stack_load(stack, bsdf_data.roughness)));
         const float aniso = clamp(stack_load(stack, bsdf_data.anisotropy), -0.99f, 0.99f);
@@ -929,7 +945,7 @@ ccl_device
       const Spectrum weight = bsdf_spectral_transmission_color(
                                   kg, sd, spectrum_to_rgb(closure_weight)) *
                               mix_weight;
-      const float diffraction=saturatef(stack_load(stack,bsdf_data.diffraction_weight));
+      const float diffraction=svm_diffraction_weight(stack, bsdf_data.diffraction_weight);
       if (diffraction>0) {
         bsdf_diffraction_refraction_setup(sd,weight*diffraction,
             maybe_ensure_valid_specular_reflection(sd,N),
@@ -1001,7 +1017,7 @@ ccl_device
       const float thinfilm_ior = bsdf_nested_relative_film_ior(
           sd, fmaxf(stack_load(stack, bsdf_data.thin_film_ior), 1e-5f));
 
-      const float diffraction = saturatef(stack_load(stack, bsdf_data.diffraction_weight));
+      const float diffraction = svm_diffraction_weight(stack, bsdf_data.diffraction_weight);
       const bool polarizer = stack_load(stack, bsdf_data.polarizer) != 0;
 
       if (diffraction > 0.0f) {

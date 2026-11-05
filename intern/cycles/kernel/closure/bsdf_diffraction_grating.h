@@ -69,6 +69,12 @@ static_assert(sizeof(ShaderClosure) >= sizeof(DiffractionGratingBsdf),
  * of every scene goes through: inlined they made renders without any grating 4% slower. */
 #ifdef __KERNEL_METAL__
 #  define ccl_device_diffraction_grating ccl_device __attribute__((noinline))
+#elif defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__)
+/* Same with MSVC on the CPU, see ccl_device_inline_outline_rare. */
+#  define ccl_device_diffraction_grating ccl_device ccl_never_inline
+#elif defined(__KERNEL_CUDA__)
+/* Same on CUDA and OptiX, where inlining also multiplies kernel compile time. */
+#  define ccl_device_diffraction_grating ccl_device_noinline
 #else
 #  define ccl_device_diffraction_grating ccl_device
 #endif

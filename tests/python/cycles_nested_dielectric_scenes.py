@@ -49,7 +49,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt", "photon"))
     parser.add_argument("--guiding", action="store_true")
     parser.add_argument("--osl", action="store_true", help="Open Shading Language (CPU only)")
@@ -84,7 +84,7 @@ def new_scene(args, camera_location=(0.0, -6.0, 2.2), look_at=(0.0, 0.0, 0.9), l
         scene.render.threads_mode = "FIXED"
         scene.render.threads = args.threads
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
@@ -1049,13 +1049,13 @@ VALIDATION_PAIRS = ("shell", "rough_shell", "rough_inner", "rough_outer", "mnee_
 
 
 def enable_device(args):
-    if args.device != "METAL":
+    if args.device == "CPU":
         return
     prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "METAL"
+    prefs.compute_device_type = args.device
     prefs.get_devices()
     for device in prefs.devices:
-        device.use = device.type == "METAL"
+        device.use = device.type == args.device
 
 
 def main():

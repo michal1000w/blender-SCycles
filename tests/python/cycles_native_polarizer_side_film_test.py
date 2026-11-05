@@ -8,7 +8,7 @@ transmission axis must lie in the film plane: 90/45/0 transmits 1/8, crossed
 0/90 transmits 0, a single filter 1/2, uniformly across the slab. Rotating the
 object about its film normal must act like the angle socket.
 
-  Blender -b --factory-startup --python this.py -- [--device CPU|METAL]
+  Blender -b --factory-startup --python this.py -- [--device CPU|METAL|CUDA|OPTIX]
 """
 import argparse
 import math
@@ -46,12 +46,12 @@ def setup(device):
     scene.cycles.max_bounces = 16
     scene.render.resolution_x = scene.render.resolution_y = RES
     scene.view_settings.view_transform = 'Standard'
-    if device == 'METAL':
+    if device != 'CPU':
         prefs = bpy.context.preferences.addons['cycles'].preferences
-        prefs.compute_device_type = 'METAL'
+        prefs.compute_device_type = device
         prefs.get_devices()
         for d in prefs.devices:
-            d.use = d.type == 'METAL'
+            d.use = d.type == device
         scene.cycles.device = 'GPU'
     world = bpy.data.worlds.new('World')
     world.use_nodes = True
@@ -87,7 +87,7 @@ def render(scene):
 def main():
     argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', choices=('CPU', 'METAL'), default='CPU')
+    parser.add_argument('--device', choices=('CPU', 'METAL', 'CUDA', 'OPTIX'), default='CPU')
     args = parser.parse_args(argv)
     scene, nodes = setup(args.device)
     objects = [o for o in scene.objects if o.type == 'MESH']

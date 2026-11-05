@@ -69,8 +69,8 @@ struct GuidingConditionalMixture {
                                      fallback.axis);
     if (source.valid) {
       for (int i = 0; i < 3; ++i) {
-        entry[5 + i] = source.target[i];
-        entry[14 + i] = metric_extent[i];
+        entry[5 + i] = CCL_CHANNEL(float, source.target, i);
+        entry[14 + i] = CCL_CHANNEL(float, metric_extent, i);
       }
       for (int i = 0; i < 6; ++i) {
         entry[8 + i] = source.covariance[i];
@@ -84,10 +84,10 @@ struct GuidingConditionalMixture {
       const float r = min(safe_sqrtf(1.0f - fit.residual_variance), 1.0f - 1e-6f);
       entry[1] = min(r * (3.0f - r * r) / (1.0f - r * r), 16384.0f);
       for (int i = 0; i < 3; ++i) {
-        entry[2 + i] = fit.mean_direction[i];
-        entry[5 + i] = fit.mean_position[i];
+        entry[2 + i] = CCL_CHANNEL(float, fit.mean_direction, i);
+        entry[5 + i] = CCL_CHANNEL(float, fit.mean_position, i);
         for (int j = 0; j < 3; ++j) {
-          entry[8 + 3 * i + j] = fit.slope[i][j];
+          entry[8 + 3 * i + j] = CCL_CHANNEL(float, fit.slope[i], j);
         }
       }
       entry[17] = 1.0f;

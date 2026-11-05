@@ -88,7 +88,7 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput;
   if (polarization_enabled(kg)) polarization_path_write(state, polarization_unpolarized());
   INTEGRATOR_STATE_WRITE(state, path, optical_depth) = 0.0f;
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   if (kernel_data.integrator.use_guiding) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
     if (kernel_integrator_state.guiding_training) {
@@ -360,7 +360,7 @@ ccl_device_inline float path_state_continuation_probability(KernelGlobals kg,
   /* Probabilistic termination: use `sqrt()` to roughly match typical view
    * transform and do path termination a bit later on average. */
   Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
-#if (defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4) || defined(__KERNEL_METAL__)
+#if (defined(__PATH_GUIDING__) && PATH_GUIDING_LEVEL >= 4) || defined(__GPU_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
     throughput *= INTEGRATOR_STATE(state, path, unguided_throughput);
   }

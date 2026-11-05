@@ -14,8 +14,19 @@
 CCL_NAMESPACE_BEGIN
 
 class Device;
+class DeviceInfo;
 class DeviceScene;
 class Scene;
+
+/* Devices which run the light-cache transport (bidirectional path tracing, vertex merging and
+ * photon mapping), pixel-level displacement and coherent specular connections. A multi-device
+ * render uses them only when every device does. */
+bool device_supports_light_cache_transport(const DeviceInfo &info);
+bool device_supports_pixel_displacement(const DeviceInfo &info);
+bool device_supports_coherent_specular(const DeviceInfo &info);
+/* Whether any device is CUDA or OptiX. These keep the features above and others in a separate
+ * kernel module, which is loaded when the kernel features request it. */
+bool device_uses_transport_kernel_module(const DeviceInfo &info);
 
 struct HaltonSequence {
   HaltonSequence()
@@ -202,7 +213,7 @@ class Integrator : public Node {
 
   AdaptiveSampling get_adaptive_sampling() const;
   DenoiseParams get_denoise_params() const;
-  GuidingParams get_guiding_params(const Device *device) const;
+  GuidingParams get_guiding_params(const Device *device, const Scene *scene = nullptr) const;
 
   bool is_modified() const;
   void clear_modified();

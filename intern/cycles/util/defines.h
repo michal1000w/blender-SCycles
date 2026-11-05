@@ -44,6 +44,7 @@
 #    define ccl_may_alias
 #    define ccl_always_inline __forceinline
 #    define ccl_never_inline __declspec(noinline)
+#    define ccl_noinline __declspec(noinline)
 #  else /* _WIN32 && !FREE_WINDOWS */
 #    define ccl_device_inline static inline __attribute__((always_inline))
 #    define ccl_device_forceinline static inline __attribute__((always_inline))
@@ -57,6 +58,7 @@
 #    define ccl_may_alias __attribute__((__may_alias__))
 #    define ccl_always_inline __attribute__((always_inline))
 #    define ccl_never_inline __attribute__((noinline))
+#    define ccl_noinline __attribute__((noinline))
 #  endif /* _WIN32 && !FREE_WINDOWS */
 
 /* Address spaces for GPU. */
@@ -90,6 +92,18 @@
 #endif
 #ifndef ccl_device_outline_metal
 #  define ccl_device_outline_metal ccl_device
+#endif
+
+/* Closures of this fork's optical models (diffraction), which ordinary materials never reach.
+ * MSVC gives the locals of every inlined path a stack slot of their own: inlined into the closure
+ * dispatch and setup they enlarge its stack frame for every material, which slows down all CPU
+ * rendering. It keeps them out of line; other compilers keep the policy above. */
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__)
+#  define ccl_device_inline_outline_rare ccl_device ccl_never_inline
+#  define ccl_device_outline_rare ccl_device ccl_never_inline
+#else
+#  define ccl_device_inline_outline_rare ccl_device_inline_outline_metal
+#  define ccl_device_outline_rare ccl_device_outline_metal
 #endif
 
 /* Light-cache transport (bidirectional path tracing and photon mapping) is only reached when a

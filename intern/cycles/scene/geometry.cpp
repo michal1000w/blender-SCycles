@@ -34,26 +34,8 @@
 
 CCL_NAMESPACE_BEGIN
 
-/* Pixel-level displacement is implemented by the Metal and CPU kernels. A multi-device render
- * uses it only when every device supports it. */
-static bool device_supports_pixel_displacement(const DeviceInfo &info)
-{
-  if (info.type == DEVICE_METAL || info.type == DEVICE_CPU) {
-    return true;
-  }
-
-  if (info.type == DEVICE_MULTI) {
-    for (const DeviceInfo &subdevice : info.multi_devices) {
-      if (!device_supports_pixel_displacement(subdevice)) {
-        return false;
-      }
-    }
-    return !info.multi_devices.empty();
-  }
-
-  return false;
-}
-
+/* Pixel-level displacement is implemented by the Metal, CPU and CUDA kernels, see
+ * device_supports_pixel_displacement(const DeviceInfo &). */
 static bool device_supports_pixel_displacement(const Device *device)
 {
   return device_supports_pixel_displacement(device->info);

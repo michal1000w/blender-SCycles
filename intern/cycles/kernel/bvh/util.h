@@ -264,7 +264,7 @@ ccl_device_inline bool intersection_skip_self_shadow_coherent_point(
     const int prim,
     const int type)
 {
-  if (!kernel_data.integrator.coherent_specular_enabled || type != PRIMITIVE_POINT) {
+  if (!kernel_use_coherent_specular() || type != PRIMITIVE_POINT) {
     return intersection_skip_self_shadow(self, object, prim);
   }
   const bool two_sided = point_coherent_glass_two_sided(

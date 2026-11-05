@@ -30,7 +30,9 @@ class CUDADeviceKernel {
 /* Cache of CUDA kernels for each DeviceKernel. */
 class CUDADeviceKernels {
  public:
-  void load(CUDADevice *device);
+  /* Load the kernels of a module. Only a transport module (kernel_transport.cu) contains the
+   * light-cache kernels. */
+  void load(CUDADevice *device, CUmodule cuModule, bool light_cache);
   const CUDADeviceKernel &get(DeviceKernel kernel) const;
   bool available(DeviceKernel kernel) const;
 

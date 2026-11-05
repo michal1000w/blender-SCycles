@@ -317,24 +317,11 @@ static bool coherent_specular_pass_supported(const PassType type)
   }
 }
 
-/* The deterministic detector estimator is shared kernel code. CPU renders it
- * with path tracing (BDPT and GPU guiding are Metal features and fall back to
- * PT elsewhere); Metal additionally runs the BDPT prefix ownership. Other GPU
- * backends are not validated for this transport. */
+/* The deterministic detector estimator is shared kernel code, see
+ * device_supports_coherent_specular(). */
 static bool coherent_specular_device_supported(const DeviceInfo &info)
 {
-  if (info.type == DEVICE_CPU || info.type == DEVICE_METAL) {
-    return true;
-  }
-  if (info.type == DEVICE_MULTI && !info.multi_devices.empty()) {
-    for (const DeviceInfo &subdevice : info.multi_devices) {
-      if (!coherent_specular_device_supported(subdevice)) {
-        return false;
-      }
-    }
-    return true;
-  }
-  return false;
+  return device_supports_coherent_specular(info);
 }
 
 static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, Progress &progress)
@@ -361,7 +348,7 @@ static bool scene_prepare_coherent_specular(Scene *scene, DeviceScene *dscene, P
     return false;
   }
   if (!coherent_specular_device_supported(scene->device->info)) {
-    progress.set_error("Coherent specular connections require CPU or Metal devices");
+    progress.set_error("Coherent specular connections are not supported on this device");
     return false;
   }
   if (scene->integrator->get_max_bounce() < max_events + 1 ||
@@ -1699,6 +1686,9 @@ void Scene::update_kernel_features()
   bool has_caustics_receiver = false;
   bool has_caustics_caster = false;
   bool has_caustics_light = false;
+  /* Pixel-level displacement applies to meshes with true displacement, see
+   * GeometryManager::device_update(). */
+  bool has_true_displacement = false;
 
   for (Object *object : objects) {
     if (object->get_is_caustics_caster()) {
@@ -1731,8 +1721,9 @@ void Scene::update_kernel_features()
       kernel_max_prim_count = max(kernel_max_prim_count, pointcloud->num_points());
     }
     else if (geom->is_mesh()) {
-      kernel_max_prim_count = max(kernel_max_prim_count,
-                                  static_cast<Mesh *>(geom)->num_triangles());
+      const Mesh *mesh = static_cast<Mesh *>(geom);
+      kernel_max_prim_count = max(kernel_max_prim_count, mesh->num_triangles());
+      has_true_displacement |= mesh->has_true_displacement();
     }
     else if (geom->is_light()) {
       const Light *light = static_cast<const Light *>(object->get_geometry());
@@ -1761,7 +1752,7 @@ void Scene::update_kernel_features()
     kernel_features |= KERNEL_FEATURE_MNEE;
   }
 
-  if (integrator->get_guiding_params(device).use) {
+  if (integrator->get_guiding_params(device, this).use) {
     kernel_features |= KERNEL_FEATURE_PATH_GUIDING;
   }
 
@@ -1772,6 +1763,31 @@ void Scene::update_kernel_features()
   kernel_features |= film->get_kernel_features(this);
   kernel_features |= integrator->get_kernel_features();
   kernel_features |= camera->get_kernel_features();
+
+  /* Devices without the light-cache transport render these scenes with path tracing; do not
+   * request kernels for it. */
+  if (!integrator->use_bidirectional_path_tracing_on_device(device)) {
+    kernel_features &= ~KERNEL_FEATURE_BDPT;
+  }
+  if (!integrator->use_photon_mapping_on_device(device)) {
+    kernel_features &= ~KERNEL_FEATURE_PHOTON_MAPPING;
+  }
+  /* CUDA and OptiX load pixel-level displacement as part of their transport kernel module, only
+   * for scenes with displaced meshes: the transport module is slower for every other scene, and
+   * OptiX renders it with the CUDA kernels. */
+  if (has_true_displacement && integrator->get_use_pixel_displacement() &&
+      integrator->get_pixel_displacement_scale() != 0.0f &&
+      integrator->get_pixel_displacement_max_distance() > 0.0f &&
+      device_supports_pixel_displacement(device->info) &&
+      device_uses_transport_kernel_module(device->info))
+  {
+    kernel_features |= KERNEL_FEATURE_PIXEL_DISPLACEMENT;
+  }
+  /* Diffraction closures are in the transport kernel module of CUDA and OptiX as well. Other
+   * kernels always contain them. */
+  if (!device_uses_transport_kernel_module(device->info)) {
+    kernel_features &= ~KERNEL_FEATURE_DIFFRACTION;
+  }
 
   dscene.data.kernel_features = kernel_features;
 
@@ -1852,6 +1868,19 @@ static void log_kernel_features(const uint64_t features)
   LOG_INFO << "Use Light Linking " << string_from_bool(features & KERNEL_FEATURE_LIGHT_LINKING);
   LOG_INFO << "Use Shadow Linking " << string_from_bool(features & KERNEL_FEATURE_SHADOW_LINKING);
   LOG_INFO << "Use Gaussian Splats " << string_from_bool(features & KERNEL_FEATURE_GSPLATS);
+  LOG_INFO << "Use Path Guiding " << string_from_bool(features & KERNEL_FEATURE_PATH_GUIDING);
+  LOG_INFO << "Use Bidirectional " << string_from_bool(features & KERNEL_FEATURE_BDPT);
+  LOG_INFO << "Use Photon Mapping " << string_from_bool(features & KERNEL_FEATURE_PHOTON_MAPPING);
+  LOG_INFO << "Use Coherent Direct " << string_from_bool(features & KERNEL_FEATURE_COHERENT_DIRECT);
+  LOG_INFO << "Use Coherent Specular "
+           << string_from_bool(features & KERNEL_FEATURE_COHERENT_SPECULAR);
+  LOG_INFO << "Use Polarization " << string_from_bool(features & KERNEL_FEATURE_POLARIZATION);
+  LOG_INFO << "Use Nested Dielectrics "
+           << string_from_bool(features & KERNEL_FEATURE_NESTED_DIELECTRICS);
+  LOG_INFO << "Use Volume IOR " << string_from_bool(features & KERNEL_FEATURE_VOLUME_IOR);
+  LOG_INFO << "Use Pixel Displacement "
+           << string_from_bool(features & KERNEL_FEATURE_PIXEL_DISPLACEMENT);
+  LOG_INFO << "Use Diffraction " << string_from_bool(features & KERNEL_FEATURE_DIFFRACTION);
 }
 
 bool Scene::load_kernels(Progress &progress)

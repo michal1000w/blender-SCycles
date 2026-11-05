@@ -244,7 +244,7 @@ ccl_device_inline bool bsdf_diffraction_thin_sheet_setup(ccl_private ShaderData 
 
 /* Preserve the native two-interface Fresnel and tint computation. The scalar
  * phase screen redistributes each port's already-absorbed spectral power. */
-ccl_device_inline_outline_metal FresnelCoeff bsdf_diffraction_thin_glass_setup(
+ccl_device_inline_outline_rare FresnelCoeff bsdf_diffraction_thin_glass_setup(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const bool reflective,
@@ -361,16 +361,16 @@ ccl_device_inline_outline_metal FresnelCoeff bsdf_diffraction_thin_glass_setup(
         const float3 I=make_float3(dot(sd->wi,X),dot(sd->wi,Y),dot(sd->wi,bsdf->N));
         for (int c=0;c<3;++c) {
           if (lobe) {
-            potential[c]=0.5f*extra->blend*diffraction_albedo_lookup(kg,albedo_handles[c],wavelength_nm,make_float3(fabsf(I.x),fabsf(I.y),I.z)).x;
+            CCL_CHANNEL(float, potential, c)=0.5f*extra->blend*diffraction_albedo_lookup(kg,CCL_CHANNEL(int, albedo_handles, c),wavelength_nm,make_float3(fabsf(I.x),fabsf(I.y),I.z)).x;
           }
           else {
             DiffractionThinSheetModel model=extra->model;
-            model.reflection_tint=extra->tint.reflectance[c];
-            model.transmission_tint=extra->tint.transmittance[c];
+            model.reflection_tint=CCL_CHANNEL(float, extra->tint.reflectance, c);
+            model.transmission_tint=CCL_CHANNEL(float, extra->tint.transmittance, c);
             const float2 coeff=diffraction_thin_sheet_model_coefficients(&model,I.z);
-            const float q=diffraction_albedo_lookup(kg,albedo_handles[c],wavelength_nm,make_float3(fabsf(I.x),fabsf(I.y),I.z)).x;
+            const float q=diffraction_albedo_lookup(kg,CCL_CHANNEL(int, albedo_handles, c),wavelength_nm,make_float3(fabsf(I.x),fabsf(I.y),I.z)).x;
             const float escaped=coeff.x+coeff.y>0.0f ? max(0.0f,1.0f-q/(coeff.x+coeff.y)) : 0.0f;
-            potential[c]=mix(carrier[c],(port ? coeff.y : coeff.x)*escaped,extra->blend);
+            CCL_CHANNEL(float, potential, c)=mix(CCL_CHANNEL(float, carrier, c),(port ? coeff.y : coeff.x)*escaped,extra->blend);
           }
         }
         bsdf->sample_weight *= max(0.0f,average(potential));
@@ -488,8 +488,8 @@ ccl_device_inline DiffractionThinSheetModel diffraction_thin_sheet_channel_model
     ccl_private const DiffractionThinSheetExtra *extra, const int channel)
 {
   DiffractionThinSheetModel p=extra->model;
-  p.reflection_tint=extra->tint.reflectance[channel];
-  p.transmission_tint=extra->tint.transmittance[channel];
+  p.reflection_tint=CCL_CHANNEL(float, extra->tint.reflectance, channel);
+  p.transmission_tint=CCL_CHANNEL(float, extra->tint.transmittance, channel);
   return p;
 }
 
@@ -499,9 +499,9 @@ ccl_device_inline Spectrum diffraction_thin_sheet_cached_missing(
 {
   Spectrum q=zero_spectrum();
   for (int c=0;c<3;++c) {
-    const float2 data=diffraction_albedo_lookup(kg,extra->albedo_handles[c],extra->wavelength_nm,
+    const float2 data=diffraction_albedo_lookup(kg,CCL_CHANNEL(int, extra->albedo_handles, c),extra->wavelength_nm,
                                                make_float3(fabsf(w.x),fabsf(w.y),fabsf(w.z)));
-    q[c]=data.x; (*average)[c]=data.y;
+    CCL_CHANNEL(float, q, c)=data.x; CCL_CHANNEL(float, (*average), c)=data.y;
   }
   return q;
 }
@@ -526,7 +526,7 @@ ccl_device_inline Spectrum bsdf_diffraction_thin_sheet_eval(
     const Spectrum qo=diffraction_thin_sheet_cached_missing(kg,e,O,&unused);
     Spectrum value=zero_spectrum();
     for (int c=0;c<3;++c) {
-      value[c]=avg[c]>0.0f ? e->blend*qi[c]*qo[c]/(M_2PI_F*avg[c])*mu : 0.0f;
+      CCL_CHANNEL(float, value, c)=CCL_CHANNEL(float, avg, c)>0.0f ? e->blend*CCL_CHANNEL(float, qi, c)*CCL_CHANNEL(float, qo, c)/(M_2PI_F*CCL_CHANNEL(float, avg, c))*mu : 0.0f;
     }
     return value;
   }
@@ -541,8 +541,8 @@ ccl_device_inline Spectrum bsdf_diffraction_thin_sheet_eval(
     Spectrum Ci,Co;
     for (int c=0;c<3;++c) {
       const DiffractionThinSheetModel model=diffraction_thin_sheet_channel_model(e,c);
-      Ci[c]=diffraction_thin_sheet_model_coefficient(&model,FI.z,b->port.transmission);
-      Co[c]=diffraction_thin_sheet_model_coefficient(&model,FO.z,b->port.transmission);
+      CCL_CHANNEL(float, Ci, c)=diffraction_thin_sheet_model_coefficient(&model,FI.z,b->port.transmission);
+      CCL_CHANNEL(float, Co, c)=diffraction_thin_sheet_model_coefficient(&model,FO.z,b->port.transmission);
     }
     Spectrum density=zero_spectrum();
     const float3 axis=make_float3(1,0,0);
@@ -586,7 +586,7 @@ ccl_device_inline Spectrum bsdf_diffraction_thin_sheet_delta(
   for (int c=0;c<3;++c) {
     const DiffractionThinSheetModel model=diffraction_thin_sheet_channel_model(e,c);
     ccl_private const DiffractionThinSheetModelPort *p=b->port.transmission ? &model.transmission : &model.reflection;
-    result[c]+=e->blend*diffraction_thin_sheet_model_power(&model,p,order,I,O,make_float3(0,0,1))*1e6f;
+    CCL_CHANNEL(float, result, c)+=e->blend*diffraction_thin_sheet_model_power(&model,p,order,I,O,make_float3(0,0,1))*1e6f;
   }
   (void)kg;
   return result;

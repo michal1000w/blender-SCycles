@@ -1218,7 +1218,7 @@ struct ccl_align(SHADER_DATA_ALIGNMENT) ShaderData {
    * with SR_VOLUME_IOR_EVAL. */
   float volume_ior;
 #endif
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   /* Reuse one spatial/product query across BSDF pdf and sample on the same ShaderData. */
   const ccl_global float *gpu_guiding_weights;
   float3 gpu_guiding_cached_P;

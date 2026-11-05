@@ -34,6 +34,7 @@
 #    define atomic_fetch_and_inc_uint32(p) atomic_fetch_and_add_uint32((p), 1)
 #    define atomic_fetch_and_dec_uint32(p) atomic_fetch_and_sub_uint32((p), 1)
 #    define atomic_fetch_and_or_uint32(p, x) atomicOr((unsigned int *)(p), (unsigned int)(x))
+#    define atomic_exchange_uint32(p, x) atomicExch((unsigned int *)(p), (unsigned int)(x))
 
 ccl_device_inline float atomic_compare_and_swap_float(volatile float *dest,
                                                       const float old_val,

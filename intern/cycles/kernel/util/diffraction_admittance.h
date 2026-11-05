@@ -9,6 +9,8 @@ CCL_NAMESPACE_BEGIN
 template<int N, typename Chart, typename Anchor, typename Exterior>
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
+#elif defined(__KERNEL_CUDA__)
+ccl_device_noinline
 #else
 ccl_device_inline
 #endif

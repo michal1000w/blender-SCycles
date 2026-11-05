@@ -30,7 +30,7 @@ def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt"))
     parser.add_argument("--samples", type=int, default=128)
     parser.add_argument("--resolution", type=int, default=96)

@@ -34,7 +34,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="CPU", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt"))
     parser.add_argument("--vcm", action="store_true")
     parser.add_argument("--guiding", action="store_true")
@@ -89,7 +89,7 @@ def new_scene(args, camera_location=(0.0, -3.9, 1.0), look_at=(0.0, 0.0, 1.0), l
         scene.render.threads_mode = "FIXED"
         scene.render.threads = args.threads
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
@@ -601,16 +601,16 @@ def main():
     results = {}
     for name in names:
         scene = SCENES[name](args)
-        if args.device == "METAL":
+        if args.device != "CPU":
             # After the scene: loading factory settings resets the preferences.
             preferences = bpy.context.preferences.addons["cycles"].preferences
-            preferences.compute_device_type = "METAL"
+            preferences.compute_device_type = args.device
             preferences.get_devices()
-            metal = [device for device in preferences.devices if device.type == "METAL"]
+            metal = [device for device in preferences.devices if device.type == args.device]
             if not metal:
-                raise SystemExit("No Metal device")
+                raise SystemExit(f"No {args.device} device")
             for device in preferences.devices:
-                device.use = device.type == "METAL"
+                device.use = device.type == args.device
             scene.cycles.device = "GPU"
         stem = name + args.suffix
         if args.save_blend:

@@ -10,7 +10,8 @@ ccl_device_inline bool polarization_enabled(KernelGlobals kg)
 #if defined(__KERNEL_METAL_TRANSPORT_FEATURES__) && !(__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_POLARIZATION)
   return false;
 #else
-  return (kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION)!=0;
+  (void)kg;
+  return kernel_use_polarization();
 #endif
 }
 ccl_device_inline PolarizationSpectrumState polarization_unpolarized()

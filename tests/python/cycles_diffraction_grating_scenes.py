@@ -32,7 +32,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL"))
+    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt", "photon", "vcm"))
     parser.add_argument("--guiding", action="store_true")
     parser.add_argument("--osl", action="store_true", help="Open Shading Language (CPU only)")
@@ -73,7 +73,7 @@ def new_scene(args, resolution, samples, max_bounces=8):
     scene.render.film_transparent = False
     scene.view_settings.view_transform = "AgX"
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples or samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
@@ -116,13 +116,13 @@ def set_integrator(args, cycles):
 
 
 def enable_device(args):
-    if args.device != "METAL":
+    if args.device == "CPU":
         return
     prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "METAL"
+    prefs.compute_device_type = args.device
     prefs.get_devices()
     for device in prefs.devices:
-        device.use = device.type == "METAL"
+        device.use = device.type == args.device
 
 
 def gradient_world(scene, strength=1.0, left=(0.045, 0.032, 0.075), right=(0.16, 0.075, 0.065),

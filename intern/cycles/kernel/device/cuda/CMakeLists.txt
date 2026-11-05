@@ -12,6 +12,7 @@ set(INC_SYS
 
 set(SRC_KERNEL_DEVICE_CUDA
   kernel.cu
+  kernel_transport.cu
 )
 
 set(SRC_KERNEL_DEVICE_CUDA_HEADERS
@@ -181,6 +182,12 @@ function(cuda_add_common_flags cuda_version arch in_flags out_flags)
     set(flags ${flags} --force-cl-env-setup)
   endif()
 
+  # CUDA before 12.4 refuses Visual Studio 17.10 and newer (MSVC 19.40+) as host compiler,
+  # although the kernels only use the language subset both support.
+  if(MSVC AND (MSVC_VERSION GREATER_EQUAL 1940) AND ("${cuda_version}" VERSION_LESS 12.4))
+    set(flags ${flags} -allow-unsupported-compiler -D _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH)
+  endif()
+
   set(flags ${flags}
     # Helps with compatibility when using recent clang host compiler.
     "-std=c++17"
@@ -233,6 +240,10 @@ if(WITH_CYCLES_CUDA_BINARIES)
     ${SRC_KERNEL_DEVICE_CUDA_HEADERS}
     $<TARGET_PROPERTY:cycles_kernel,INTERFACE_SOURCES>
   )
+  set(cuda_transport_sources kernel_transport.cu kernel.cu
+    ${SRC_KERNEL_DEVICE_CUDA_HEADERS}
+    $<TARGET_PROPERTY:cycles_kernel,INTERFACE_SOURCES>
+  )
   set(cuda_cubins "")
 
   # Modifies in parent scope:
@@ -275,17 +286,25 @@ if(WITH_CYCLES_CUDA_BINARIES)
       ${cuda_flags}
     )
 
+    # Limit the kernels compiled at once by their memory use, see CYCLES_KERNEL_JOB_POOL.
+    set(_cuda_job_pool)
+    if(CYCLES_KERNEL_JOB_POOL)
+      set(_cuda_job_pool JOB_POOL ${CYCLES_KERNEL_JOB_POOL})
+    endif()
     if(WITH_COMPILER_CCACHE AND CCACHE_PROGRAM)
       add_custom_command(
         OUTPUT ${cuda_file}
         COMMAND ${CCACHE_PROGRAM} ${cuda_nvcc_executable} ${_cuda_nvcc_args}
-        DEPENDS ${kernel_sources})
+        DEPENDS ${kernel_sources}
+        ${_cuda_job_pool})
     else()
       add_custom_command(
         OUTPUT ${cuda_file}
         COMMAND ${cuda_nvcc_executable} ${_cuda_nvcc_args}
-        DEPENDS ${kernel_sources})
+        DEPENDS ${kernel_sources}
+        ${_cuda_job_pool})
     endif()
+    unset(_cuda_job_pool)
 
     add_custom_command(
       OUTPUT ${cuda_file_compressed}
@@ -310,6 +329,9 @@ if(WITH_CYCLES_CUDA_BINARIES)
 
       # Compile regular kernel
       cycles_cuda_kernel_add(${arch} ${prev_arch} kernel "" "${cuda_sources}" FALSE)
+      # Kernel with light-cache transport and pixel displacement, see kernel_transport.cu.
+      cycles_cuda_kernel_add(
+          ${arch} ${prev_arch} kernel_transport "" "${cuda_transport_sources}" FALSE)
 
       if(WITH_CYCLES_CUDA_BUILD_SERIAL)
         set(prev_arch ${arch})

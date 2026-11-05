@@ -1114,12 +1114,27 @@ void ShaderManager::add_default(Scene *scene)
   }
 }
 
+/* Whether the node can create diffraction closures. */
+static bool shader_node_has_diffraction(ShaderNode *node)
+{
+  if (node->type == DiffractionSmoothBsdfNode::get_node_type() ||
+      node->type == DiffractionGratingBsdfNode::get_node_type())
+  {
+    return true;
+  }
+  const ShaderInput *weight = node->input("Diffraction Weight");
+  return weight && (weight->link || node->get_float(weight->socket_type) > 0.0f);
+}
+
 uint64_t ShaderManager::get_graph_kernel_features(ShaderGraph *graph)
 {
   uint64_t kernel_features = 0;
 
   for (ShaderNode *node : graph->nodes) {
     kernel_features |= node->get_feature();
+    if (shader_node_has_diffraction(node)) {
+      kernel_features |= KERNEL_FEATURE_DIFFRACTION;
+    }
     if (node->has_volume_ior()) {
       kernel_features |= KERNEL_FEATURE_VOLUME_IOR;
     }

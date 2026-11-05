@@ -68,7 +68,7 @@ ccl_device_inline
   sd->interior_ior = 0.0f;
 #endif
   sd->shader_flag = 0;
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   sd->gpu_guiding_flags = 0;
 #endif
 
@@ -185,7 +185,7 @@ ccl_device_inline void shader_setup_from_sample(KernelGlobals kg,
   sd->Ng = Ng;
   sd->wi = I;
   sd->shader = shader;
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   sd->gpu_guiding_flags = 0;
 #endif
   if (is_lamp) {

@@ -18,7 +18,8 @@ bool HIPDeviceKernels::load_kernel(HIPDevice *device,
     return true;
   }
 
-  if (!device_kernel_has_gpu_function(kernel)) {
+  /* HIP kernels have no light-cache transport, the host does not use it on HIP devices. */
+  if (!device_kernel_has_gpu_function(kernel) || device_kernel_is_light_cache(kernel)) {
     return false;
   }
 

@@ -15,7 +15,8 @@ CCL_NAMESPACE_BEGIN
     _Pragma("clang fp reassociate(off)") _Pragma("clang fp contract(off)")
 #else
 #  define DIFFRACTION_PRECISE_SCOPE
-#  if defined(__clang__)
+/* MSVC builds the CPU kernels with /fp:fast, which would remove the rounding error terms. */
+#  if defined(__clang__) || (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
 #    pragma float_control(precise, on, push)
 #  endif
 #endif
@@ -180,7 +181,7 @@ ccl_device_inline bool diffraction_grating_boundary(
          isfinite_safe(boundary->tangent_direction.y);
 }
 
-#if defined(__clang__) && !defined(__KERNEL_METAL__)
+#if (defined(__clang__) && !defined(__KERNEL_METAL__)) || (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
 #  pragma float_control(pop)
 #endif
 

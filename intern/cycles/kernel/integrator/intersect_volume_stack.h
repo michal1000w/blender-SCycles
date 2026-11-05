@@ -16,7 +16,36 @@ CCL_NAMESPACE_BEGIN
 
 /* Surfaces which a probe ray of the volume stack records at most: two for every volume and
  * nested dielectric medium that the stacks have room for. */
-#define VOLUME_STACK_PROBE_MAX_HITS (2 * (MAX_VOLUME_STACK_SIZE + MAX_MEDIUM_STACK_SIZE))
+#if defined(__NESTED_DIELECTRICS__) || defined(__KERNEL_METAL__)
+#  define VOLUME_STACK_PROBE_MAX_HITS (2 * (MAX_VOLUME_STACK_SIZE + MAX_MEDIUM_STACK_SIZE))
+#else
+/* The regular CUDA and OptiX kernels, which have no nested dielectrics, see features.h. */
+#  define VOLUME_STACK_PROBE_MAX_HITS (2 * MAX_VOLUME_STACK_SIZE)
+#endif
+
+/* Objects (and for nested dielectrics, materials) which enclose the origin of the path, found
+ * while the volume stack is initialized. Without nested dielectrics only objects are recorded,
+ * as in standard Cycles. */
+#ifdef __NESTED_DIELECTRICS__
+#  define VOLUME_STACK_ENCLOSED_MAX VOLUME_STACK_PROBE_MAX_HITS
+#  define VOLUME_STACK_ENCLOSED_SHADERS_DECLARE int enclosed_shaders[VOLUME_STACK_ENCLOSED_MAX];
+#  define VOLUME_STACK_ENCLOSED_IS(i, object, shader) \
+    (enclosed_volumes[i] == (object) && enclosed_shaders[i] == (shader))
+#  define VOLUME_STACK_ENCLOSED_SET_SHADER(i, shader) enclosed_shaders[i] = (shader);
+#elif defined(__KERNEL_METAL__)
+/* Metal kernels specialized without nested dielectrics keep the bounds they always had. */
+#  define VOLUME_STACK_ENCLOSED_MAX VOLUME_STACK_PROBE_MAX_HITS
+#  define VOLUME_STACK_ENCLOSED_SHADERS_DECLARE
+#  define VOLUME_STACK_ENCLOSED_IS(i, object, shader) \
+    ((void)(shader), enclosed_volumes[i] == (object))
+#  define VOLUME_STACK_ENCLOSED_SET_SHADER(i, shader)
+#else
+#  define VOLUME_STACK_ENCLOSED_MAX MAX_VOLUME_STACK_SIZE
+#  define VOLUME_STACK_ENCLOSED_SHADERS_DECLARE
+#  define VOLUME_STACK_ENCLOSED_IS(i, object, shader) \
+    ((void)(shader), enclosed_volumes[i] == (object))
+#  define VOLUME_STACK_ENCLOSED_SET_SHADER(i, shader)
+#endif
 
 ccl_device_forceinline uint volume_stack_probe_hits(KernelGlobals kg)
 {
@@ -25,6 +54,8 @@ ccl_device_forceinline uint volume_stack_probe_hits(KernelGlobals kg)
   if (nested_dielectrics_enabled(kg)) {
     size += kernel_data.medium_stack_size;
   }
+#else
+  (void)kg;
 #endif
   return 2 * size;
 }
@@ -218,8 +249,8 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
   Intersection hits[VOLUME_STACK_PROBE_MAX_HITS + 1];
   const uint num_hits = scene_intersect_volume(kg, &volume_ray, hits, max_hits, stack_visibility);
   if (num_hits > 0) {
-    int enclosed_volumes[VOLUME_STACK_PROBE_MAX_HITS];
-    int enclosed_shaders[VOLUME_STACK_PROBE_MAX_HITS];
+    int enclosed_volumes[VOLUME_STACK_ENCLOSED_MAX];
+    VOLUME_STACK_ENCLOSED_SHADERS_DECLARE
     Intersection *isect = hits;
 
     qsort(hits, num_hits, sizeof(Intersection), intersections_compare);
@@ -233,7 +264,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
           /* If ray exited the volume and never entered to that volume
            * it means that camera is inside such a volume.
            */
-          if (enclosed_volumes[i] == stack_sd->object && enclosed_shaders[i] == enclosed_shader) {
+          if (VOLUME_STACK_ENCLOSED_IS(i, stack_sd->object, enclosed_shader)) {
             need_add = false;
           }
         }
@@ -242,22 +273,23 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
               kg, state, stack_sd, volume_stack_size, &stack_index, &medium_index);
         }
       }
-      else if (enclosed_index < VOLUME_STACK_PROBE_MAX_HITS) {
+      else if (enclosed_index < VOLUME_STACK_ENCLOSED_MAX) {
         /* If ray from camera enters the volume, this volume shouldn't
          * be added to the stack on exit.
          */
         enclosed_volumes[enclosed_index] = stack_sd->object;
-        enclosed_shaders[enclosed_index++] = enclosed_shader;
+        VOLUME_STACK_ENCLOSED_SET_SHADER(enclosed_index, enclosed_shader)
+        enclosed_index++;
       }
     }
   }
 #  else
   /* CUDA does not support definition of a variable size arrays, so use the maximum possible. */
-  int enclosed_volumes[VOLUME_STACK_PROBE_MAX_HITS];
-  int enclosed_shaders[VOLUME_STACK_PROBE_MAX_HITS];
+  int enclosed_volumes[VOLUME_STACK_ENCLOSED_MAX];
+  VOLUME_STACK_ENCLOSED_SHADERS_DECLARE
   int step = 0;
 
-  while (stack_index < volume_stack_size - 1 && enclosed_index < VOLUME_STACK_PROBE_MAX_HITS - 1 &&
+  while (stack_index < volume_stack_size - 1 && enclosed_index < VOLUME_STACK_ENCLOSED_MAX - 1 &&
          step < max_hits)
   {
     Intersection isect;
@@ -276,7 +308,7 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
         /* If ray exited the volume and never entered to that volume
          * it means that camera is inside such a volume.
          */
-        if (enclosed_volumes[i] == stack_sd->object && enclosed_shaders[i] == enclosed_shader) {
+        if (VOLUME_STACK_ENCLOSED_IS(i, stack_sd->object, enclosed_shader)) {
           need_add = false;
         }
       }
@@ -290,7 +322,8 @@ ccl_device void integrator_volume_stack_init(KernelGlobals kg,
        * be added to the stack on exit.
        */
       enclosed_volumes[enclosed_index] = stack_sd->object;
-      enclosed_shaders[enclosed_index++] = enclosed_shader;
+      VOLUME_STACK_ENCLOSED_SET_SHADER(enclosed_index, enclosed_shader)
+      enclosed_index++;
     }
 
     /* Move ray forward. */

@@ -9,14 +9,17 @@
 
 CCL_NAMESPACE_BEGIN
 
-void CUDADeviceKernels::load(CUDADevice *device)
+void CUDADeviceKernels::load(CUDADevice *device, CUmodule cuModule, const bool light_cache)
 {
-  CUmodule cuModule = device->cuModule;
-
   for (int i = 0; i < (int)DEVICE_KERNEL_NUM; i++) {
     CUDADeviceKernel &kernel = kernels_[i];
+    kernel = CUDADeviceKernel();
 
-    if (!device_kernel_has_gpu_function((DeviceKernel)i)) {
+    /* Light-cache and GPU guiding kernels only exist in the transport module. */
+    const DeviceKernel device_kernel = (DeviceKernel)i;
+    const bool transport_only = device_kernel_is_light_cache(device_kernel) ||
+                                device_kernel_is_gpu_guiding(device_kernel);
+    if (transport_only ? !light_cache : !device_kernel_has_gpu_function(device_kernel)) {
       continue;
     }
 
