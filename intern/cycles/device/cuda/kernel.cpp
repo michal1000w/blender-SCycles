@@ -23,25 +23,36 @@ void CUDADeviceKernels::load(CUDADevice *device, CUmodule cuModule, const bool l
       continue;
     }
 
-    const std::string function_name = std::string("kernel_gpu_") +
-                                      device_kernel_as_string((DeviceKernel)i);
-    cuda_device_assert(device,
-                       cuModuleGetFunction(&kernel.function, cuModule, function_name.c_str()));
-
-    if (kernel.function) {
-      cuda_device_assert(device, cuFuncSetCacheConfig(kernel.function, CU_FUNC_CACHE_PREFER_L1));
-
-      cuda_device_assert(
-          device,
-          cuOccupancyMaxPotentialBlockSize(
-              &kernel.min_blocks, &kernel.num_threads_per_block, kernel.function, nullptr, 0, 0));
-    }
-    else {
-      LOG_ERROR << "Unable to load kernel " << function_name;
-    }
+    load_kernel(device, cuModule, device_kernel);
   }
 
   loaded = true;
+}
+
+bool CUDADeviceKernels::load_kernel(CUDADevice *device,
+                                    CUmodule cuModule,
+                                    const DeviceKernel device_kernel)
+{
+  CUDADeviceKernel &kernel = kernels_[(int)device_kernel];
+  kernel = CUDADeviceKernel();
+
+  const std::string function_name = std::string("kernel_gpu_") +
+                                    device_kernel_as_string(device_kernel);
+  cuda_device_assert(device,
+                     cuModuleGetFunction(&kernel.function, cuModule, function_name.c_str()));
+
+  if (kernel.function) {
+    cuda_device_assert(device, cuFuncSetCacheConfig(kernel.function, CU_FUNC_CACHE_PREFER_L1));
+
+    cuda_device_assert(
+        device,
+        cuOccupancyMaxPotentialBlockSize(
+            &kernel.min_blocks, &kernel.num_threads_per_block, kernel.function, nullptr, 0, 0));
+    return true;
+  }
+
+  LOG_ERROR << "Unable to load kernel " << function_name;
+  return false;
 }
 
 const CUDADeviceKernel &CUDADeviceKernels::get(DeviceKernel kernel) const

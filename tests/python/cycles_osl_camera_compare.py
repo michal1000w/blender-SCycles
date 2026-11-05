@@ -3,7 +3,11 @@
 """Compare the renders of cycles_osl_camera_scenes.py from two devices.
 
   blender -b --factory-startup --python tests/python/cycles_osl_camera_compare.py -- \\
-      REFERENCE_DIRECTORY CANDIDATE_DIRECTORY [--report FILE]
+      REFERENCE_DIRECTORY CANDIDATE_DIRECTORY [--report FILE] [--ignore a,b]
+
+--ignore reports the named images without failing on them. Against a CPU reference rendered on
+x86, ignore probe2_26 and probe2_36: they convert floats that do not fit an integer, which x86
+CPUs turn into INT_MIN while ARM CPUs and the GPUs (Metal, CUDA, OptiX) saturate them.
 
 Probe images hold computed values, one sample per pixel: nearly all pixels must agree to
 floating point accuracy. A few pixels may differ where a discontinuous function, such as a
@@ -97,6 +101,11 @@ def main():
         index = argv.index("--report")
         report_path = Path(argv[index + 1])
         del argv[index:index + 2]
+    ignored = set()
+    if "--ignore" in argv:
+        index = argv.index("--ignore")
+        ignored = set(argv[index + 1].split(","))
+        del argv[index:index + 2]
     if len(argv) != 2:
         raise SystemExit("Pass a reference and a candidate directory")
     reference_dir, candidate_dir = Path(argv[0]), Path(argv[1])
@@ -124,11 +133,14 @@ def main():
         else:
             result = compare_render(reference, candidate)
         results[name] = result
-        if not result["ok"]:
+        status = "ok" if result["ok"] else ("IGNORED" if name in ignored else "FAILED")
+        if status == "FAILED":
             failed.append(name)
-        print(f"COMPARE {name} {'ok' if result['ok'] else 'FAILED'} {json.dumps(result)}")
+        print(f"COMPARE {name} {status} {json.dumps(result)}")
 
-    print(f"SUMMARY {len(results) - len(failed)} of {len(results)} images match")
+    differ_ignored = [name for name in ignored if name in results and not results[name]["ok"]]
+    print(f"SUMMARY {len(results) - len(failed) - len(differ_ignored)} of {len(results)} images "
+          f"match" + (f", {len(differ_ignored)} ignored differ" if differ_ignored else ""))
     if report_path:
         report_path.write_text(json.dumps(results, indent=2) + "\n")
     if failed:

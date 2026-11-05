@@ -1752,7 +1752,9 @@ inline OslSimplex osl_simplex(float x, float y, int seed)
   d *= scale;
   return OslSimplex{scale * (n0 + n1 + n2), float4(d.x, d.y, 0.0f, 0.0f)};
 }
-
+)MSL"
+/* Adjacent literals: MSVC limits one string literal to 16380 bytes. */
+R"MSL(
 inline OslSimplex osl_simplex(float x, float y, float z, int seed)
 {
   const float F3 = 0.333333333f;

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#ifdef WITH_METAL
+#if defined(WITH_METAL) || defined(WITH_CUDA)
 
 #  include "util/map.h"
 #  include "util/param.h"
@@ -21,7 +21,11 @@ CCL_NAMESPACE_BEGIN
  * which calls it through a visible function table, see `camera_sample_custom()`.
  *
  * Numeric shader parameters are not baked into the function: it reads them from the
- * `camera_script_params` kernel array, so animating them does not recompile anything. */
+ * `camera_script_params` kernel array, so animating them does not recompile anything.
+ *
+ * CUDA and OptiX have no OSL back end either (OptiX has one for OSL shading only) and use the
+ * same translation, compiled at runtime with NVRTC and linked into their camera ray kernel, see
+ * `device/cuda/osl_camera.h`. */
 
 /* Name of the translated function in the library compiled from MetalOSLCameraProgram::source. */
 #  define METAL_OSL_CAMERA_FUNCTION_NAME "cycles_metal_osl_camera"
@@ -117,4 +121,4 @@ void metal_osl_camera_pack_params(const MetalOSLCameraProgram &program,
 
 CCL_NAMESPACE_END
 
-#endif /* WITH_METAL */
+#endif /* WITH_METAL || WITH_CUDA */

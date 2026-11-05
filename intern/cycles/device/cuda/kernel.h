@@ -33,6 +33,9 @@ class CUDADeviceKernels {
   /* Load the kernels of a module. Only a transport module (kernel_transport.cu) contains the
    * light-cache kernels. */
   void load(CUDADevice *device, CUmodule cuModule, bool light_cache);
+  /* Take one kernel from `cuModule`, such as the camera ray kernel of a module that is built at
+   * runtime for a custom camera. Returns false if the module does not contain it. */
+  bool load_kernel(CUDADevice *device, CUmodule cuModule, DeviceKernel kernel);
   const CUDADeviceKernel &get(DeviceKernel kernel) const;
   bool available(DeviceKernel kernel) const;
 

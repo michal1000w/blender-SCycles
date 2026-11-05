@@ -111,15 +111,16 @@ class OSLManager {
   void foreach_shading_system(const std::function<void(OSL::ShadingSystem *)> &callback);
   void foreach_render_services(const std::function<void(OSLRenderServices *)> &callback);
 
-#  ifdef WITH_METAL
-  /* Custom camera for Metal devices, which run a translation of the shader. */
-  void device_update_camera_metal(Device *device, Scene *scene);
+#  if defined(WITH_METAL) || defined(WITH_CUDA)
+  /* Custom camera for devices without an OSL back end, which run a translation of the
+   * shader: Metal, CUDA, and OptiX without OSL shading. */
+  void device_update_camera_translated(Device *device, Scene *scene);
   /* The translation of the current camera shader, to translate it only when it changes. */
-  string camera_metal_key_;
-  unique_ptr<MetalOSLCameraProgram> camera_metal_program_;
-  string camera_metal_error_;
+  string camera_translated_key_;
+  unique_ptr<MetalOSLCameraProgram> camera_translated_program_;
+  string camera_translated_error_;
   /* The images that the camera shader looks up, which keeps them loaded. */
-  vector<ImageHandle> camera_metal_images_;
+  vector<ImageHandle> camera_translated_images_;
 #  endif
   mutable thread_mutex camera_warning_mutex_;
   string camera_warning_;
