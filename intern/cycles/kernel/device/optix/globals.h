@@ -35,6 +35,11 @@ struct KernelParamsOptiX {
   int num_tiles;
   int max_tile_work_size;
 
+  /* Light-cache kernel arguments, see kernel_transport.cu */
+  int light_cache_iteration;
+  int light_cache_batch_samples;
+  int light_cache_stage;
+
   /* Global scene data and textures */
   KernelData data;
 #define KERNEL_DATA_ARRAY(type, name) const type *name;
@@ -54,6 +59,9 @@ extern "C"
 #  endif
     __constant__ KernelParamsOptiX kernel_params;
 #endif
+
+/* OptiX does not intersect pixel displaced surfaces, see features.h. */
+#define pixel_displacement_rays false
 
 /* Abstraction macros */
 #define kernel_data kernel_params.data

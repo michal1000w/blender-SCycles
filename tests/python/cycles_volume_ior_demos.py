@@ -38,7 +38,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--scenes", default="all")
-    parser.add_argument("--device", default="METAL", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="METAL", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--integrator", default="pt", choices=("pt", "bdpt"))
     parser.add_argument("--guiding", action="store_true")
     parser.add_argument("--samples", type=int, default=128)
@@ -59,12 +59,12 @@ def parse_args():
 
 def new_scene(args, aspect=16.0 / 9.0):
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    if args.device == "METAL":
+    if args.device != "CPU":
         prefs = bpy.context.preferences.addons["cycles"].preferences
-        prefs.compute_device_type = "METAL"
+        prefs.compute_device_type = args.device
         prefs.get_devices()
         for device in prefs.devices:
-            device.use = device.type == "METAL"
+            device.use = device.type == args.device
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.render.resolution_x = args.resolution
@@ -73,7 +73,7 @@ def new_scene(args, aspect=16.0 / 9.0):
     scene.render.image_settings.file_format = "PNG"
     scene.frame_set(args.frame)
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False

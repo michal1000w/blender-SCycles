@@ -168,6 +168,9 @@ void device_cuda_info(vector<DeviceInfo> &devices)
     info.denoisers = 0;
 
     info.has_gpu_queue = true;
+    /* The guiding field is trained by the kernels of the transport module. OptiX devices copy this
+     * info. */
+    info.has_guiding = true;
     info.meets_driver_requirement = meets_driver_requirement;
 
     /* Check if the device has P2P access to any other device in the system. */

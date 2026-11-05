@@ -20,6 +20,18 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Diffraction closures are compiled where the kernel has them (see `__DIFFRACTION__` in
+ * features.h). Elsewhere a diffraction weight reads as zero and the dedicated diffraction
+ * closures are skipped, which removes their code. */
+#ifdef __DIFFRACTION__
+#  define osl_use_diffraction() true
+#  define osl_diffraction_weight(weight) (weight)
+#else
+#  define osl_use_diffraction() false
+#  define osl_diffraction_weight(weight) 0.0f
+#endif
+
+
 #define OSL_CLOSURE_STRUCT_BEGIN(Upper, lower) \
   struct ccl_align(8) Upper##Closure { \
     const char *label;
@@ -91,7 +103,7 @@ ccl_device void osl_closure_diffuse_setup(KernelGlobals kg,
 
   const float3 N = safe_normalize_fallback(closure->N, sd->N);
   Spectrum detector_weight = rgb_to_spectrum(weight);
-  if (kernel_data.integrator.coherent_specular_enabled &&
+  if (kernel_use_coherent_specular() &&
       (sd->object_flag & SD_OBJECT_COHERENT_DETECTOR))
   {
     detector_weight = coherent_detector_passive_color(detector_weight);
@@ -446,19 +458,19 @@ ccl_device void osl_closure_conductor_bsdf_setup(KernelGlobals kg,
   fresnel->thin_film.ior = closure->thinfilm_ior;
 
   fresnel->ior = {rgb_to_spectrum(closure->ior), rgb_to_spectrum(closure->extinction)};
-  if (preserve_energy && closure->diffraction_weight > 0.0f) {
+  if (preserve_energy && osl_diffraction_weight(closure->diffraction_weight) > 0.0f) {
     bsdf_microfacet_setup_fresnel_conductor(kg, bsdf, sd->wi, fresnel, false);
     bsdf_diffraction_conductor_multiggx_split_setup(
         kg, sd, bsdf, closure->T, closure->diffraction_pitch, closure->diffraction_depth,
-        closure->diffraction_duty, closure->diffraction_weight,
+        closure->diffraction_duty, osl_diffraction_weight(closure->diffraction_weight),
         closure->diffraction_albedo_handle_plus_one - 1);
   }
   else {
     bsdf_microfacet_setup_fresnel_conductor(kg, bsdf, sd->wi, fresnel, preserve_energy);
   }
-  if (closure->diffraction_weight>0 && !preserve_energy) {
+  if (osl_diffraction_weight(closure->diffraction_weight)>0 && !preserve_energy) {
     bsdf_diffraction_conductor_split_setup(sd,bsdf,closure->T,closure->diffraction_pitch,
-        closure->diffraction_depth,closure->diffraction_duty,closure->diffraction_weight);
+        closure->diffraction_depth,closure->diffraction_duty,osl_diffraction_weight(closure->diffraction_weight));
   }
 }
 
@@ -594,7 +606,7 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
   if (backfacing) {
     adjust_thin_film_ior_at_backface(fresnel->thin_film.ior, bsdf->ior);
   }
-  const bool multiggx_diffraction = preserve_energy && closure->diffraction_weight > 0.0f &&
+  const bool multiggx_diffraction = preserve_energy && osl_diffraction_weight(closure->diffraction_weight) > 0.0f &&
                                     !has_transmission;
   bsdf_microfacet_setup_fresnel_generalized_schlick(
       kg, bsdf, sd->wi, fresnel, preserve_energy && !multiggx_diffraction);
@@ -606,15 +618,15 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
   if (multiggx_diffraction) {
     bsdf_diffraction_conductor_multiggx_split_setup(
         kg, sd, bsdf, closure->T, closure->diffraction_pitch, closure->diffraction_depth,
-        closure->diffraction_duty, closure->diffraction_weight,
+        closure->diffraction_duty, osl_diffraction_weight(closure->diffraction_weight),
         closure->diffraction_albedo_handle_plus_one - 1);
   }
-  else if (closure->diffraction_weight > 0.0f && !preserve_energy && !has_transmission) {
+  else if (osl_diffraction_weight(closure->diffraction_weight) > 0.0f && !preserve_energy && !has_transmission) {
     bsdf_diffraction_conductor_split_setup(sd, bsdf, closure->T,
                                             closure->diffraction_pitch,
                                             closure->diffraction_depth,
                                             closure->diffraction_duty,
-                                            closure->diffraction_weight);
+                                            osl_diffraction_weight(closure->diffraction_weight));
   }
 
   if (layer_albedo != nullptr) {
@@ -671,7 +683,7 @@ ccl_device void osl_closure_thin_glass_setup(KernelGlobals kg,
   /* ThinWall deliberately bypasses backface eta inversion in Principled OSL.
    * Its closure IOR is already the absolute sheet IOR on both faces. */
   const float absolute_ior = closure->ior;
-  const bool use_diffraction = closure->diffraction_weight > 0.0f &&
+  const bool use_diffraction = osl_diffraction_weight(closure->diffraction_weight) > 0.0f &&
                                closure->diffraction_depth > 0.0f;
   const FresnelCoeff fresnel = use_diffraction ? bsdf_diffraction_thin_glass_setup(kg,
                                                      sd,
@@ -686,7 +698,7 @@ ccl_device void osl_closure_thin_glass_setup(KernelGlobals kg,
                                                      thinfilm,
                                                      path_visibility,
                                                      path_flag,
-                                                     closure->diffraction_weight,
+                                                     osl_diffraction_weight(closure->diffraction_weight),
                                                      closure->diffraction_pitch,
                                                      closure->diffraction_depth,
                                                      closure->diffraction_duty,
@@ -745,6 +757,9 @@ ccl_device void osl_closure_diffraction_grating_setup(
     const ccl_private DiffractionGratingClosure *closure,
     float3 * /*layer_albedo*/)
 {
+  if (!osl_use_diffraction()) {
+    return;
+  }
   if (osl_closure_skip(kg, path_visibility, LABEL_GLOSSY | LABEL_REFLECT)) {
     return;
   }
@@ -779,6 +794,9 @@ ccl_device void osl_closure_diffraction_smooth_setup(
     float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+  if (!osl_use_diffraction()) {
+    return;
+  }
   const int index = sd->num_closure;
   if (!bsdf_diffraction_smooth_setup(kg, sd, weight, closure->N, closure->T,
                                      closure->cache_handle, closure->pitch,
@@ -810,6 +828,9 @@ ccl_device void osl_closure_diffraction_fast_setup(
     float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+  if (!osl_use_diffraction()) {
+    return;
+  }
   const int index=sd->num_closure;
   if (!bsdf_diffraction_smooth_setup(kg,sd,weight,closure->N,closure->T,
       DIFFRACTION_FAST_CACHE_HANDLE,closure->pitch,closure->upper_index,closure->lower_index,
@@ -831,6 +852,9 @@ ccl_device void osl_closure_diffraction_refraction_setup(
     float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+  if (!osl_use_diffraction()) {
+    return;
+  }
   if (osl_closure_skip(kg,path_visibility,LABEL_GLOSSY|LABEL_TRANSMIT)) return;
   const Spectrum w=rgb_to_spectrum(weight)*bsdf_spectral_transmission_color(
       kg,sd,max(float3(closure->color),zero_float3()));
@@ -847,6 +871,9 @@ ccl_device void osl_closure_diffraction_glass_setup(
     float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+  if (!osl_use_diffraction()) {
+    return;
+  }
   const float3 color = closure->diffraction_two_sided_handle_plus_one > 0 ?
                            saturate(float3(closure->color)) :
                            max(float3(closure->color), zero_float3());
@@ -928,6 +955,9 @@ ccl_device void osl_closure_diffraction_setup(KernelGlobals kg,
                                              float3 *layer_albedo)
 {
   osl_zero_albedo(layer_albedo);
+  if (!osl_use_diffraction()) {
+    return;
+  }
   if (osl_closure_skip(kg, path_visibility, LABEL_GLOSSY | LABEL_REFLECT)) {
     return;
   }
@@ -1088,21 +1118,21 @@ ccl_device void osl_closure_microfacet_f82_tint_setup(
   fresnel->thin_film.thickness = closure->thinfilm_thickness;
   fresnel->thin_film.ior = closure->thinfilm_ior;
 
-  if (preserve_energy && closure->diffraction_weight > 0.0f) {
+  if (preserve_energy && osl_diffraction_weight(closure->diffraction_weight) > 0.0f) {
     bsdf_microfacet_setup_fresnel_f82_tint(
         kg, bsdf, sd->wi, fresnel, rgb_to_spectrum(closure->f82), false);
     bsdf_diffraction_conductor_multiggx_split_setup(
         kg, sd, bsdf, closure->T, closure->diffraction_pitch, closure->diffraction_depth,
-        closure->diffraction_duty, closure->diffraction_weight,
+        closure->diffraction_duty, osl_diffraction_weight(closure->diffraction_weight),
         closure->diffraction_albedo_handle_plus_one - 1);
   }
   else {
     bsdf_microfacet_setup_fresnel_f82_tint(
         kg, bsdf, sd->wi, fresnel, rgb_to_spectrum(closure->f82), preserve_energy);
   }
-  if (closure->diffraction_weight>0 && !preserve_energy) {
+  if (osl_diffraction_weight(closure->diffraction_weight)>0 && !preserve_energy) {
     bsdf_diffraction_conductor_split_setup(sd,bsdf,closure->T,closure->diffraction_pitch,
-        closure->diffraction_depth,closure->diffraction_duty,closure->diffraction_weight);
+        closure->diffraction_depth,closure->diffraction_duty,osl_diffraction_weight(closure->diffraction_weight));
   }
 }
 

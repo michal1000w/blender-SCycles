@@ -231,7 +231,7 @@ ccl_device_inline void photon_state_init(KernelGlobals kg,
     INTEGRATOR_STATE_WRITE(state, path, mis_ray_object) = kernel_data.background.object_index;
   }
 #endif
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   if (kernel_data.integrator.use_guiding) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;
     INTEGRATOR_STATE_WRITE(state, gpu_guiding, history_head) = ~0u;
@@ -971,7 +971,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
     for (int i = 0; i < sd.num_closure; i++) {
       has_receiver |= surface_shader_photon_mapping_receiver(kg, &sd.closure[i], sd.wi);
     }
-    const bool coherent_owned = kernel_data.integrator.coherent_specular_enabled &&
+    const bool coherent_owned = kernel_use_coherent_specular() &&
                                 (sd.object_flag & SD_OBJECT_COHERENT_DETECTOR) &&
                                 coherent_history_owned_candidate(kg, coherent_history, emitter_object);
     if (had_specular && has_receiver && coherent_owned) {
@@ -1026,7 +1026,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
 
     path_state_next(kg, state, label, sd.runtime_flag);
 
-    if (kernel_data.integrator.coherent_specular_enabled) {
+    if (kernel_use_coherent_specular()) {
       /* Same ownership state machine as BDPT light prefixes. */
       const int patch_index = coherent_patch_for_hit(kg, sd.object, sd.prim, sd.type);
       int patch_mode = 0;
@@ -1049,9 +1049,7 @@ ccl_device void integrator_photon_emit(KernelGlobals kg,
                                          incident_side);
     }
 
-    if (label & LABEL_TRANSMIT) {
-      path_media_enter_exit<false>(kg, state, &sd);
-    }
+    path_media_scatter(kg, state, &sd, label, wo);
 
     if (!(label & LABEL_TRANSPARENT)) {
       if (((label & LABEL_REFLECT) && !kernel_data.integrator.caustics_reflective) ||

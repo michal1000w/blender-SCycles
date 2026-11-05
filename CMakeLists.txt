@@ -1925,6 +1925,38 @@ Keep at '0' to automatically compute optimal values for each build."
   )
   set(CMAKE_JOB_POOL_COMPILE compile_job_pool)
 
+  # Cycles kernels: a CPU kernel translation unit or a CUDA/OptiX kernel module with all features
+  # of Cycles needs up to ~16 GB of memory to compile. Run only as many at once as half of the
+  # memory allows, other targets keep building in parallel.
+  if(NOT CYCLES_KERNEL_MAX_PARALLEL_JOBS)
+    set(CYCLES_KERNEL_MAX_PARALLEL_JOBS "0" CACHE STRING "\
+Define the maximum number of concurrent Cycles kernel compilation jobs, for ninja build system. \
+Keep at '0' to automatically compute it from the physical memory."
+      FORCE
+    )
+    mark_as_advanced(CYCLES_KERNEL_MAX_PARALLEL_JOBS)
+  endif()
+  if(CYCLES_KERNEL_MAX_PARALLEL_JOBS)
+    set(_cycles_kernel_jobs ${CYCLES_KERNEL_MAX_PARALLEL_JOBS})
+  else()
+    math(EXPR _cycles_kernel_jobs "${_TOT_MEM} / 32000")
+    if(${_cycles_kernel_jobs} LESS 1)
+      set(_cycles_kernel_jobs 1)
+    elseif(${_cycles_kernel_jobs} GREATER ${_NUM_CORES})
+      set(_cycles_kernel_jobs ${_NUM_CORES})
+    endif()
+  endif()
+  message(STATUS
+    "  CYCLES_KERNEL_MAX_PARALLEL_JOBS: max concurrent Cycles kernel jobs: ${_cycles_kernel_jobs}"
+  )
+  set_property(
+    GLOBAL APPEND PROPERTY
+    JOB_POOLS cycles_kernel_job_pool=${_cycles_kernel_jobs}
+  )
+  # Used by the Cycles kernel targets and custom commands.
+  set(CYCLES_KERNEL_JOB_POOL cycles_kernel_job_pool)
+  unset(_cycles_kernel_jobs)
+
   unset(_link_jobs)
   unset(_compile_heavy_jobs)
   unset(_compile_jobs)

@@ -25,7 +25,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL"))
+    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL", "CUDA", "OPTIX"))
     parser.add_argument("--dump", type=Path, help="Write the node settings of the files and exit")
     parser.add_argument("--expect-json", type=Path)
     return parser.parse_args(argv)
@@ -83,13 +83,13 @@ def main():
         if found == 0:
             errors.append(f"{path.name}: no Diffraction BSDF")
         scene = bpy.context.scene
-        scene.cycles.device = "GPU" if args.device == "METAL" else "CPU"
-        if args.device == "METAL":
+        scene.cycles.device = "CPU" if args.device == "CPU" else "GPU"
+        if args.device != "CPU":
             prefs = bpy.context.preferences.addons["cycles"].preferences
-            prefs.compute_device_type = "METAL"
+            prefs.compute_device_type = args.device
             prefs.get_devices()
             for device in prefs.devices:
-                device.use = device.type == "METAL"
+                device.use = device.type == args.device
         scene.render.image_settings.file_format = "OPEN_EXR"
         scene.render.image_settings.color_depth = "32"
         scene.render.filepath = str(args.output / (path.stem + ".exr"))

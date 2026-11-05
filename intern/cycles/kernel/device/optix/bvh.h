@@ -260,7 +260,15 @@ extern "C" __global__ void __anyhit__kernel_optix_visibility_test()
     }
 #endif
 
-    if (intersection_skip_self_shadow(ray->self, object, prim)) {
+    /* Two-sided coherent glass points do not occlude their own exit, as with the other
+     * traversals, see intersection_skip_self_shadow_coherent_point(). */
+    int type = 0;
+#ifdef __POINTCLOUD__
+    if (!optixIsTriangleHit() && optixGetHitKind() == CUSTOM_PRIMITIVE_HIT_KIND_POINT) {
+      type = kernel_data_fetch(objects, object).primitive_type;
+    }
+#endif
+    if (intersection_skip_self_shadow_coherent_point(nullptr, ray->self, object, prim, type)) {
       return optixIgnoreIntersection();
     }
     else {

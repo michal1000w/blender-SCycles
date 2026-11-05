@@ -66,5 +66,9 @@ cycles_add_library(cycles_kernel_cpu "${LIB}"
   ${SRC_KERNEL_DEVICE_CPU_HEADERS}
 )
 cycles_set_solution_folder(cycles_kernel_cpu)
+# Each kernel translation unit needs several GB of memory, see CYCLES_KERNEL_JOB_POOL.
+if(CYCLES_KERNEL_JOB_POOL)
+  set_property(TARGET cycles_kernel_cpu PROPERTY JOB_POOL_COMPILE ${CYCLES_KERNEL_JOB_POOL})
+endif()
 
 source_group("device\\cpu" FILES ${SRC_KERNEL_DEVICE_CPU} ${SRC_KERNEL_DEVICE_CPU_HEADERS})

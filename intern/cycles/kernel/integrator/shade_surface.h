@@ -404,7 +404,7 @@ ccl_device
 
   kernel_assert(ls.pdf != 0.0f);
 
-  if (kernel_data.integrator.coherent_specular_enabled &&
+  if (kernel_use_coherent_specular() &&
       coherent_detector_eligible(sd) && ls.type == LIGHT_POINT &&
       coherent_history_owned_direct_source(kg, ls.prim))
   {
@@ -453,8 +453,8 @@ ccl_device
   /* The legacy direct-group estimator has a different path partition. In
    * specular-connection mode only declared detector endpoints receive a
    * coherent field; all other NEE remains ordinary incoherent radiometry. */
-  const bool coherent_source = (kernel_data.kernel_features & KERNEL_FEATURE_COHERENT_DIRECT) &&
-                               !kernel_data.integrator.coherent_specular_enabled &&
+  const bool coherent_source = kernel_use_coherent_direct() &&
+                               !kernel_use_coherent_specular() &&
                                mnee_vertex_count == 0 && ls.type == LIGHT_POINT &&
                                kernel_data_fetch(lights, ls.prim).coherence_group != 0 &&
                                kernel_data_fetch(lights, ls.prim).coherence_length > 0.0f;
@@ -465,7 +465,7 @@ ccl_device
       return SHADER_EVAL_CACHE_MISS;
     }
   }
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   const Spectrum guiding_scattering_throughput = INTEGRATOR_STATE(state, path, throughput) *
                                                  bsdf_eval_sum(&bsdf_eval);
 #endif
@@ -552,7 +552,7 @@ ccl_device
       mnee_vertex_count,
       is_constant_light_shader);
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   guiding_gpu_shadow_endpoint(shadow_state, sd->P);
   if (mnee_vertex_count == 0) {
     guiding_gpu_record_direct(shadow_state,
@@ -574,7 +574,16 @@ ccl_device
   }
 #endif
 
-  if (is_transmission) {
+#ifdef __NESTED_DIELECTRICS__
+  /* The media of nested dielectrics follow the geometry, see path_media_scatter(). */
+  const bool shadow_crosses_surface = ((sd->shader_flag & SD_HAS_NESTED_PRIORITY) &&
+                                       nested_dielectrics_enabled(kg)) ?
+                                          dot(ls.D, sd->Ng) < 0.0f :
+                                          is_transmission;
+#else
+  const bool shadow_crosses_surface = is_transmission;
+#endif
+  if (shadow_crosses_surface) {
     path_media_enter_exit<true>(kg, shadow_state, sd);
   }
 
@@ -983,7 +992,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
 
   float bsdf_avg_roughness_squared = 0.0f;
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0) {
     const float rand_guiding = path_state_rng_1D(kg, rng_state, PRNG_SURFACE_BSDF_GUIDING);
     const float3 rand_resampling = path_state_rng_3D(kg, rng_state, PRNG_SURFACE_RIS_GUIDING_0);
@@ -1078,7 +1087,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
     }
   }
 #endif
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) *= bsdf_pdf / unguided_bsdf_pdf;
   }
@@ -1121,7 +1130,7 @@ ccl_device_forceinline int integrate_surface_bsdf_bssrdf_bounce(
   const Spectrum bsdf_weight = bsdf_eval_sum(&bsdf_eval) / bsdf_pdf;
   INTEGRATOR_STATE_WRITE(state, path, throughput) *= bsdf_weight;
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   GuidingVirtualDistance source_distance;
   guiding_gpu_record_bounce(
       state,
@@ -1501,7 +1510,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
 
     /* After shader evaluation, in case of texture cache miss. */
     guiding_record_surface_segment(kg, state, &sd);
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
     if (sd.runtime_flag & SR_BSDF_HAS_EVAL) {
       guiding_gpu_record_importance(state,
                                     sd.P,
@@ -1647,7 +1656,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
     }
 #endif
     if (surface_stage < 3) {
-      if (surface_stage <= 1 && kernel_data.integrator.coherent_specular_enabled &&
+      if (surface_stage <= 1 && kernel_use_coherent_specular() &&
           (sd.object_flag & SD_OBJECT_COHERENT_DETECTOR))
       {
         /* Diagonals and signed pairs for declared coherent source paths are
@@ -1766,9 +1775,12 @@ ccl_device int integrate_surface(KernelGlobals kg,
   }
 #endif
 
-  if (continue_path_label & LABEL_TRANSMIT) {
-    /* Enter/Exit volumes and nested dielectric media. */
-    path_media_enter_exit<false>(kg, state, &sd);
+  if ((continue_path_label & LABEL_TRANSMIT) ||
+      (continue_path_label != LABEL_NONE && (sd.shader_flag & SD_HAS_NESTED_PRIORITY)))
+  {
+    /* Enter/Exit volumes and nested dielectric media. The bounce wrote the new direction, or
+     * left the incoming one for a path that passes through. */
+    path_media_scatter(kg, state, &sd, continue_path_label, INTEGRATOR_STATE(state, ray, D));
   }
 
   return continue_path_label;

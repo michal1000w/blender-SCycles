@@ -2644,7 +2644,7 @@ ccl_device_forceinline void integrate_volume_direct_light(
   BsdfEval phase_eval ccl_optional_struct_init;
   const float phase_pdf = volume_shader_phase_eval(
       kg, state, sd, phases, ls.D, &phase_eval, ls.shader, false, &P);
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
   const Spectrum guiding_scattering_throughput = throughput * bsdf_eval_sum(&phase_eval);
 #  endif
   float mis_weight;
@@ -2693,7 +2693,7 @@ ccl_device_forceinline void integrate_volume_direct_light(
   uint32_t shadow_flag = INTEGRATOR_STATE(state, path, flag);
   const Spectrum phase_sum = bsdf_eval_sum(&phase_eval);
   const Spectrum throughput_phase = throughput * phase_sum * polarization_emission_weight(kg, state);
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
   guiding_gpu_record_direct(shadow_state,
                             state,
                             P,
@@ -3031,7 +3031,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   if (polarization_enabled(kg)) {
     polarization_path_write(state, polarization_depolarized(polarization_path_read(state)));
   }
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
   guiding_gpu_record_importance(state, sd->P, sd->wi, 1.0f, true);
 #  endif
 
@@ -3047,7 +3047,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   float sampled_roughness = 1.0f;
   int label;
 
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
   if (kernel_data.integrator.use_volume_guiding && kernel_integrator_state.guiding_capacity > 0) {
     const float rand_guiding = path_state_rng_1D(
         kg, rng_state, PRNG_VOLUME_PHASE_GUIDING_DISTANCE);
@@ -3152,7 +3152,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   const Spectrum throughput = INTEGRATOR_STATE(state, path, throughput);
   const Spectrum throughput_phase = throughput * phase_weight;
   INTEGRATOR_STATE_WRITE(state, path, throughput) = throughput_phase;
-#  ifdef __KERNEL_METAL__
+#  ifdef __GPU_GUIDING__
   GuidingVirtualDistance source_distance;
   guiding_gpu_record_bounce(state,
                             sd->P,

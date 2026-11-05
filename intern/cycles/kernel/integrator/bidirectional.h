@@ -595,7 +595,7 @@ ccl_device_inline_transport float bdpt_emission_mis_weight_lamp(
  * An inconsistent reverse PDF breaks the partition of the bidirectional MIS weights. */
 /* Keep the full shader graph in one callable body. Replicating it at every MIS query makes
  * Metal compilation and the caller's live register set unnecessarily large. */
-ccl_device __attribute__((noinline)) float bdpt_reverse_pdf(
+ccl_device ccl_noinline float bdpt_reverse_pdf(
     KernelGlobals kg,
     IntegratorState state,
     ccl_private ShaderData *sd,
@@ -2956,7 +2956,7 @@ ccl_device_inline void bdpt_light_generate_path(KernelGlobals kg,
     float eta = 1.0f;
     float avg_roughness_squared = 0.0f;
     int label;
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
     if (kernel_data.integrator.use_surface_guiding && kernel_integrator_state.guiding_capacity > 0)
     {
       const float rand_guiding = hash_uint3_to_float(
@@ -3148,9 +3148,7 @@ ccl_device_inline void bdpt_light_generate_path(KernelGlobals kg,
     }
 
     path_state_next(kg, state, label, sd.runtime_flag);
-    if (label & LABEL_TRANSMIT) {
-      path_media_enter_exit<false>(kg, state, &sd);
-    }
+    path_media_scatter(kg, state, &sd, label, wo);
 
     ray.P = ray_offset(sd.P, dot(sd.Ng, wo) >= 0.0f ? sd.Ng : -sd.Ng);
     ray.tmin = 0.0f;

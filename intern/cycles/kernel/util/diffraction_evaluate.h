@@ -12,6 +12,8 @@ CCL_NAMESPACE_BEGIN
 template<int N, typename BoundaryPointer>
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
+#elif defined(__KERNEL_CUDA__)
+ccl_device_noinline
 #else
 ccl_device_inline
 #endif
@@ -57,6 +59,8 @@ ccl_device_inline bool diffraction_cache_tensor_match(ccl_global const float2 *m
 template<int N, typename BoundaryPointer>
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
+#elif defined(__KERNEL_CUDA__)
+ccl_device_noinline
 #else
 ccl_device_inline
 #endif

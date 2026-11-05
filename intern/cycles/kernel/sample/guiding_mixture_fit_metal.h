@@ -5,10 +5,11 @@
 #pragma once
 
 #include "kernel/sample/guiding_mixture_conditional.h"
+#include "kernel/util/simd_group.h"
 
 CCL_NAMESPACE_BEGIN
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
 /* Collect against one immutable model. Low 16 lanes return complete component
  * statistics; high lanes only provide the second observation stream. */
 template<typename Range>
@@ -41,20 +42,20 @@ ccl_device_inline void guiding_mixture_collect_cooperative(
                                   -FLT_MAX;
     float maximum = log_density;
     for (uint offset = 8; offset > 0; offset /= 2) {
-      maximum = max(maximum, metal::simd_shuffle_xor(maximum, offset));
+      maximum = max(maximum, ccl_simd_shuffle_xor(maximum, offset));
     }
     const float density = log_density > -FLT_MAX ? expf(log_density - maximum) : 0;
     float sum = density;
     for (uint offset = 8; offset > 0; offset /= 2) {
-      sum += metal::simd_shuffle_xor(sum, offset);
+      sum += ccl_simd_shuffle_xor(sum, offset);
     }
     if (observation_index < count && sum > 0) {
       batch.record(observation, density / sum, maximum_weight, metric_extent);
     }
   }
   for (int i = 0; i < Stats::storage_size; ++i) {
-    const float other_value = metal::simd_shuffle_xor(batch.values[i], 16);
-    const float other_error = metal::simd_shuffle_xor(batch.errors[i], 16);
+    const float other_value = ccl_simd_shuffle_xor(batch.values[i], 16);
+    const float other_error = ccl_simd_shuffle_xor(batch.errors[i], 16);
     if (lane < GuidingGaussianMixture::components) {
       batch.add(i, other_value);
       batch.add(i, -other_error);

@@ -27,7 +27,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL"))
+    parser.add_argument("--device", default="CPU", choices=("CPU", "METAL", "CUDA", "OPTIX"))
     parser.add_argument("--scenes", default="all")
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--resolution", type=int, default=96)
@@ -56,7 +56,7 @@ def setup(args, integrator):
     scene.render.image_settings.color_depth = "32"
     scene.view_settings.view_transform = "Standard"
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
@@ -332,13 +332,13 @@ SCENES = {
 
 
 def enable_device(args):
-    if args.device != "METAL":
+    if args.device == "CPU":
         return
     prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "METAL"
+    prefs.compute_device_type = args.device
     prefs.get_devices()
     for device in prefs.devices:
-        device.use = device.type == "METAL"
+        device.use = device.type == args.device
 
 
 def load(path):

@@ -28,10 +28,10 @@ CCL_NAMESPACE_BEGIN
 #define COHERENT_SPECULAR_MAX_CANDIDATES 256
 
 /* Reject the render instead of silently dropping a supported coherent route.
- * Metal reports through the queue counter; CPU through its thread globals. */
+ * GPUs report through the queue counter; CPU through its thread globals. */
 ccl_device_inline void coherent_specular_report_error(KernelGlobals kg)
 {
-#ifdef __KERNEL_METAL__
+#if defined(__KERNEL_METAL__) || defined(__KERNEL_CUDA__) || defined(__KERNEL_HIP__)
   (void)kg;
   atomic_fetch_and_or_uint32(&kernel_integrator_state.queue_counter->coherent_error, 1u);
 #elif !defined(__KERNEL_GPU__)
@@ -363,7 +363,7 @@ Spectrum coherent_specular_complete_intensity(KernelGlobals kg,
                                               ccl_private Spectrum *primary_direct = nullptr)
 {
   if (primary_direct) *primary_direct = zero_spectrum();
-  if (!kernel_data.integrator.coherent_specular_enabled ||
+  if (!kernel_use_coherent_specular() ||
       !coherent_detector_eligible(sd) || sd->num_closure == 0)
   {
     return zero_spectrum();

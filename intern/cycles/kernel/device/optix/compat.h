@@ -30,15 +30,29 @@ typedef unsigned long long uint64_t;
 #  define FLT_EPSILON 1.192092896e-07F
 #endif
 
-#define ccl_device \
-  static __device__ \
-      __forceinline__  // Function calls are bad for OptiX performance, so inline everything
-#define ccl_device_extern extern "C" __device__
-#define ccl_device_inline ccl_device
-#define ccl_device_forceinline ccl_device
-#define ccl_device_inline_method __device__ __forceinline__
-#define ccl_device_template_spec template<> __device__ __forceinline__
+#ifndef __KERNEL_GPU_TRANSPORT__
+#  define ccl_device \
+    static __device__ \
+        __forceinline__  // Function calls are bad for OptiX performance, so inline everything
+#  define ccl_device_extern extern "C" __device__
+#  define ccl_device_inline ccl_device
+#  define ccl_device_forceinline ccl_device
+#  define ccl_device_inline_method __device__ __forceinline__
+#  define ccl_device_template_spec template<> __device__ __forceinline__
+#else
+/* The transport modules (kernel_transport*.cu) contain bidirectional path tracing, photon mapping
+ * and the other features of the transport kernels. Inlined everywhere, each of them needs more
+ * than 20 GB of memory to compile. They follow the inlining of the CUDA kernels instead, which run
+ * the same code, see kernel/device/cuda/compat.h. */
+#  define ccl_device static __device__ __inline__
+#  define ccl_device_extern extern "C" __device__
+#  define ccl_device_inline static __device__ __inline__
+#  define ccl_device_forceinline static __device__ __forceinline__
+#  define ccl_device_inline_method __device__ __inline__
+#  define ccl_device_template_spec template<> __device__ __inline__
+#endif
 #define ccl_device_noinline static __device__ __noinline__
+#define ccl_noinline __noinline__
 #define ccl_device_noinline_cpu ccl_device
 #define ccl_global
 #define ccl_inline_constant static __constant__

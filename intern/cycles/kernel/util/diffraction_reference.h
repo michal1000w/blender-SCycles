@@ -199,6 +199,8 @@ template<int N, typename ChartPointer, typename AnchorPointer, typename Boundary
  * Apple's generic ccl_device_noinline deliberately permits inlining. */
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
+#elif defined(__KERNEL_CUDA__)
+ccl_device_noinline
 #else
 ccl_device_inline
 #endif

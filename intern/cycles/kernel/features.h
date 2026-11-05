@@ -101,6 +101,13 @@ CCL_NAMESPACE_BEGIN
 /* Volumes with a spatially varying index of refraction, which bend the rays that cross them. */
 #define KERNEL_FEATURE_VOLUME_IOR (1ULL << 39ULL)
 
+/* Pixel-level displacement. Only requested for CUDA and OptiX devices, which keep it in a
+ * separate kernel module; Metal and CPU kernels test the scene settings at runtime. */
+#define KERNEL_FEATURE_PIXEL_DISPLACEMENT (1ULL << 40ULL)
+/* Diffraction closures. Only set for devices with a transport kernel module, which contains them,
+ * see __DIFFRACTION__ below. */
+#define KERNEL_FEATURE_DIFFRACTION (1ULL << 41ULL)
+
 /* Shader node feature mask, to specialize shader evaluation for kernels. */
 
 #define KERNEL_FEATURE_NODE_MASK_SURFACE_LIGHT \
@@ -186,22 +193,64 @@ CCL_NAMESPACE_BEGIN
 #endif /* !__KERNEL_GPU__ */
 
 /* Light-cache transport (bidirectional path tracing and photon mapping) and pixel-level
- * displacement. The host schedules their light-cache passes for Metal and CPU devices only. */
-#if defined(__KERNEL_METAL__) || !defined(__KERNEL_GPU__)
+ * displacement. Metal and CPU kernels always contain them. CUDA, OptiX and HIP build them into a
+ * separate "transport" kernel module (__KERNEL_GPU_TRANSPORT__), which the device loads only for
+ * scenes that use these features, so ordinary path tracing keeps the smaller kernels. */
+#if defined(__KERNEL_METAL__) || !defined(__KERNEL_GPU__) || defined(__KERNEL_GPU_TRANSPORT__)
 #  define __BDPT__
 #  define __PHOTON_MAPPING__
 #  define __PIXEL_DISPLACEMENT__
 #endif
+/* Path guiding with a field trained on the GPU, see `integrator/guiding_gpu.h`. CUDA and OptiX
+ * build it into their transport kernels. The CPU guides with OpenPGL instead. */
+#if defined(__KERNEL_METAL__) || (defined(__KERNEL_CUDA__) && defined(__KERNEL_GPU_TRANSPORT__))
+#  define __GPU_GUIDING__
+#endif
+/* Diffraction closures, coherent light, polarization, nested dielectrics and volumes with an
+ * index of refraction.
+ * Metal removes them from the kernels of scenes without them, as it specializes kernels for the
+ * scene features. CUDA and OptiX kernels are not specialized: their regular kernels would carry
+ * the registers and stack memory of these features into every render. They are built into the
+ * transport kernels instead, which the device loads for scenes that use them. The OptiX OSL
+ * kernels do not have them: with all of them, a single OSL module needs over 27 GB of memory to
+ * compile. Scenes that use them with OSL shading on OptiX are refused by the device. */
+#if !defined(__KERNEL_CUDA__) || defined(__KERNEL_GPU_TRANSPORT__)
+#  define __COHERENT_LIGHT__
+#  define __DIFFRACTION__
+#  define __POLARIZATION__
+#else
+#  undef __NESTED_DIELECTRICS__
+#  undef __VOLUME_IOR__
+#endif
+/* Scene settings of coherent light, false in kernels without it so that its code is removed. */
+#ifdef __COHERENT_LIGHT__
+#  define kernel_use_coherent_specular() (kernel_data.integrator.coherent_specular_enabled != 0)
+#  define kernel_use_coherent_direct() \
+    ((kernel_data.kernel_features & KERNEL_FEATURE_COHERENT_DIRECT) != 0)
+#else
+#  define kernel_use_coherent_specular() false
+#  define kernel_use_coherent_direct() false
+#endif
+#ifdef __POLARIZATION__
+#  define kernel_use_polarization() \
+    ((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) != 0)
+#else
+#  define kernel_use_polarization() false
+#endif
 /* Metal compiles displaced-surface intersection and shading into scene specialized variants
  * only. CPU translation units that render (the kernels and OSL services) always contain them and
  * test the scene settings at runtime; they define __KERNEL_CPU_PIXEL_DISPLACEMENT__ and include
- * `kernel/geom/pixel_displacement_shader.h`. Other host code using kernel headers does not. */
+ * `kernel/geom/pixel_displacement_shader.h`. Other host code using kernel headers does not.
+ * The CUDA transport kernels contain them and test the scene settings at runtime too. OptiX does
+ * not intersect displaced surfaces, the host renders them with ordinary displacement there. */
 #if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT__) || \
-    (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__))
+    (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__)) || \
+    (defined(__KERNEL_GPU_TRANSPORT__) && !defined(__KERNEL_OPTIX__))
 #  define __PIXEL_DISPLACEMENT_INTERSECT__
 #endif
 #if defined(__KERNEL_METAL_PIXEL_DISPLACEMENT_SHADE__) || \
-    (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__))
+    (!defined(__KERNEL_GPU__) && defined(__KERNEL_CPU_PIXEL_DISPLACEMENT__)) || \
+    (defined(__KERNEL_GPU_TRANSPORT__) && !defined(__KERNEL_OPTIX__))
 #  define __PIXEL_DISPLACEMENT_SHADE__
 #endif
 

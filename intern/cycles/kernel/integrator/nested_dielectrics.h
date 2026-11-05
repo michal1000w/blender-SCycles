@@ -487,4 +487,35 @@ ccl_device_inline void path_media_enter_exit(KernelGlobals kg,
 #endif
 }
 
+/* The path scattered at a surface into direction `wo`: update the media it is inside of.
+ *
+ * Volumes follow the label of the scattering, as in Cycles. For nested dielectrics the geometry
+ * decides: with shading normals a sampled transmission can stay on the side of the surface it
+ * came from and a reflection can cross the surface. Following the label there enters a medium
+ * the path is not inside of, or misses one it is, and later surfaces are then classified against
+ * the wrong media. A medium the path left behind on its list makes the surfaces of that medium
+ * false intersections for every later path and shadow ray, which lets light through them. */
+template<typename IntegratorGenericState>
+ccl_device_inline void path_media_scatter(KernelGlobals kg,
+                                          IntegratorGenericState state,
+                                          const ccl_private ShaderData *sd,
+                                          const int label,
+                                          const float3 wo)
+{
+#ifdef __NESTED_DIELECTRICS__
+  if ((sd->shader_flag & SD_HAS_NESTED_PRIORITY) && nested_dielectrics_enabled(kg) &&
+      !(label & (LABEL_SUBSURFACE_SCATTER | LABEL_RAY_PORTAL)))
+  {
+    /* sd->Ng faces the side the path came from. */
+    if (dot(sd->Ng, wo) < 0.0f) {
+      path_media_enter_exit<false>(kg, state, sd);
+    }
+    return;
+  }
+#endif
+  if (label & LABEL_TRANSMIT) {
+    path_media_enter_exit<false>(kg, state, sd);
+  }
+}
+
 CCL_NAMESPACE_END

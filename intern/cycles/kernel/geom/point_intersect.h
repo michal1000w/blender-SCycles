@@ -89,7 +89,7 @@ ccl_device_forceinline bool point_intersect(KernelGlobals kg,
                            motion_point(kg, object, prim, time) :
                            kernel_data_fetch(points, position_offset + prim);
 
-  const bool two_sided = kernel_data.integrator.coherent_specular_enabled &&
+  const bool two_sided = kernel_use_coherent_specular() &&
                          point_coherent_glass_two_sided(
                              true, kernel_data_fetch(object_flag, object), type);
   if (!point_intersect_test(point, ray_P, ray_D, ray_tmin, ray_tmax, &isect->t, two_sided)) {

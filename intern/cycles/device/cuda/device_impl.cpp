@@ -145,6 +145,9 @@ CUDADevice::CUDADevice(const DeviceInfo &info, Stats &stats, Profiler &profiler,
 CUDADevice::~CUDADevice()
 {
   image_info.free();
+  if (cuModuleTransport) {
+    cuda_assert(cuModuleUnload(cuModuleTransport));
+  }
   if (cuModule) {
     cuda_assert(cuModuleUnload(cuModule));
   }
@@ -426,18 +429,84 @@ string CUDADevice::compile_kernel(const string &common_cflags, const char *name,
   return cubin;
 }
 
+bool CUDADevice::kernel_features_use_transport(const uint64_t kernel_features)
+{
+  /* The features which the regular kernels do not contain, see kernel/features.h. */
+  return (kernel_features &
+          (KERNEL_FEATURE_BDPT | KERNEL_FEATURE_PHOTON_MAPPING | KERNEL_FEATURE_PIXEL_DISPLACEMENT |
+           KERNEL_FEATURE_PATH_GUIDING | KERNEL_FEATURE_COHERENT_DIRECT |
+           KERNEL_FEATURE_COHERENT_SPECULAR | KERNEL_FEATURE_POLARIZATION |
+           KERNEL_FEATURE_NESTED_DIELECTRICS | KERNEL_FEATURE_VOLUME_IOR |
+           KERNEL_FEATURE_DIFFRACTION));
+}
+
+bool CUDADevice::load_module(const char *name, const uint64_t kernel_features, CUmodule &module)
+{
+  const string cflags = compile_kernel_get_common_cflags(kernel_features);
+  const string cubin = compile_kernel(cflags, name);
+  if (cubin.empty()) {
+    return false;
+  }
+
+  CUDAContextScope scope(this);
+
+  string cubin_data;
+  CUresult result;
+
+  if (path_read_compressed_text(cubin, cubin_data)) {
+    result = cuModuleLoadData(&module, cubin_data.c_str());
+  }
+  else {
+    result = CUDA_ERROR_FILE_NOT_FOUND;
+  }
+
+  if (result != CUDA_SUCCESS) {
+    module = nullptr;
+    set_error(string_printf(
+        "Failed to load CUDA kernel from '%s' (%s)", cubin.c_str(), cuewErrorString(result)));
+    return false;
+  }
+  return true;
+}
+
 bool CUDADevice::load_kernels(const uint64_t kernel_features)
 {
-  /* TODO(sergey): Support kernels re-load for CUDA devices adaptive compile.
-   *
-   * Currently re-loading kernel will invalidate memory pointers,
-   * causing problems in cuCtxSynchronize.
-   */
+  /* Modules are never unloaded while the device exists: memory pointers and constant data in a
+   * module would be lost. The regular module stays loaded, and the transport module is loaded
+   * next to it the first time a scene needs it. Both receive all constant data. */
+  const bool use_transport = kernel_features_use_transport(kernel_features);
+
   if (cuModule) {
     if (use_adaptive_compilation()) {
+      /* TODO(sergey): Support kernels re-load for CUDA devices adaptive compile. */
       LOG_INFO << "Skipping CUDA kernel reload for adaptive compilation, not currently supported.";
+      return true;
     }
-    return true;
+    if (use_transport == kernels_use_transport_) {
+      return true;
+    }
+    if (use_transport && !cuModuleTransport) {
+      if (!load_module("kernel_transport", kernel_features, cuModuleTransport)) {
+        return false;
+      }
+      /* Constant data written so far went to the regular module only. */
+      CUDAContextScope scope(this);
+      CUdeviceptr src, dst;
+      size_t src_bytes, dst_bytes;
+      cuda_assert(cuModuleGetGlobal(&src, &src_bytes, cuModule, "kernel_params"));
+      cuda_assert(cuModuleGetGlobal(&dst, &dst_bytes, cuModuleTransport, "kernel_params"));
+      cuda_assert(cuMemcpyDtoD(dst, src, std::min(src_bytes, dst_bytes)));
+    }
+    {
+      /* Querying the kernels needs the context. */
+      const CUDAContextScope scope(this);
+      kernels.load(this, use_transport ? cuModuleTransport : cuModule, use_transport);
+    }
+    kernels_use_transport_ = use_transport;
+    if (use_transport) {
+      reserve_local_memory(kernel_features);
+    }
+    return !have_error();
   }
 
   /* check if cuda init succeeded */
@@ -450,38 +519,22 @@ bool CUDADevice::load_kernels(const uint64_t kernel_features)
     return false;
   }
 
-  /* get kernel */
-  const char *kernel_name = "kernel";
-  string cflags = compile_kernel_get_common_cflags(kernel_features);
-  string cubin = compile_kernel(cflags, kernel_name);
-  if (cubin.empty()) {
+  if (!load_module("kernel", kernel_features, cuModule)) {
+    return false;
+  }
+  if (use_transport && !load_module("kernel_transport", kernel_features, cuModuleTransport)) {
     return false;
   }
 
-  /* open module */
-  CUDAContextScope scope(this);
-
-  string cubin_data;
-  CUresult result;
-
-  if (path_read_compressed_text(cubin, cubin_data)) {
-    result = cuModuleLoadData(&cuModule, cubin_data.c_str());
+  {
+    /* Querying the kernels needs the context. */
+    const CUDAContextScope scope(this);
+    kernels.load(this, use_transport ? cuModuleTransport : cuModule, use_transport);
   }
-  else {
-    result = CUDA_ERROR_FILE_NOT_FOUND;
-  }
+  kernels_use_transport_ = use_transport;
+  reserve_local_memory(kernel_features);
 
-  if (result != CUDA_SUCCESS) {
-    set_error(string_printf(
-        "Failed to load CUDA kernel from '%s' (%s)", cubin.c_str(), cuewErrorString(result)));
-  }
-
-  if (result == CUDA_SUCCESS) {
-    kernels.load(this);
-    reserve_local_memory(kernel_features);
-  }
-
-  return (result == CUDA_SUCCESS);
+  return !have_error();
 }
 
 void CUDADevice::reserve_local_memory(const uint64_t kernel_features)
@@ -748,11 +801,6 @@ device_ptr CUDADevice::mem_alloc_sub_ptr(device_memory &mem, const size_t offset
 void CUDADevice::const_copy_to(const char *name, void *host, const size_t size)
 {
   CUDAContextScope scope(this);
-  CUdeviceptr mem;
-  size_t bytes;
-
-  cuda_assert(cuModuleGetGlobal(&mem, &bytes, cuModule, "kernel_params"));
-  assert(bytes == sizeof(KernelParamsCUDA));
 
   if (strcmp(name, "data") == 0) {
     /* We need this value for shared memory size when launching integrator_sort_bucket_pass
@@ -760,16 +808,30 @@ void CUDADevice::const_copy_to(const char *name, void *host, const size_t size)
     scene_max_shaders_ = static_cast<const KernelData *>(host)->max_shaders;
   }
 
-  /* Update data storage pointers in launch parameters. */
+  size_t offset = size_t(-1);
 #  define KERNEL_DATA_ARRAY(data_type, data_name) \
-    if (strcmp(name, #data_name) == 0) { \
-      cuda_assert(cuMemcpyHtoD(mem + offsetof(KernelParamsCUDA, data_name), host, size)); \
-      return; \
+    if (offset == size_t(-1) && strcmp(name, #data_name) == 0) { \
+      offset = offsetof(KernelParamsCUDA, data_name); \
     }
   KERNEL_DATA_ARRAY(KernelData, data)
   KERNEL_DATA_ARRAY(IntegratorStateGPU, integrator_state)
 #  include "kernel/data_arrays.h"
 #  undef KERNEL_DATA_ARRAY
+  if (offset == size_t(-1)) {
+    return;
+  }
+
+  /* Update the launch parameters of every loaded module. */
+  for (CUmodule module : {cuModule, cuModuleTransport}) {
+    if (module == nullptr) {
+      continue;
+    }
+    CUdeviceptr mem;
+    size_t bytes;
+    cuda_assert(cuModuleGetGlobal(&mem, &bytes, module, "kernel_params"));
+    assert(bytes == sizeof(KernelParamsCUDA));
+    cuda_assert(cuMemcpyHtoD(mem + offset, host, size));
+  }
 }
 
 void CUDADevice::global_alloc(device_memory &mem)

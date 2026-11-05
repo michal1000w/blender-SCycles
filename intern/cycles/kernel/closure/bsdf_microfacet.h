@@ -1113,7 +1113,7 @@ ccl_device int bsdf_microfacet_sample(KernelGlobals kg,
     /* The native near-index window is an approximation: at eta!=1 the
      * transmitted direction still varies with H. Polarized mixture transport
      * therefore retains its continuous density; exact eta1 is a null atom. */
-    const bool matched_atom = (kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) ?
+    const bool matched_atom = kernel_use_polarization() ?
                                   m_eta == 1.0f : fabsf(m_eta - 1.0f) < 1e-4f;
     m_singular = m_singular || matched_atom;
   }
@@ -1153,7 +1153,7 @@ ccl_device int bsdf_microfacet_sample(KernelGlobals kg,
     }
 
     float transmission_denominator = cos_HO + cos_HI * m_inv_eta;
-    if ((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) && do_refract &&
+    if (kernel_use_polarization() && do_refract &&
         fabsf(m_eta-1.0f)<1e-4f && m_eta!=1.0f)
     {
       /* Rationalize the difference of almost equal Snell cosines. */

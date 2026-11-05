@@ -184,7 +184,7 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
                                                        ccl_private ShaderData *sd,
                                                        const PathRayVisibility path_visibility)
 {
-  if (kernel_data.integrator.coherent_specular_enabled) {
+  if (kernel_use_coherent_specular()) {
     coherent_detector_prepare(sd);
   }
 
@@ -267,7 +267,7 @@ ccl_device_inline void surface_shader_prepare_closures(KernelGlobals kg,
    * Blurring of bsdf after bounces, for rays that have a small likelihood
    * of following this particular path (diffuse, rough glossy) */
   bool coherent_ideal_patch = false;
-  if (kernel_data.integrator.coherent_specular_enabled) {
+  if (kernel_use_coherent_specular()) {
     for (int patch_index = 0; patch_index < kernel_data.integrator.coherent_patch_count;
          patch_index++)
     {
@@ -415,7 +415,7 @@ ccl_device_inline float _surface_shader_bsdf_eval_mis(KernelGlobals kg,
   const bool sampled_grating_atom = skip_sc &&
       (skip_sc->type == CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID ||
        (bsdf_microfacet_has_delta(skip_sc) && surface_shader_has_physical_grating(sd)) ||
-       ((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) &&
+       (kernel_use_polarization() &&
         (bsdf_microfacet_has_delta(skip_sc) ||
          bsdf_microfacet_is_matched_transmission_atom(skip_sc,wo) ||
          skip_sc->type == CLOSURE_BSDF_TRANSPARENT_ID)));
@@ -515,7 +515,7 @@ ccl_device_inline float surface_shader_bsdf_eval_pdfs(const KernelGlobals kg,
   return (sum_sample_weight > 0.0f) ? sum_pdf / sum_sample_weight : 0.0f;
 }
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
 ccl_device_inline float3 surface_shader_gpu_guiding_normal(const ccl_private ShaderData *sd)
 {
   /* Orient the product toward this query's incoming direction, including transmission. */
@@ -832,7 +832,7 @@ ccl_device_inline
   }
 #endif
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
   if (light_shader_flags & SHADER_USE_MIS) {
     pdf = surface_shader_gpu_guiding_pdf(sd, wo, pdf, guiding_light_path);
   }
@@ -1051,6 +1051,65 @@ ccl_device int surface_shader_bsdf_guided_sample_closure_mis(
   return label;
 }
 
+/* MSVC does not optimize a function beyond a size limit at all (warning C4883). With the BSDF
+ * sampling and evaluation inlined, the RIS sampler below exceeds it and needs over a megabyte of
+ * stack. MSVC calls them out of line from it; other compilers inline them as before. */
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__)
+#  define ccl_device_ris_call ccl_device ccl_never_inline
+#else
+#  define ccl_device_ris_call ccl_device_forceinline
+#endif
+
+ccl_device_ris_call int surface_shader_ris_bsdf_sample(KernelGlobals kg,
+                                                       ccl_private ShaderData *sd,
+                                                       const ccl_private ShaderClosure *sc,
+                                                       const float3 rand,
+                                                       ccl_private Spectrum *eval,
+                                                       ccl_private float3 *wo,
+                                                       ccl_private float *pdf,
+                                                       ccl_private float2 *sampled_roughness,
+                                                       ccl_private float *eta)
+{
+  return bsdf_sample(kg, sd, sc, rand, eval, wo, pdf, sampled_roughness, eta);
+}
+
+ccl_device_ris_call float surface_shader_ris_bsdf_eval_mis(
+    KernelGlobals kg,
+    ccl_private ShaderData *sd,
+    const float3 wo,
+    const ccl_private ShaderClosure *skip_sc,
+    ccl_private BsdfEval *result_eval,
+    const float sum_pdf,
+    const float sum_sample_weight,
+    const uint light_shader_flags,
+    const float sum_pdf_roughness_squared,
+    ccl_private float &r_avg_roughness_squared)
+{
+  return _surface_shader_bsdf_eval_mis(kg,
+                                       sd,
+                                       wo,
+                                       skip_sc,
+                                       result_eval,
+                                       sum_pdf,
+                                       sum_sample_weight,
+                                       light_shader_flags,
+                                       sum_pdf_roughness_squared,
+                                       r_avg_roughness_squared);
+}
+
+ccl_device_ris_call float surface_shader_ris_bsdf_eval_pdfs(
+    const KernelGlobals kg,
+    ccl_private ShaderData *sd,
+    const float3 wo,
+    ccl_private BsdfEval *result_eval,
+    ccl_private float *pdfs,
+    const uint light_shader_flags,
+    ccl_private float &r_avg_roughness_squared)
+{
+  return surface_shader_bsdf_eval_pdfs(
+      kg, sd, wo, result_eval, pdfs, light_shader_flags, r_avg_roughness_squared);
+}
+
 ccl_device int surface_shader_bsdf_guided_sample_closure_ris(
     KernelGlobals kg,
     IntegratorState state,
@@ -1105,7 +1164,7 @@ ccl_device int surface_shader_bsdf_guided_sample_closure_ris(
     // ----------------------------------------------------
     // generate the first RIS candidate using a BSDF sample
     // ----------------------------------------------------
-    ris_samples[0].label = bsdf_sample(kg,
+    ris_samples[0].label = surface_shader_ris_bsdf_sample(kg,
                                        sd,
                                        sc,
                                        ris_samples[0].rand,
@@ -1122,7 +1181,7 @@ ccl_device int surface_shader_bsdf_guided_sample_closure_ris(
       if (sd->num_closure > 1) {
         const float sweight = sc->sample_weight;
         const float weight = ris_samples[0].bsdf_pdf * sweight;
-        ris_samples[0].bsdf_pdf = _surface_shader_bsdf_eval_mis(kg,
+        ris_samples[0].bsdf_pdf = surface_shader_ris_bsdf_eval_mis(kg,
                                                                 sd,
                                                                 ris_samples[0].wo,
                                                                 sc,
@@ -1155,7 +1214,7 @@ ccl_device int surface_shader_bsdf_guided_sample_closure_ris(
     ris_samples[1].guide_pdf *= (1.0f - bssrdf_sampling_prob);
     ris_samples[1].incoming_radiance_pdf = guiding_surface_incoming_radiance_pdf(
         kg, ris_samples[1].wo);
-    ris_samples[1].bsdf_pdf = surface_shader_bsdf_eval_pdfs(kg,
+    ris_samples[1].bsdf_pdf = surface_shader_ris_bsdf_eval_pdfs(kg,
                                                             sd,
                                                             ris_samples[1].wo,
                                                             &ris_samples[1].bsdf_eval,
@@ -1268,7 +1327,7 @@ ccl_device int surface_shader_bsdf_guided_sample_closure_ris(
   else {
     /* Sample BSDF. */
     *bsdf_pdf = 0.0f;
-    label = bsdf_sample(
+    label = surface_shader_ris_bsdf_sample(
         kg, sd, sc, rand_bsdf, &eval, wo, unguided_bsdf_pdf, sampled_roughness, eta);
 #  ifdef WITH_CYCLES_DEBUG
     // Code path to validate the estimation of the label, sampled roughness and eta
@@ -1288,7 +1347,7 @@ ccl_device int surface_shader_bsdf_guided_sample_closure_ris(
       if (sd->num_closure > 1) {
         const float sweight = sc->sample_weight;
         const float weight = (*unguided_bsdf_pdf) * sweight;
-        *unguided_bsdf_pdf = _surface_shader_bsdf_eval_mis(kg,
+        *unguided_bsdf_pdf = surface_shader_ris_bsdf_eval_mis(kg,
                                                            sd,
                                                            *wo,
                                                            sc,
@@ -1430,7 +1489,7 @@ ccl_device int surface_shader_bsdf_sample_closure(KernelGlobals kg,
   return label;
 }
 
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
 ccl_device int surface_shader_bsdf_gpu_resampled_closure(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
@@ -1557,7 +1616,7 @@ ccl_device int surface_shader_bsdf_gpu_resampled_closure(
 
 /* Keep the guided proposal/BSDF call graph separate from the bidirectional light tracer and
  * camera integrator. Inlining it duplicates all proposal modes in their optimization units. */
-ccl_device __attribute__((noinline)) int surface_shader_bsdf_gpu_guided_sample_closure(
+ccl_device ccl_noinline int surface_shader_bsdf_gpu_guided_sample_closure(
     KernelGlobals kg,
     ccl_private ShaderData *sd,
     const ccl_private ShaderClosure *sc,

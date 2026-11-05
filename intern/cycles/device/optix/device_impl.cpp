@@ -25,6 +25,8 @@
 #  include "util/task.h"
 #  include "util/time.h"
 
+#  include <iterator>
+
 #  define __KERNEL_OPTIX__
 #  include "kernel/device/optix/globals.h"
 
@@ -125,6 +127,9 @@ OptiXDevice::~OptiXDevice()
   if (shader_raytrace_module != nullptr) {
     optixModuleDestroy(shader_raytrace_module);
   }
+  if (transport_surface_module != nullptr) {
+    optixModuleDestroy(transport_surface_module);
+  }
   for (int i = 0; i < 2; ++i) {
     if (builtin_modules[i] != nullptr) {
       optixModuleDestroy(builtin_modules[i]);
@@ -175,8 +180,13 @@ unique_ptr<DeviceQueue> OptiXDevice::gpu_queue_create()
   return make_unique<OptiXDeviceQueue>(this);
 }
 
-BVHLayoutMask OptiXDevice::get_bvh_layout_mask(const uint64_t /*kernel_features*/) const
+BVHLayoutMask OptiXDevice::get_bvh_layout_mask(const uint64_t kernel_features) const
 {
+  /* Pixel-level displacement intersects displaced surfaces in the BVH2 traversal of the CUDA
+   * transport kernels, see use_cuda_kernels_only. */
+  if (kernel_features & KERNEL_FEATURE_PIXEL_DISPLACEMENT) {
+    return BVH_LAYOUT_BVH2;
+  }
   /* OptiX has its own internal acceleration structure format. */
   return BVH_LAYOUT_OPTIX;
 }
@@ -264,6 +274,28 @@ static unsigned int hit_program_continuation_stack_size(const OptixStackSizes *s
   return trace_css;
 }
 
+bool OptiXDevice::kernel_features_use_optix_transport(const uint64_t kernel_features)
+{
+  /* Features which trace rays while shading, see kernel/device/optix/kernel_transport.cu, and the
+   * features which the regular kernels do not contain, see kernel/features.h. GPU guiding is
+   * included so that every shading program records and samples the guiding field. */
+  return (kernel_features & (KERNEL_FEATURE_BDPT | KERNEL_FEATURE_PHOTON_MAPPING |
+                             KERNEL_FEATURE_COHERENT_DIRECT | KERNEL_FEATURE_COHERENT_SPECULAR |
+                             KERNEL_FEATURE_PATH_GUIDING | KERNEL_FEATURE_POLARIZATION |
+                             KERNEL_FEATURE_NESTED_DIELECTRICS | KERNEL_FEATURE_VOLUME_IOR |
+                             KERNEL_FEATURE_DIFFRACTION));
+}
+
+/* Features of the transport module that the OSL kernels do not support: they are regular kernels
+ * with OSL shading, see kernel/features.h. Guiding is disabled with OSL on OptiX by the scene. */
+static bool kernel_features_unsupported_with_osl(const uint64_t kernel_features)
+{
+  return (kernel_features & (KERNEL_FEATURE_BDPT | KERNEL_FEATURE_PHOTON_MAPPING |
+                             KERNEL_FEATURE_COHERENT_DIRECT | KERNEL_FEATURE_COHERENT_SPECULAR |
+                             KERNEL_FEATURE_POLARIZATION | KERNEL_FEATURE_NESTED_DIELECTRICS |
+                             KERNEL_FEATURE_VOLUME_IOR | KERNEL_FEATURE_DIFFRACTION));
+}
+
 bool OptiXDevice::load_kernels(const uint64_t kernel_features)
 {
   if (have_error()) {
@@ -279,8 +311,23 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
   const bool use_osl_shading = false;
   const bool use_osl_camera = false;
 #  endif
-  const bool use_shader_raytrace = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE);
-  const bool use_mnee = (kernel_features & KERNEL_FEATURE_MNEE);
+  const bool use_transport = kernel_features_use_optix_transport(kernel_features) &&
+                             !use_osl_shading;
+  if (use_osl_shading && kernel_features_unsupported_with_osl(kernel_features)) {
+    set_error(
+        "Bidirectional path tracing, photon mapping, coherent light, polarization, diffraction, "
+        "nested dielectrics and volume index of refraction are not supported with OSL shading on "
+        "OptiX. Disable Open Shading Language, or render on the CPU.");
+    return false;
+  }
+  /* The transport module contains the shader ray-tracing and MNEE programs. */
+  const bool use_shader_raytrace = (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) &&
+                                   !use_transport;
+  const bool use_mnee = (kernel_features & KERNEL_FEATURE_MNEE) && !use_transport;
+  /* Surface shading of the transport module with ray-tracing nodes, loaded in the slot of the
+   * shader ray-tracing module, see kernel_transport_surface_raytrace.cu. */
+  const bool use_transport_raytrace = use_transport &&
+                                      (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE);
 
   /* Skip creating OptiX module if only doing denoising. */
   const bool need_optix_kernels = (kernel_features &
@@ -289,7 +336,7 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
   /* Detect existence of OptiX kernel and SDK here early. So we can error out
    * before compiling the CUDA kernels, to avoid failing right after when
    * compiling the OptiX kernel. */
-  string suffix = use_osl_shading ? "_osl" : "";
+  string suffix = use_osl_shading ? "_osl" : (use_transport ? "_transport" : "");
   string ptx_filename;
   if (need_optix_kernels) {
     ptx_filename = path_get("lib/kernel_optix" + suffix + ".ptx.zst");
@@ -317,6 +364,18 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     return false;
   }
 
+  /* Scenes with pixel-level displacement render with the CUDA kernels and a BVH2, see
+   * get_bvh_layout_mask(). */
+  use_cuda_kernels_only = (kernel_features & KERNEL_FEATURE_PIXEL_DISPLACEMENT) != 0;
+  if (use_cuda_kernels_only) {
+    if (use_osl_shading || use_osl_camera) {
+      set_error("Pixel level displacement is not supported with OSL on OptiX");
+      return false;
+    }
+    use_transport_module = false;
+    return !have_error();
+  }
+
   if (!need_optix_kernels) {
     return true;
   }
@@ -335,6 +394,10 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
   if (shader_raytrace_module != nullptr) {
     optixModuleDestroy(shader_raytrace_module);
     shader_raytrace_module = nullptr;
+  }
+  if (transport_surface_module != nullptr) {
+    optixModuleDestroy(transport_surface_module);
+    transport_surface_module = nullptr;
   }
   for (int i = 0; i < 2; ++i) {
     if (builtin_modules[i] != nullptr) {
@@ -479,10 +542,17 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
       return false;
     }
     string shader_raytrace_ptx_data;
-    if (use_shader_raytrace &&
+    if ((use_shader_raytrace || use_transport_raytrace) &&
         !load_optional_module(use_osl_shading ? "kernel_optix_osl_shader_raytrace" :
+                              use_transport   ? "kernel_optix_transport_surface_raytrace" :
                                                 "kernel_optix_shader_raytrace",
                               shader_raytrace_ptx_data))
+    {
+      return false;
+    }
+    string transport_surface_ptx_data;
+    if (use_transport &&
+        !load_optional_module("kernel_optix_transport_surface", transport_surface_ptx_data))
     {
       return false;
     }
@@ -511,6 +581,7 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     OptixResult base_result = OPTIX_SUCCESS;
     OptixResult mnee_result = OPTIX_SUCCESS;
     OptixResult shader_raytrace_result = OPTIX_SUCCESS;
+    OptixResult transport_surface_result = OPTIX_SUCCESS;
 #  ifdef WITH_OSL
     OptixResult osl_camera_result = OPTIX_SUCCESS;
     OptixResult osl_shadow_result = OPTIX_SUCCESS;
@@ -524,12 +595,19 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     if (use_mnee) {
       create_optix_module(pool, module_options, mnee_ptx_data, mnee_module, mnee_result);
     }
-    if (use_shader_raytrace) {
+    if (use_shader_raytrace || use_transport_raytrace) {
       create_optix_module(pool,
                           module_options,
                           shader_raytrace_ptx_data,
                           shader_raytrace_module,
                           shader_raytrace_result);
+    }
+    if (use_transport) {
+      create_optix_module(pool,
+                          module_options,
+                          transport_surface_ptx_data,
+                          transport_surface_module,
+                          transport_surface_result);
     }
 #  ifdef WITH_OSL
     if (use_osl_shading) {
@@ -567,6 +645,11 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     if (shader_raytrace_result != OPTIX_SUCCESS) {
       set_error(string_printf("Failed to load OptiX shader ray-tracing kernel (%s)",
                               optixGetErrorName(shader_raytrace_result)));
+      return false;
+    }
+    if (transport_surface_result != OPTIX_SUCCESS) {
+      set_error(string_printf("Failed to load OptiX transport surface kernel (%s)",
+                              optixGetErrorName(transport_surface_result)));
       return false;
     }
 #  ifdef WITH_OSL
@@ -726,7 +809,9 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
   }
 
   /* Add hit group for local intersections. */
-  if (kernel_features & (KERNEL_FEATURE_SUBSURFACE | KERNEL_FEATURE_NODE_RAYTRACE)) {
+  if ((kernel_features & (KERNEL_FEATURE_SUBSURFACE | KERNEL_FEATURE_NODE_RAYTRACE)) ||
+      use_transport)
+  {
     group_descs[PG_HITL].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     group_descs[PG_HITL].hitgroup.moduleAH = optix_module;
     group_descs[PG_HITL].hitgroup.entryFunctionNameAH = "__anyhit__kernel_optix_local_hit";
@@ -758,6 +843,50 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
     group_descs[PG_RGEN_INTERSECT_MNEE].raygen.entryFunctionName =
         "__raygen__kernel_optix_integrator_intersect_mnee";
   }
+
+  /* Shading kernels of the transport module, which trace rays. */
+  const int transport_raygen_groups[] = {PG_RGEN_SHADE_SURFACE,
+                                         PG_RGEN_SHADE_SURFACE_RAYTRACE,
+                                         PG_RGEN_SHADE_VOLUME,
+                                         PG_RGEN_SHADE_VOLUME_RAY_MARCHING,
+                                         PG_RGEN_INTERSECT_MNEE,
+                                         PG_RGEN_PHOTON_EMIT,
+                                         PG_RGEN_BDPT_LIGHT_GENERATE,
+                                         PG_RGEN_BDPT_SENSOR_CONNECT};
+  if (use_transport) {
+    const char *transport_raygen_names[] = {
+        "__raygen__kernel_optix_integrator_shade_surface",
+        "__raygen__kernel_optix_integrator_shade_surface_raytrace",
+        "__raygen__kernel_optix_integrator_shade_volume",
+        "__raygen__kernel_optix_integrator_shade_volume_ray_marching",
+        "__raygen__kernel_optix_integrator_intersect_mnee",
+        "__raygen__kernel_optix_integrator_photon_emit",
+        "__raygen__kernel_optix_integrator_bdpt_light_generate",
+        "__raygen__kernel_optix_integrator_bdpt_sensor_connect"};
+    for (int i = 0; i < int(std::size(transport_raygen_groups)); i++) {
+      const int group = transport_raygen_groups[i];
+      if (group == PG_RGEN_SHADE_SURFACE_RAYTRACE && !use_transport_raytrace) {
+        continue;
+      }
+      OptixProgramGroupDesc &desc = group_descs[group];
+      desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+      desc.raygen.module = (group == PG_RGEN_SHADE_SURFACE)          ? transport_surface_module :
+                           (group == PG_RGEN_SHADE_SURFACE_RAYTRACE) ? shader_raytrace_module :
+                                                                       optix_module;
+      desc.raygen.entryFunctionName = transport_raygen_names[i];
+    }
+    if (use_transport_raytrace) {
+      group_descs[PG_CALL_SVM_AO].kind = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
+      group_descs[PG_CALL_SVM_AO].callables.moduleDC = shader_raytrace_module;
+      group_descs[PG_CALL_SVM_AO].callables.entryFunctionNameDC =
+          "__direct_callable__svm_node_ao";
+      group_descs[PG_CALL_SVM_BEVEL].kind = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
+      group_descs[PG_CALL_SVM_BEVEL].callables.moduleDC = shader_raytrace_module;
+      group_descs[PG_CALL_SVM_BEVEL].callables.entryFunctionNameDC =
+          "__direct_callable__svm_node_bevel";
+    }
+  }
+  use_transport_module = use_transport;
 
 #  ifdef WITH_OSL
   /* OSL uses direct callables to execute, so shading needs to be done in OptiX if OSL is used. */
@@ -862,6 +991,45 @@ bool OptiXDevice::load_kernels(const uint64_t kernel_features)
 
   if (use_osl_shading || use_osl_camera) {
     /* OSL kernels will be (re)created on by OSL manager. */
+  }
+  else if (use_transport) {
+    /* Create the shading pipeline of the transport module. */
+    vector<OptixProgramGroup> pipeline_groups;
+    pipeline_groups.reserve(NUM_PROGRAM_GROUPS);
+    for (const int group : transport_raygen_groups) {
+      if (groups[group] != nullptr) {
+        pipeline_groups.push_back(groups[group]);
+      }
+    }
+    if (use_transport_raytrace) {
+      pipeline_groups.push_back(groups[PG_CALL_SVM_AO]);
+      pipeline_groups.push_back(groups[PG_CALL_SVM_BEVEL]);
+    }
+    add_hit_miss_program_groups(groups, pipeline_groups);
+
+    optix_assert(optixPipelineCreate(context,
+                                     &pipeline_options,
+                                     &link_options,
+                                     pipeline_groups.data(),
+                                     pipeline_groups.size(),
+                                     nullptr,
+                                     nullptr,
+                                     &pipelines[PIP_SHADE]));
+
+    unsigned int trace_css;
+    vector<OptixStackSizes> stack_size = get_pipeline_stack_size(
+        pipelines[PIP_SHADE], pipeline_groups, trace_css);
+
+    unsigned int css_rg = 0;
+    for (const int group : transport_raygen_groups) {
+      css_rg = std::max(css_rg, stack_size[group].cssRG);
+    }
+    const unsigned int css = css_rg + link_options.maxTraceDepth * trace_css;
+    const unsigned int dss = std::max(stack_size[PG_CALL_SVM_AO].dssDC,
+                                      stack_size[PG_CALL_SVM_BEVEL].dssDC);
+
+    optix_assert(optixPipelineSetStackSize(
+        pipelines[PIP_SHADE], 0, dss, css, pipeline_options.usesMotionBlur ? 3 : 2));
   }
   else if (use_shader_raytrace || use_mnee) {
     /* Create shader ray-tracing and MNEE pipeline. */
@@ -1468,6 +1636,11 @@ bool OptiXDevice::build_optix_bvh(BVHOptiX *bvh,
 
 void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 {
+  if (bvh->params.bvh_layout == BVH_LAYOUT_BVH2) {
+    Device::build_bvh(bvh, progress, refit);
+    return;
+  }
+
   const bool use_fast_trace_bvh = (bvh->params.bvh_type == BVH_TYPE_STATIC);
 
   free_bvh_memory_delayed();
@@ -2004,6 +2177,10 @@ void OptiXDevice::build_bvh(BVH *bvh, Progress &progress, bool refit)
 
 void OptiXDevice::release_bvh(BVH *bvh)
 {
+  if (bvh->params.bvh_layout == BVH_LAYOUT_BVH2) {
+    return;
+  }
+
   thread_scoped_lock lock(delayed_free_bvh_mutex);
   /* Do delayed free of BVH memory, since geometry holding BVH might be deleted
    * while GPU is still rendering. */

@@ -4,7 +4,8 @@
 
 #include "util/math.h"
 
-#if defined(__clang__) && !defined(__KERNEL_METAL__)
+/* Also for MSVC, which builds the CPU kernels with /fp:fast. */
+#if (defined(__clang__) && !defined(__KERNEL_METAL__)) || (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
 #  pragma float_control(precise, on, push)
 #endif
 
@@ -56,6 +57,6 @@ ccl_device_inline float dielectric_ior_at_wavelength(const float ior_d,
 
 CCL_NAMESPACE_END
 
-#if defined(__clang__) && !defined(__KERNEL_METAL__)
+#if (defined(__clang__) && !defined(__KERNEL_METAL__)) || (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
 #  pragma float_control(pop)
 #endif

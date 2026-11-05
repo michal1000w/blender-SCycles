@@ -120,9 +120,21 @@ def use_metal(context):
     return (get_device_type(context) == 'METAL' and use_gpu(context))
 
 
+# GPU backends with bidirectional path tracing, vertex merging and photon mapping.
+LIGHT_CACHE_TRANSPORT_GPU_TYPES = {'METAL', 'CUDA', 'OPTIX'}
+
+
 def use_light_cache_transport(context):
-    # Bidirectional path tracing and photon mapping run on the CPU and on Metal GPUs.
-    return use_cpu(context) or use_metal(context)
+    # Bidirectional path tracing and photon mapping run on the CPU and on the GPU backends above.
+    return use_cpu(context) or (use_gpu(context) and get_device_type(context) in LIGHT_CACHE_TRANSPORT_GPU_TYPES)
+
+
+# GPU backends which train and sample the GPU guiding field.
+GPU_GUIDING_GPU_TYPES = {'METAL', 'CUDA', 'OPTIX'}
+
+
+def use_gpu_guiding(context):
+    return use_gpu(context) and get_device_type(context) in GPU_GUIDING_GPU_TYPES
 
 
 def use_cuda(context):
@@ -408,7 +420,7 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         from . import engine
-        return use_metal(context) or (use_cpu(context) and engine.with_path_guiding())
+        return use_gpu_guiding(context) or (use_cpu(context) and engine.with_path_guiding())
 
     def draw_header(self, context):
         scene = context.scene
@@ -427,13 +439,13 @@ class CYCLES_RENDER_PT_sampling_path_guiding(CyclesButtonsPanel, Panel):
         layout.active = cscene.use_guiding
 
         layout.prop(cscene, "guiding_training_samples",
-                    text="Training Camera Samples" if use_metal(context) else "Training Updates")
+                    text="Training Camera Samples" if use_gpu_guiding(context) else "Training Updates")
 
         col = layout.column(align=True)
         col.prop(cscene, "use_surface_guiding", text="Surface")
         col.prop(cscene, "use_volume_guiding", text="Volume", text_ctxt=i18n_contexts.id_id)
 
-        if use_metal(context):
+        if use_gpu_guiding(context):
             layout.prop(cscene, "guiding_gpu_memory_mb", text="Field Memory (MiB)")
             layout.prop(cscene, "guiding_gpu_history_memory_mb", text="Training Memory (MiB)")
             col = layout.column(align=True)
@@ -797,7 +809,7 @@ class CYCLES_RENDER_PT_light_paths_photon_mapping(CyclesButtonsPanel, Panel):
 
         if not device_supported:
             box = layout.box()
-            box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
+            box.label(text="Requires the CPU or a Metal, CUDA or OptiX GPU device", icon='INFO')
 
         col = layout.column(align=True)
         col.prop(cscene, "photon_count")
@@ -835,7 +847,7 @@ class CYCLES_RENDER_PT_light_paths_bidirectional(CyclesButtonsPanel, Panel):
 
         if not device_supported:
             box = layout.box()
-            box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
+            box.label(text="Requires the CPU or a Metal, CUDA or OptiX GPU device", icon='INFO')
 
         col = layout.column(align=True)
         col.prop(cscene, "bdpt_light_paths")
@@ -870,7 +882,7 @@ class CYCLES_RENDER_PT_light_paths_vertex_merging(CyclesButtonsPanel, Panel):
 
         if not device_supported:
             box = layout.box()
-            box.label(text="Requires the CPU or a Metal GPU device", icon='INFO')
+            box.label(text="Requires the CPU or a Metal, CUDA or OptiX GPU device", icon='INFO')
 
         col = layout.column(align=True)
         col.prop(cscene, "vcm_radius_pixels")

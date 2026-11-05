@@ -13,17 +13,17 @@ import time
 import bpy
 
 
-def configure_metal():
+def configure_gpu(device_type):
     preferences = bpy.context.preferences.addons["cycles"].preferences
-    preferences.compute_device_type = "METAL"
+    preferences.compute_device_type = device_type
     preferences.get_devices()
     found = False
     for device in preferences.devices:
-        if device.type == "METAL":
+        if device.type == device_type:
             device.use = True
             found = True
     if not found:
-        raise RuntimeError("No Metal Cycles device available")
+        raise RuntimeError(f"No {device_type} Cycles device available")
 
 
 def main():
@@ -40,16 +40,16 @@ def main():
     parser.add_argument("--volume-radius-scale", type=float, default=2.26)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resolution", type=int, default=256)
-    parser.add_argument("--device", choices=("CPU", "METAL"), default="METAL")
+    parser.add_argument("--device", choices=("CPU", "METAL", "CUDA", "OPTIX"), default="METAL")
     parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--photon-off", action="store_true")
     options = parser.parse_args(arguments)
 
-    if options.device == "METAL":
-        configure_metal()
+    if options.device != "CPU":
+        configure_gpu(options.device)
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
-    scene.cycles.device = "GPU" if options.device == "METAL" else "CPU"
+    scene.cycles.device = "CPU" if options.device == "CPU" else "GPU"
     scene.cycles.samples = options.samples
     scene.cycles.seed = options.seed
     scene.cycles.use_adaptive_sampling = options.adaptive

@@ -47,16 +47,20 @@ struct GuidingPositionMoments {
     }
     atomic_add_and_fetch_float(moments, weight);
     for (int i = 0; i < 3; ++i) {
-      atomic_add_and_fetch_float(moments + 1 + i, weight * direction[i]);
-      atomic_add_and_fetch_float(moments + 4 + i, weight * position[i]);
+      atomic_add_and_fetch_float(moments + 1 + i, weight * CCL_CHANNEL(float, direction, i));
+      atomic_add_and_fetch_float(moments + 4 + i, weight * CCL_CHANNEL(float, position, i));
       for (int j = 0; j < 3; ++j) {
-        atomic_add_and_fetch_float(moments + 13 + 3 * i + j, weight * direction[i] * position[j]);
+        atomic_add_and_fetch_float(moments + 13 + 3 * i + j,
+                                   weight * CCL_CHANNEL(float, direction, i) *
+                                       CCL_CHANNEL(float, position, j));
       }
     }
     int entry = 7;
     for (int i = 0; i < 3; ++i) {
       for (int j = i; j < 3; ++j) {
-        atomic_add_and_fetch_float(moments + entry++, weight * position[i] * position[j]);
+        atomic_add_and_fetch_float(moments + entry++,
+                                   weight * CCL_CHANNEL(float, position, i) *
+                                       CCL_CHANNEL(float, position, j));
       }
     }
     atomic_add_and_fetch_float(moments + 22, weight * weight);
@@ -116,7 +120,7 @@ struct GuidingPositionMoments {
       const float3 cross = make_float3(
                                moments[13 + 3 * i], moments[14 + 3 * i], moments[15 + 3 * i]) *
                                inverse_weight -
-                           result.mean_direction[i] * p;
+                           CCL_CHANNEL(float, result.mean_direction, i) * p;
       /* Solve the regularized symmetric system with Cholesky, without a matrix inverse. */
       const float y0 = cross.x / l00;
       const float y1 = (cross.y - l10 * y0) / l11;

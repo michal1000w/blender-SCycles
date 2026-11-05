@@ -9,6 +9,12 @@
 
 CCL_NAMESPACE_BEGIN
 
+/* Error-free transforms below rely on ordered rounding. Clang is told so per function. MSVC
+ * builds the CPU kernels with /fp:fast, which would remove the rounding error terms. */
+#if (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
+#  pragma float_control(precise, on, push)
+#endif
+
 /* Throughput-independent weighted null tracking. Coefficients must be finite
  * and nonnegative. A conservative proposal rate gives nonnegative weights;
  * underestimating extinction requires signed null weights, never density clamps.
@@ -96,5 +102,9 @@ struct BDPTVolumeEventDistribution {
     return random < real_probability;
   }
 };
+
+#if (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
+#  pragma float_control(pop)
+#endif
 
 CCL_NAMESPACE_END

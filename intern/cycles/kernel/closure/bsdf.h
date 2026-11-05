@@ -200,6 +200,107 @@ ccl_device_inline bool bsdf_is_transmission(const ccl_private ShaderClosure *sc,
   return dot(sc->N, wo) < 0.0f;
 }
 
+#ifdef __DIFFRACTION__
+/* Sampling and evaluation of the diffraction closures. Out of line with MSVC, see
+ * ccl_device_inline_outline_rare: the dispatch below is inlined into the shading of every
+ * material. Inlined as before everywhere else, Metal included. */
+#  if defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__)
+#    define ccl_device_bsdf_diffraction_dispatch ccl_device ccl_never_inline
+#  else
+#    define ccl_device_bsdf_diffraction_dispatch ccl_device_forceinline
+#  endif
+ccl_device_bsdf_diffraction_dispatch int bsdf_diffraction_sample_dispatch(
+    KernelGlobals kg,
+    ccl_private ShaderData *sd,
+    const ccl_private ShaderClosure *sc,
+    const float3 Ng,
+    const float3 rand,
+    ccl_private Spectrum *eval,
+    ccl_private float3 *wo,
+    ccl_private float *pdf,
+    ccl_private float2 *sampled_roughness,
+    ccl_private float *eta)
+{
+  int label = LABEL_NONE;
+  switch (sc->type) {
+    case CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID:
+      label=bsdf_diffraction_dielectric_sample<BECKMANN>(kg,sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID:
+      label=bsdf_diffraction_dielectric_sample(kg,sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_STRAIGHT_ID:
+    case CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID:
+      *wo=-sd->wi; *pdf=1e6f; *eval=make_spectrum(1e6f);
+      if(sc->type==CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID)
+        *eval*=bsdf_diffraction_coated_atom_mass(sc,sd->wi);
+      *eta=1; *sampled_roughness=zero_float2();
+      label=LABEL_SINGULAR|LABEL_TRANSMIT;
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID:
+      label = bsdf_diffraction_smooth_sample(
+          kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_GGX_ID:
+    case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_BECKMANN_ID:
+      label=bsdf_diffraction_conductor_sample(kg,sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID:
+      label=bsdf_diffraction_ashikhmin_sample(sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      label = bsdf_diffraction_grating_sample(
+          sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID:
+    case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID:
+      label = bsdf_diffraction_thin_sheet_sample(
+          kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
+      break;
+    default:
+      break;
+  }
+  return label;
+}
+
+ccl_device_bsdf_diffraction_dispatch Spectrum
+bsdf_diffraction_eval_dispatch(KernelGlobals kg,
+                               ccl_private ShaderData *sd,
+                               const ccl_private ShaderClosure *sc,
+                               const float3 wo,
+                               ccl_private float *pdf)
+{
+  Spectrum eval = zero_spectrum();
+  switch (sc->type) {
+    case CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID:
+      eval=bsdf_diffraction_dielectric_eval<BECKMANN>(kg,sc,sd->wi,wo,pdf); break;
+    case CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID:
+      eval=bsdf_diffraction_dielectric_eval(kg,sc,sd->wi,wo,pdf); break;
+    case CLOSURE_BSDF_DIFFRACTION_STRAIGHT_ID:
+    case CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID:
+    case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID:
+      *pdf = 0;
+      eval = zero_spectrum();
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_GGX_ID:
+    case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_BECKMANN_ID:
+      eval=bsdf_diffraction_conductor_eval(kg,sc,sd->wi,wo,pdf);break;
+    case CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID:
+      eval=bsdf_diffraction_ashikhmin_eval(sc,sd->wi,wo,pdf);break;
+    case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
+      eval = bsdf_diffraction_grating_eval(sc, sd->wi, wo, pdf);
+      break;
+    case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID:
+    case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID:
+      eval = bsdf_diffraction_thin_sheet_eval(kg, sc, sd->wi, wo, pdf);
+      break;
+    default:
+      break;
+  }
+  return eval;
+}
+#endif
+
 #ifdef __KERNEL_METAL_VISIBLE_SHADING__
 /* Closure dispatch is compiled once as a Metal visible function, see `kernel.metal`. */
 ccl_device_inline int bsdf_sample(KernelGlobals /*kg*/,
@@ -285,7 +386,7 @@ ccl_device_inline int bsdf_sample(KernelGlobals kg,
       label = bsdf_transparent_sample(sc, Ng, sd->wi, eval, wo, pdf);
       /* Polarized mixed shaders keep null and Glass atoms in one discrete
        * measure. The common scale cancels from their native throughput. */
-      if ((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) && sd->num_closure > 1) {
+      if (kernel_use_polarization() && sd->num_closure > 1) {
         *eval *= 1e6f; *pdf *= 1e6f;
       }
       *sampled_roughness = zero_float2();
@@ -311,40 +412,22 @@ ccl_device_inline int bsdf_sample(KernelGlobals kg,
       label = bsdf_microfacet_beckmann_sample(
           kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
       break;
+#ifdef __DIFFRACTION__
     case CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID:
-      label=bsdf_diffraction_dielectric_sample<BECKMANN>(kg,sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID:
-      label=bsdf_diffraction_dielectric_sample(kg,sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_STRAIGHT_ID:
     case CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID:
-      *wo=-sd->wi; *pdf=1e6f; *eval=make_spectrum(1e6f);
-      if(sc->type==CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID)
-        *eval*=bsdf_diffraction_coated_atom_mass(sc,sd->wi);
-      *eta=1; *sampled_roughness=zero_float2();
-      label=LABEL_SINGULAR|LABEL_TRANSMIT;
-      break;
     case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID:
-      label = bsdf_diffraction_smooth_sample(
-          kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_GGX_ID:
     case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_BECKMANN_ID:
-      label=bsdf_diffraction_conductor_sample(kg,sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID:
-      label=bsdf_diffraction_ashikhmin_sample(sc,Ng,sd->wi,rand,eval,wo,pdf,sampled_roughness,eta);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
-      label = bsdf_diffraction_grating_sample(
-          sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID:
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID:
-      label = bsdf_diffraction_thin_sheet_sample(
-          kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
+      label = bsdf_diffraction_sample_dispatch(
+          kg, sd, sc, Ng, rand, eval, wo, pdf, sampled_roughness, eta);
       break;
+#endif
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
       label = bsdf_ashikhmin_shirley_sample(
           sc, Ng, sd->wi, rand_xy, eval, wo, pdf, sampled_roughness);
@@ -802,7 +885,10 @@ bsdf_eval_delta(KernelGlobals kg,
     return zero_spectrum();
   }
   Spectrum eval = zero_spectrum();
-  if (bsdf_is_diffraction_conductor(sc->type)) {
+  if (false) {
+  }
+#ifdef __DIFFRACTION__
+  else if (bsdf_is_diffraction_conductor(sc->type)) {
     eval=bsdf_diffraction_conductor_delta(kg,sc,sd->wi,wo,pdf);
   }
   else if (sc->type == CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID) {
@@ -841,6 +927,7 @@ bsdf_eval_delta(KernelGlobals kg,
                   DIFFRACTION_DIELECTRIC_GENERALIZED))
       eval=1e6f*bsdf_diffraction_dielectric_generalized_delta_value(sc,sd->wi,wo);
   }
+#endif
   else if (sc->type == CLOSURE_BSDF_THIN_GLASS_TRANSMISSION_ID) {
     if (!bsdf_microfacet_has_delta(sc) || len_squared(wo + sd->wi) > 16e-12f) {
       return zero_spectrum();
@@ -850,7 +937,7 @@ bsdf_eval_delta(KernelGlobals kg,
   }
   else {
     if (!bsdf_microfacet_has_delta(sc) &&
-        !((kernel_data.kernel_features & KERNEL_FEATURE_POLARIZATION) &&
+        !(kernel_use_polarization() &&
           bsdf_microfacet_is_matched_transmission_atom(sc,wo))) return zero_spectrum();
     ccl_private const MicrofacetBsdf *bsdf = (ccl_private const MicrofacetBsdf *)sc;
     const float cosine = dot(sc->N, sd->wi);
@@ -973,28 +1060,21 @@ ccl_device_inline
     case CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID:
       eval = bsdf_microfacet_beckmann_eval(kg, sc, sd->wi, wo, pdf);
       break;
+#ifdef __DIFFRACTION__
     case CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID:
-      eval=bsdf_diffraction_dielectric_eval<BECKMANN>(kg,sc,sd->wi,wo,pdf); break;
     case CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID:
-      eval=bsdf_diffraction_dielectric_eval(kg,sc,sd->wi,wo,pdf); break;
     case CLOSURE_BSDF_DIFFRACTION_STRAIGHT_ID:
     case CLOSURE_BSDF_DIFFRACTION_COATED_STRAIGHT_ID:
     case CLOSURE_BSDF_DIFFRACTION_SMOOTH_ID:
-      *pdf = 0;
-      eval = zero_spectrum();
-      break;
     case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_GGX_ID:
     case CLOSURE_BSDF_DIFFRACTION_CONDUCTOR_BECKMANN_ID:
-      eval=bsdf_diffraction_conductor_eval(kg,sc,sd->wi,wo,pdf);break;
     case CLOSURE_BSDF_DIFFRACTION_ASHIKHMIN_ID:
-      eval=bsdf_diffraction_ashikhmin_eval(sc,sd->wi,wo,pdf);break;
     case CLOSURE_BSDF_DIFFRACTION_GRATING_ID:
-      eval = bsdf_diffraction_grating_eval(sc, sd->wi, wo, pdf);
-      break;
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID:
     case CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_TRANSMISSION_ID:
-      eval = bsdf_diffraction_thin_sheet_eval(kg, sc, sd->wi, wo, pdf);
+      eval = bsdf_diffraction_eval_dispatch(kg, sd, sc, wo, pdf);
       break;
+#endif
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
       eval = bsdf_ashikhmin_shirley_eval(sc, sd->wi, wo, pdf);
       break;
@@ -1151,9 +1231,9 @@ ccl_device_inline_outline_metal Spectrum bsdf_albedo(KernelGlobals kg,
     for (int c=0;c<3;++c) {
       const DiffractionThinSheetModel model=diffraction_thin_sheet_channel_model(e,c);
       const float2 coeff=diffraction_thin_sheet_model_coefficients(&model,I.z);
-      const float q=diffraction_albedo_lookup(kg,e->albedo_handles[c],e->wavelength_nm,make_float3(fabsf(I.x),fabsf(I.y),I.z)).x;
+      const float q=diffraction_albedo_lookup(kg,CCL_CHANNEL(int, e->albedo_handles, c),e->wavelength_nm,make_float3(fabsf(I.x),fabsf(I.y),I.z)).x;
       const float escaped=coeff.x+coeff.y>0.0f ? max(0.0f,1.0f-q/(coeff.x+coeff.y)) : 0.0f;
-      coefficient[c]=(b->port.transmission ? coeff.y : coeff.x)*escaped;
+      CCL_CHANNEL(float, coefficient, c)=(b->port.transmission ? coeff.y : coeff.x)*escaped;
     }
     return mix(b->port.transmission ? e->native_transmission : e->native_reflection,
                coefficient,e->blend);

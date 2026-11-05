@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kernel/sample/guiding_spherical_gaussian.h"
+#include "kernel/util/simd_group.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -53,7 +54,7 @@ template<int Capacity> struct GuidingDirectionalMixtureFit {
                                            const uint lane = 0,
                                            const uint width = 1)
   {
-#ifndef __KERNEL_METAL__
+#ifndef __GPU_GUIDING__
     static_assert(!Cooperative);
 #endif
     active = 0;
@@ -63,9 +64,9 @@ template<int Capacity> struct GuidingDirectionalMixtureFit {
         maximum_weight = max(maximum_weight, observations[i].w);
       }
     }
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
     if constexpr (Cooperative) {
-      maximum_weight = metal::simd_max(maximum_weight);
+      maximum_weight = ccl_simd_max(maximum_weight);
     }
 #endif
     if (!(maximum_weight > 0.0f)) {
@@ -93,11 +94,11 @@ template<int Capacity> struct GuidingDirectionalMixtureFit {
           axis = direction;
         }
       }
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
       if constexpr (Cooperative) {
-        const float maximum = metal::simd_max(best);
+        const float maximum = ccl_simd_max(best);
         /* The earliest observation wins ties, matching sequential initialization. */
-        best_index = metal::simd_min(best == maximum ? best_index : ~0u);
+        best_index = ccl_simd_min(best == maximum ? best_index : ~0u);
         best = maximum;
         if (best_index != ~0u) {
           axis = normalize(make_float3(observations[best_index]));
@@ -124,7 +125,7 @@ template<int Capacity> struct GuidingDirectionalMixtureFit {
 #ifdef __clang__
 #  pragma clang fp reassociate(off)
 #endif
-#ifndef __KERNEL_METAL__
+#ifndef __GPU_GUIDING__
     static_assert(!Cooperative);
 #endif
     if (active == 0 || count == 0 || !(maximum_weight > 0.0f)) {
@@ -177,10 +178,10 @@ template<int Capacity> struct GuidingDirectionalMixtureFit {
     }
     float total = 0.0f;
     for (int j = 0; j < active; ++j) {
-#ifdef __KERNEL_METAL__
+#ifdef __GPU_GUIDING__
       if constexpr (Cooperative) {
-        moments[j] = metal::simd_sum(moments[j]);
-        squared_offsets[j] = metal::simd_sum(squared_offsets[j]);
+        moments[j] = ccl_simd_sum(moments[j]);
+        squared_offsets[j] = ccl_simd_sum(squared_offsets[j]);
       }
 #endif
       total += moments[j].w;

@@ -35,6 +35,7 @@ typedef unsigned long long uint64_t;
 #define ccl_device_inline __device__ __inline__
 #define ccl_device_forceinline __device__ __forceinline__
 #define ccl_device_noinline __device__ __noinline__
+#define ccl_noinline __noinline__
 #define ccl_device_noinline_cpu ccl_device
 #define ccl_device_inline_method ccl_device
 #define ccl_device_template_spec template<> ccl_device_inline

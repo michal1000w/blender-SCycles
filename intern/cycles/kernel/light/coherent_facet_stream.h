@@ -4,6 +4,12 @@
 #include "kernel/light/coherent_path_field.h"
 CCL_NAMESPACE_BEGIN
 
+/* Error-free transforms below rely on ordered rounding. Clang is told so per function. MSVC
+ * builds the CPU kernels with /fp:fast, which would remove the rounding error terms. */
+#if (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
+#  pragma float_control(precise, on, push)
+#endif
+
 /* Exact one/two planar reflections on actual triangles. Smooth shading normals
  * are never used. The caller verifies native BVH visibility separately. */
 ccl_device_inline bool coherent_facet_frame(const ccl_private float3 vertices[3],
@@ -348,4 +354,8 @@ ccl_device_inline float3 coherent_stream_finish(const ccl_private CoherentStream
   *direct=make_float3(share[0],share[1],share[2]);
   return make_float3(result[0],result[1],result[2]);
 }
+#if (defined(_MSC_VER) && !defined(__clang__) && !defined(__KERNEL_GPU__))
+#  pragma float_control(pop)
+#endif
+
 CCL_NAMESPACE_END

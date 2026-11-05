@@ -20,7 +20,7 @@ static_assert(sizeof(ShaderClosure) >= sizeof(DiffractionSmoothBsdf));
 
 /* Shader compilation must advertise wavelength dependence and register the
  * cache before shading. This setup never substitutes an RGB wavelength. */
-ccl_device_outline_metal bool bsdf_diffraction_smooth_setup(KernelGlobals kg,
+ccl_device_outline_rare bool bsdf_diffraction_smooth_setup(KernelGlobals kg,
                                               ccl_private ShaderData *sd,
                                               const float3 weight,
                                               const float3 normal,
@@ -125,6 +125,8 @@ ccl_device_outline_metal bool bsdf_diffraction_smooth_setup(KernelGlobals kg,
  * Guiding calls the dispatch from multiple proposal branches. */
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
+#elif defined(__KERNEL_CUDA__)
+ccl_device_noinline
 #else
 ccl_device
 #endif
@@ -190,6 +192,8 @@ int bsdf_diffraction_smooth_sample(KernelGlobals kg,
  * Intended for path-strategy accounting; ordinary BSDF evaluation stays zero. */
 #ifdef __KERNEL_METAL__
 ccl_device __attribute__((noinline))
+#elif defined(__KERNEL_CUDA__)
+ccl_device_noinline
 #else
 ccl_device
 #endif

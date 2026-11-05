@@ -44,17 +44,28 @@ bool device_kernel_has_intersection(DeviceKernel kernel)
           kernel == DEVICE_KERNEL_INTEGRATOR_SHADE_SURFACE_RAYTRACE);
 }
 
+bool device_kernel_is_light_cache(DeviceKernel kernel)
+{
+  return (kernel == DEVICE_KERNEL_INTEGRATOR_PHOTON_EMIT ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_LIGHT_GENERATE ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
+          kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_SENSOR_CONNECT);
+}
+
+bool device_kernel_is_gpu_guiding(DeviceKernel kernel)
+{
+  return (kernel == DEVICE_KERNEL_GUIDING_BEGIN_UPDATE || kernel == DEVICE_KERNEL_GUIDING_REFINE ||
+          kernel == DEVICE_KERNEL_GUIDING_PUBLISH ||
+          kernel == DEVICE_KERNEL_GUIDING_FLUSH_HISTORY ||
+          kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
+          kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
+          kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER ||
+          kernel == DEVICE_KERNEL_GUIDING_FIT || kernel == DEVICE_KERNEL_GUIDING_FIT_REDUCE);
+}
+
 bool device_kernel_has_gpu_function(DeviceKernel kernel, const bool metal)
 {
-  if (!metal &&
-      (kernel == DEVICE_KERNEL_INTEGRATOR_BDPT_CACHE_ORDER ||
-       kernel == DEVICE_KERNEL_GUIDING_BEGIN_UPDATE || kernel == DEVICE_KERNEL_GUIDING_REFINE ||
-       kernel == DEVICE_KERNEL_GUIDING_PUBLISH || kernel == DEVICE_KERNEL_GUIDING_FLUSH_HISTORY ||
-       kernel == DEVICE_KERNEL_GUIDING_PARTITION_COUNT ||
-       kernel == DEVICE_KERNEL_GUIDING_PARTITION_PREFIX ||
-       kernel == DEVICE_KERNEL_GUIDING_PARTITION_SCATTER || kernel == DEVICE_KERNEL_GUIDING_FIT ||
-       kernel == DEVICE_KERNEL_GUIDING_FIT_REDUCE))
-  {
+  if (!metal && device_kernel_is_gpu_guiding(kernel)) {
     return false;
   }
   return !(kernel == DEVICE_KERNEL_INTEGRATOR_MEGAKERNEL ||

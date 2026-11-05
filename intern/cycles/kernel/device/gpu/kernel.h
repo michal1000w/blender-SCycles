@@ -10,6 +10,11 @@
 
 #include "kernel/sample/lcg.h"
 
+/* KernelGlobals passed by the intersection kernels, see `pixel_displacement_rays`. */
+#ifndef ccl_gpu_intersect_kg
+#  define ccl_gpu_intersect_kg nullptr
+#endif
+
 /* Include constant tables before entering Metal's context class scope (context_begin.h) */
 #include "kernel/tables.h"
 
@@ -33,7 +38,12 @@
 #include "kernel/integrator/init_from_bake.h"
 #include "kernel/integrator/init_from_camera.h"
 #include "kernel/integrator/intersect_closest.h"
-#ifdef __KERNEL_METAL__
+#ifdef __KERNEL_GPU_TRANSPORT__
+/* Light-cache paths initialize volume stacks. Metal kernels are members of one context class and
+ * need no prior declaration. */
+#  include "kernel/integrator/intersect_volume_stack.h"
+#endif
+#if defined(__KERNEL_METAL__) || defined(__KERNEL_GPU_TRANSPORT__)
 /* Light-cache transport. Must come before any header which includes a shading kernel: those
  * include it for other devices only, and when Metal sources are built at runtime includes are
  * inlined textually with `#pragma once` tracking, so a first occurrence inside their inactive
@@ -55,9 +65,14 @@
 #include "kernel/integrator/shade_surface.h"
 #include "kernel/integrator/shade_volume.h"
 
+#ifdef __KERNEL_GPU_TRANSPORT__
+/* Displacement baking evaluates displaced surfaces, see above. */
+#  include "kernel/geom/pixel_displacement_shader.h"
+#endif
+
 #include "kernel/bake/bake.h"
 
-#ifdef __KERNEL_METAL__
+#if defined(__KERNEL_METAL__) || defined(__KERNEL_GPU_TRANSPORT__)
 #  include "kernel/geom/pixel_displacement_shader.h"
 #endif
 
@@ -93,10 +108,11 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 ccl_gpu_kernel_postfix
 
 #  endif
-#ifdef __KERNEL_METAL__
-#  if !defined(__KERNEL_METAL_LIGHT_CACHE_ONLY__) && \
-      (!defined(__KERNEL_METAL_TRANSPORT_FEATURES__) || \
-      (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_PATH_GUIDING))
+#if defined(__KERNEL_METAL__) || defined(__KERNEL_GPU_TRANSPORT__)
+#  if (defined(__KERNEL_METAL__) && !defined(__KERNEL_METAL_LIGHT_CACHE_ONLY__) && \
+       (!defined(__KERNEL_METAL_TRANSPORT_FEATURES__) || \
+        (__KERNEL_METAL_TRANSPORT_FEATURES__ & KERNEL_FEATURE_PATH_GUIDING))) || \
+      (!defined(__KERNEL_METAL__) && defined(__GPU_GUIDING__))
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(guiding_begin_update, const uint work_size)
 {
@@ -222,7 +238,8 @@ ccl_gpu_kernel_postfix
 ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
     ccl_gpu_kernel_signature(integrator_bdpt_cache_order, const int num_light_paths)
 {
-#      ifdef __KERNEL_METAL__
+#      if defined(__KERNEL_METAL__) || defined(__KERNEL_CUDA__)
+  /* One SIMD group (warp) compacts each cache, see compact_indices(). */
   const uint lane = ccl_gpu_global_id_x() % ccl_gpu_warp_size;
   const uint cache = ccl_gpu_global_id_x() / ccl_gpu_warp_size;
   if (cache < kernel_integrator_state.bdpt_cache_count) {
@@ -361,7 +378,7 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 
   if (ccl_gpu_kernel_within_bounds(global_index, work_size)) {
     const int state = (path_index_array) ? path_index_array[global_index] : global_index;
-    ccl_gpu_kernel_call(integrator_intersect_closest(nullptr, state, render_buffer));
+    ccl_gpu_kernel_call(integrator_intersect_closest(ccl_gpu_intersect_kg, state, render_buffer));
   }
 }
 ccl_gpu_kernel_postfix
@@ -375,7 +392,7 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 
   if (ccl_gpu_kernel_within_bounds(global_index, work_size)) {
     const int state = (path_index_array) ? path_index_array[global_index] : global_index;
-    ccl_gpu_kernel_call(integrator_intersect_shadow(nullptr, state));
+    ccl_gpu_kernel_call(integrator_intersect_shadow(ccl_gpu_intersect_kg, state));
   }
 }
 ccl_gpu_kernel_postfix
@@ -389,7 +406,7 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 
   if (ccl_gpu_kernel_within_bounds(global_index, work_size)) {
     const int state = (path_index_array) ? path_index_array[global_index] : global_index;
-    ccl_gpu_kernel_call(integrator_intersect_subsurface(nullptr, state));
+    ccl_gpu_kernel_call(integrator_intersect_subsurface(ccl_gpu_intersect_kg, state));
   }
 }
 ccl_gpu_kernel_postfix
@@ -404,7 +421,7 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 
   if (ccl_gpu_kernel_within_bounds(global_index, work_size)) {
     const int state = (path_index_array) ? path_index_array[global_index] : global_index;
-    ccl_gpu_kernel_call(integrator_intersect_volume_stack(nullptr, state));
+    ccl_gpu_kernel_call(integrator_intersect_volume_stack(ccl_gpu_intersect_kg, state));
   }
 #  endif
 }
@@ -419,7 +436,7 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 
   if (ccl_gpu_kernel_within_bounds(global_index, work_size)) {
     const int state = (path_index_array) ? path_index_array[global_index] : global_index;
-    ccl_gpu_kernel_call(integrator_intersect_dedicated_light(nullptr, state));
+    ccl_gpu_kernel_call(integrator_intersect_dedicated_light(ccl_gpu_intersect_kg, state));
   }
 }
 ccl_gpu_kernel_postfix
@@ -434,7 +451,7 @@ ccl_gpu_kernel(GPU_KERNEL_BLOCK_NUM_THREADS, GPU_KERNEL_MAX_REGISTERS)
 
   if (ccl_gpu_kernel_within_bounds(global_index, work_size)) {
     const int state = (path_index_array) ? path_index_array[global_index] : global_index;
-    ccl_gpu_kernel_call(integrator_intersect_mnee(nullptr, state));
+    ccl_gpu_kernel_call(integrator_intersect_mnee(ccl_gpu_intersect_kg, state));
   }
 #  endif
 }

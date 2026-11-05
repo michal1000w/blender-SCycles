@@ -308,6 +308,7 @@ set(SRC_KERNEL_UTIL_HEADERS
   util/ies.h
   util/image_2d.h
   util/image_3d.h
+  util/simd_group.h
   util/diffraction_albedo.h
   util/dielectric_dispersion.h
   util/dielectric_f0_cache.h

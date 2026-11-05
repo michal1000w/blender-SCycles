@@ -146,7 +146,7 @@ ccl_device_inline_transport void vcm_merge_write(KernelGlobals kg,
 /* Merge the camera vertex with the light subpath vertices in the hash chains `heads` and write
  * their light, see vcm_merge(). Kept out of line: most camera vertices have no light vertex
  * near them and never need the working memory of this. */
-ccl_device __attribute__((noinline)) bool vcm_merge_chains(
+ccl_device ccl_noinline bool vcm_merge_chains(
     KernelGlobals kg,
     IntegratorState state,
     ccl_private ShaderData *sd,

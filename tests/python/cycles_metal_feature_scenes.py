@@ -25,7 +25,7 @@ def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="METAL", choices=("METAL", "CPU"))
+    parser.add_argument("--device", default="METAL", choices=("METAL", "CPU", "CUDA", "OPTIX"))
     parser.add_argument("--scenes", default="all",
                         help="Comma separated scene names. 'all' skips diffraction_realistic, whose "
                         "Realistic grating cache takes very long to build")
@@ -50,7 +50,7 @@ def new_scene(args, samples=None):
     scene.render.film_transparent = False
     scene.view_settings.view_transform = "Standard"
     cycles = scene.cycles
-    cycles.device = "GPU" if args.device == "METAL" else "CPU"
+    cycles.device = "CPU" if args.device == "CPU" else "GPU"
     cycles.samples = samples or args.samples
     cycles.use_adaptive_sampling = False
     cycles.use_denoising = False
@@ -516,15 +516,15 @@ SCENES = {
 
 
 def enable_device(args):
-    if args.device != "METAL":
+    if args.device == "CPU":
         return
     prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "METAL"
+    prefs.compute_device_type = args.device
     if args.metalrt:
         prefs.metalrt = args.metalrt
     prefs.get_devices()
     for device in prefs.devices:
-        device.use = device.type == "METAL"
+        device.use = device.type == args.device
 
 
 def main():
