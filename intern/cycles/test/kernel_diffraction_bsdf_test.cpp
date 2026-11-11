@@ -170,7 +170,7 @@ TEST(KernelDiffractionBSDF, ThinSheetSmallReliefConvergesToNativeAngularCarrier)
     for (const bool transmission : {false, true}) {
       DiffractionThinSheetPort p = {sqr(roughness), 0.31f, 0.0f, 0.43f, transmission};
       if (transmission) {
-        p.alpha = bsdf_thin_glass_transmission_roughness(p.alpha, 1.5f);
+        p.alpha = bsdf_thin_glass_transmission_alpha(p.alpha, 1.5f);
       }
       const float3 I = transmission ? diffraction_thin_sheet_flip_tangent(wi) : wi;
       const float3 O = 2.0f * dot(I, h) * h - I;

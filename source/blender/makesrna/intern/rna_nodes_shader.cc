@@ -1539,6 +1539,105 @@ static void def_glossy(BlenderRNA * /*brna*/, StructRNA *srna)
   RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
 }
 
+static void def_diffraction(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  PropertyRNA *table = RNA_def_property(srna, "optical_constants", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(table, nullptr, "id");
+  RNA_def_property_struct_type(table, "Text");
+  RNA_def_property_flag(table, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_override_flag(table, PROPOVERRIDE_OVERRIDABLE_LIBRARY);
+  RNA_def_property_ui_text(table, "Conductor n,k",
+                          "Embedded CSV with wavelength_nm,n,k columns for the ridge and absorbing "
+                          "substrate; must cover 380 to 780 nm with positive extinction");
+  RNA_def_property_update(table, NC_NODE | NA_EDITED, "rna_Node_update");
+
+  /* Grating model settings, stored in the node like in builds where it is the only model. */
+  static const EnumPropertyItem profile_items[] = {
+      {SHD_DIFFRACTION_SINUSOIDAL,
+       "SINUSOIDAL",
+       0,
+       "Sinusoidal",
+       "Continuous cosine groove profile (thin phase grating)"},
+      {SHD_DIFFRACTION_RECTANGULAR,
+       "RECTANGULAR",
+       0,
+       "Rectangular",
+       "Two-level pit/land groove profile, matching a stamped CD/DVD track or holographic foil"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *prop = RNA_def_property(srna, "profile", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "custom1");
+  RNA_def_property_enum_items(prop, profile_items);
+  RNA_def_property_enum_default(prop, SHD_DIFFRACTION_RECTANGULAR);
+  RNA_def_property_ui_text(prop, "Profile", "Cross-section shape of the diffraction grooves");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+
+  static const EnumPropertyItem grating_items[] = {
+      {SHD_DIFFRACTION_GRATING_1D,
+       "GRATING_1D",
+       0,
+       "1D",
+       "A single periodic direction, set by the surface tangent (a CD/DVD track)"},
+      {SHD_DIFFRACTION_GRATING_2D,
+       "GRATING_2D",
+       0,
+       "2D",
+       "Two independent periodic directions at once (a crossed/rectangular pit lattice)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "grating_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "custom2");
+  RNA_def_property_enum_items(prop, grating_items);
+  RNA_def_property_ui_text(
+      prop, "Grating Type", "Whether the grating repeats along one axis or two");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+
+  RNA_def_struct_sdna_from(srna, "NodeShaderDiffraction", "storage");
+  static const EnumPropertyItem quality_items[] = {
+      {SHD_DIFFRACTION_MODEL_GRATING,
+       "GRATING",
+       0,
+       "Grating",
+       "Rough 1D or 2D reflection grating with sinusoidal or rectangular grooves and textured "
+       "parameters, for optical discs, holographic foils and fabrics"},
+      {SHD_DIFFRACTION_MODEL_FAST,
+       "FAST",
+       0,
+       "Fast",
+       "Scalar reflection and transmission approximation without cache preparation"},
+      {SHD_DIFFRACTION_MODEL_REALISTIC,
+       "REALISTIC",
+       0,
+       "Realistic",
+       "Electromagnetic relief model with a prepared response cache"},
+      {0, nullptr, 0, nullptr, nullptr}};
+  PropertyRNA *quality = RNA_def_property(srna, "quality", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(quality, nullptr, "quality");
+  RNA_def_property_enum_items(quality, quality_items);
+  RNA_def_property_enum_default(quality, SHD_DIFFRACTION_MODEL_GRATING);
+  RNA_def_property_ui_text(quality, "Model", "Diffraction material model");
+  RNA_def_property_update(quality, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+  const auto define_float = [&](const char *identifier, const char *name,
+                                const char *description, const float minimum,
+                                const float maximum, const float default_value) {
+    PropertyRNA *prop = RNA_def_property(srna, identifier, PROP_FLOAT, PROP_NONE);
+    RNA_def_property_float_sdna(prop, nullptr, identifier);
+    RNA_def_property_range(prop, minimum, maximum);
+    RNA_def_property_float_default(prop, default_value);
+    RNA_def_property_ui_text(prop, name, description);
+    RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+  };
+  define_float("pitch", "Pitch", "Distance between grooves in nanometers", 1, 100000, 740);
+  define_float("depth", "Depth", "Relief depth in nanometers", 0, 100000, 0);
+  define_float("duty_cycle", "Duty Cycle", "Fraction of each period occupied by the ridge", 0, 1, 0.5f);
+  define_float("incident_ior", "Upper IOR", "Refractive index above the grating", 0.001f, 100, 1);
+  define_float("ridge_ior", "Ridge IOR", "Real part of the ridge refractive index", 0, 100, 1.5f);
+  define_float("ridge_extinction", "Ridge Extinction", "Imaginary part of the ridge refractive index", 0, 100, 0);
+  define_float("groove_ior", "Groove IOR", "Refractive index filling the grooves", 0.001f, 100, 1);
+  define_float("substrate_ior", "Substrate IOR", "Real part of the substrate refractive index", 0, 100, 1.5f);
+  define_float("substrate_extinction", "Substrate Extinction", "Imaginary part of the substrate refractive index", 0, 100, 0);
+}
+
 static void def_glass(BlenderRNA * /*brna*/, StructRNA *srna)
 {
   PropertyRNA *prop;
@@ -1613,6 +1712,46 @@ static void def_scatter(BlenderRNA * /*brna*/, StructRNA *srna)
   RNA_def_property_enum_sdna(prop, nullptr, "custom1");
   RNA_def_property_enum_items(prop, node_scatter_phase_items);
   RNA_def_property_ui_text(prop, "Phase", "Phase function for the scattered light");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
+}
+
+static void def_volume_ior(BlenderRNA * /*brna*/, StructRNA *srna)
+{
+  static const EnumPropertyItem mode_items[] = {
+      {SHD_VOLUME_IOR_DIRECT,
+       "IOR",
+       0,
+       "IOR",
+       "Index of refraction given directly, by a texture or an attribute"},
+      {SHD_VOLUME_IOR_TEMPERATURE,
+       "TEMPERATURE",
+       0,
+       "Temperature",
+       "Index of refraction of a gas from its temperature and pressure: the refractivity is "
+       "proportional to the density of the gas, which hot gas has less of"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  PropertyRNA *prop;
+
+  prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "custom1");
+  RNA_def_property_enum_items(prop, mode_items);
+  /* Same as a new node, see `node_shader_init_volume_ior()`. */
+  RNA_def_property_enum_default(prop, SHD_VOLUME_IOR_TEMPERATURE);
+  RNA_def_property_ui_text(prop, "Mode", "What the index of refraction is derived from");
+  RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_ShaderNode_socket_update");
+
+  prop = RNA_def_property(srna, "step_size", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "custom3");
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 1, 4);
+  RNA_def_property_ui_text(
+      prop,
+      "Detail Size",
+      "Size of the smallest features of the index of refraction that bend rays: the voxel size of "
+      "the grid it is evaluated on when the scene is prepared. Zero chooses it automatically: the "
+      "voxel size of a volume object, or a fraction of the size of a mesh");
   RNA_def_property_update(prop, NC_NODE | NA_EDITED, "rna_Node_update");
 }
 
@@ -2184,6 +2323,7 @@ void RNA_def_nodes_shader(BlenderRNA *brna)
   define("ShaderNode", "ShaderNodeBrightContrast");
   define("ShaderNode", "ShaderNodeBsdfAnisotropic", def_glossy);
   define("ShaderNode", "ShaderNodeBsdfDiffuse");
+  define("ShaderNode", "ShaderNodeBsdfDiffraction", def_diffraction);
   define("ShaderNode", "ShaderNodeBsdfGlass", def_glass);
   define("ShaderNode", "ShaderNodeBsdfHair", def_hair);
   define("ShaderNode", "ShaderNodeBsdfHairPrincipled", def_hair_principled);
@@ -2277,6 +2417,8 @@ void RNA_def_nodes_shader(BlenderRNA *brna)
   define("ShaderNode", "ShaderNodeVolumePrincipled");
   define("ShaderNode", "ShaderNodeVolumeScatter", def_scatter);
   define("ShaderNode", "ShaderNodeVolumeCoefficients", def_volume_coefficients);
+  define("ShaderNode", "ShaderNodeVolumeFast", def_scatter);
+  define("ShaderNode", "ShaderNodeVolumeIOR", def_volume_ior);
   define("ShaderNode", "ShaderNodeWavelength");
   define("ShaderNode", "ShaderNodeWireframe", def_sh_tex_wireframe);
   define("ShaderNode", "ShaderNodeGroup", def_group);

@@ -730,7 +730,7 @@ ccl_device_inline int bsdf_label(const KernelGlobals kg,
       const ccl_private DiffractionDielectricBsdf *b=(const ccl_private DiffractionDielectricBsdf *)sc;
       label=(bsdf_is_transmission(sc,wo)?LABEL_TRANSMIT:LABEL_REFLECT)|
           ((b->disabled_lobes & DIFFRACTION_DIELECTRIC_TWO_SIDED_MS) ||
-           !roughness_is_almost_specular(diffraction_dielectric_param(b)->alpha_x,
+           !alpha_is_almost_specular(diffraction_dielectric_param(b)->alpha_x,
                                          diffraction_dielectric_param(b)->alpha_y) ?
                LABEL_GLOSSY : LABEL_SINGULAR);
       break;
@@ -816,7 +816,7 @@ ccl_device_inline bool bsdf_microfacet_has_delta(const ccl_private ShaderClosure
     case CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID: {
       const ccl_private DiffractionDielectricBsdf *b=(const ccl_private DiffractionDielectricBsdf *)sc;
       return !(b->disabled_lobes & DIFFRACTION_DIELECTRIC_TWO_SIDED_MS) &&
-             roughness_is_almost_specular(diffraction_dielectric_param(b)->alpha_x,
+             alpha_is_almost_specular(diffraction_dielectric_param(b)->alpha_x,
                                           diffraction_dielectric_param(b)->alpha_y);
     }
 
@@ -828,7 +828,7 @@ ccl_device_inline bool bsdf_microfacet_has_delta(const ccl_private ShaderClosure
     case CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID:
     case CLOSURE_BSDF_THIN_GLASS_TRANSMISSION_ID: {
       ccl_private const MicrofacetBsdf *bsdf = (ccl_private const MicrofacetBsdf *)sc;
-      return roughness_is_almost_specular(bsdf->alpha_x, bsdf->alpha_y);
+      return alpha_is_almost_specular(bsdf->alpha_x, bsdf->alpha_y);
     }
     default:
       return false;

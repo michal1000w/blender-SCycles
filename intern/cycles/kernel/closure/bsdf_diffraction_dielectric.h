@@ -144,7 +144,7 @@ ccl_device_inline float diffraction_dielectric_eval(
     const float film_thickness_over_wavelength=0.0f, const bool exclude_straight=false, const bool pure_refraction=false)
 {
   *pdf=0.0f;
-  if (!(wi.z>0) || wo.z==0 || roughness_is_almost_specular(p->alpha_x,p->alpha_y)) return 0;
+  if (!(wi.z>0) || wo.z==0 || alpha_is_almost_specular(p->alpha_x,p->alpha_y)) return 0;
   const bool trans=wo.z<0;
   if (pure_refraction && !trans) return 0;
   const float eta=p->facet.incident_ior/p->facet.transmitted_ior;
@@ -207,7 +207,7 @@ ccl_device_inline bool diffraction_dielectric_sample_direction(
   *wo=zero_float3();
   *singular=false;
   if (!(wi.z>0)) return false;
-  const bool smooth=roughness_is_almost_specular(p->alpha_x,p->alpha_y);
+  const bool smooth=alpha_is_almost_specular(p->alpha_x,p->alpha_y);
   const float3 h=smooth?make_float3(0,0,1):
       (m_type==BECKMANN ?
        microfacet_beckmann_sample_vndf(wi,p->alpha_x,p->alpha_y,make_float2(random)) :
@@ -245,7 +245,7 @@ ccl_device_inline bool diffraction_dielectric_sample_continuous(
 {
   *value=*pdf=0;
   const float atom=diffraction_dielectric_straight_mass(p), budget=1-atom;
-  if (!(budget>0) || roughness_is_almost_specular(p->alpha_x,p->alpha_y)) return false;
+  if (!(budget>0) || alpha_is_almost_specular(p->alpha_x,p->alpha_y)) return false;
   float mass;bool singular;
   if (!diffraction_dielectric_sample_direction<m_type>(p,wi,random,wo,&mass,&singular,atom>0) || singular)
     return false;
@@ -267,7 +267,7 @@ ccl_device_inline bool diffraction_dielectric_sample_coated_continuous(
 {
   *value=*pdf=0;
   *wo=zero_float3();
-  if (roughness_is_almost_specular(p->alpha_x,p->alpha_y)) return false;
+  if (alpha_is_almost_specular(p->alpha_x,p->alpha_y)) return false;
   const bool exclude_straight=p->facet.incident_ior==p->facet.transmitted_ior;
   float mass;bool singular;
   if (!diffraction_dielectric_sample_direction<m_type>(
@@ -296,7 +296,7 @@ ccl_device_inline bool diffraction_dielectric_coated_straight_mass_quadrature(
   if (p->facet.incident_ior!=p->facet.transmitted_ior) return true;
   const float coefficient=diffraction_dielectric_straight_mass(p);
   if (film_thickness_over_wavelength==0) {*mass=coefficient;return true;}
-  if (roughness_is_almost_specular(p->alpha_x,p->alpha_y)) {
+  if (alpha_is_almost_specular(p->alpha_x,p->alpha_y)) {
     *mass=coefficient*(1-diffraction_thin_film_pair_reflectance(
         wi.z,wi.z,p->facet.incident_ior,p->facet.transmitted_ior,
         film_ior,film_thickness_over_wavelength));
@@ -351,7 +351,7 @@ ccl_device_inline bool diffraction_dielectric_sample_coated_mixture(
 {
   *wo=zero_float3();*value=*pdf=0;*singular=false;
   if (!(wi.z>0 && atom_mass>=0 && atom_mass<=1 && random.z>=0 && random.z<1)) return false;
-  if (roughness_is_almost_specular(p->alpha_x,p->alpha_y)) {
+  if (alpha_is_almost_specular(p->alpha_x,p->alpha_y)) {
     if (!diffraction_dielectric_sample_direction<m_type>(
             p,wi,random,wo,value,singular,false,film_ior,film_thickness_over_wavelength)) return false;
     *pdf=*value;
@@ -531,7 +531,7 @@ ccl_device_inline Spectrum diffraction_dielectric_generalized_eval(
 {
   ccl_private const DiffractionRoughDielectric *p=&e->base.param;
   *pdf=0.0f;
-  if (!(wi.z>0) || wo.z==0 || roughness_is_almost_specular(p->alpha_x,p->alpha_y)) return zero_spectrum();
+  if (!(wi.z>0) || wo.z==0 || alpha_is_almost_specular(p->alpha_x,p->alpha_y)) return zero_spectrum();
   const bool trans=wo.z<0;
   const float eta=p->facet.incident_ior/p->facet.transmitted_ior;
   const float3 axis=make_float3(1,0,0);
@@ -581,7 +581,7 @@ ccl_device_inline bool diffraction_dielectric_generalized_sample_direction(
 {
   ccl_private const DiffractionRoughDielectric *p=&e->base.param;*mass=0;*wo=zero_float3();
   if(!(wi.z>0))return false;
-  *singular=roughness_is_almost_specular(p->alpha_x,p->alpha_y);
+  *singular=alpha_is_almost_specular(p->alpha_x,p->alpha_y);
   const float3 h=*singular?make_float3(0,0,1):
       (m_type==BECKMANN?microfacet_beckmann_sample_vndf(wi,p->alpha_x,p->alpha_y,make_float2(random)):
                        microfacet_ggx_sample_vndf(wi,p->alpha_x,p->alpha_y,make_float2(random)));
@@ -973,7 +973,7 @@ ccl_device_inline float bsdf_diffraction_dielectric_delta_mass(
   if(value_mass)*value_mass=0;
   const ccl_private DiffractionDielectricBsdf *bsdf=(const ccl_private DiffractionDielectricBsdf *)sc;
   const ccl_private DiffractionDielectricFacet *p=&diffraction_dielectric_param(bsdf)->facet;
-  if (!roughness_is_almost_specular(diffraction_dielectric_param(bsdf)->alpha_x,diffraction_dielectric_param(bsdf)->alpha_y)) {
+  if (!alpha_is_almost_specular(diffraction_dielectric_param(bsdf)->alpha_x,diffraction_dielectric_param(bsdf)->alpha_y)) {
     return 0; /* Matched-index atom lives in a separate closure. */
   }
   float3 X,Y;bsdf_diffraction_dielectric_frame(bsdf,&X,&Y);
@@ -1065,7 +1065,7 @@ ccl_device_inline_outline_rare bool bsdf_diffraction_dielectric_setup(
     if (bsdf) {
       bsdf->type=m_type==BECKMANN?CLOSURE_BSDF_DIFFRACTION_BECKMANN_ID:CLOSURE_BSDF_DIFFRACTION_DIELECTRIC_ID;
       bsdf->N=N;bsdf->T=T;bsdf->disabled_lobes=disabled_lobes;bsdf->param=*param;allocated=true;
-      if (!roughness_is_almost_specular(param->alpha_x,param->alpha_y))
+      if (!alpha_is_almost_specular(param->alpha_x,param->alpha_y))
         sd->runtime_flag|=SR_BSDF_HAS_EVAL;
     }
   }
@@ -1162,7 +1162,7 @@ ccl_device_inline bool bsdf_diffraction_dielectric_setup_coated(
   bsdf->sample_weight=average(selection);
   sd->runtime_flag|=SR_BSDF|SR_BSDF_HAS_DISPERSION;
   if(transmission)sd->runtime_flag|=SR_BSDF_HAS_TRANSMISSION;
-  if(!roughness_is_almost_specular(param->alpha_x,param->alpha_y))sd->runtime_flag|=SR_BSDF_HAS_EVAL;
+  if(!alpha_is_almost_specular(param->alpha_x,param->alpha_y))sd->runtime_flag|=SR_BSDF_HAS_EVAL;
   return true;
 }
 
@@ -1395,7 +1395,7 @@ ccl_device_inline_outline_rare bool bsdf_diffraction_principled_transmission_set
   b->sample_weight=closure_sample_weight(sd->runtime_flag,sample);
   sd->runtime_flag|=SR_BSDF|SR_BSDF_HAS_DISPERSION;
   if(!(disabled&LABEL_TRANSMIT))sd->runtime_flag|=SR_BSDF_HAS_TRANSMISSION;
-  if(!roughness_is_almost_specular(alpha,alpha))sd->runtime_flag|=SR_BSDF_HAS_EVAL;
+  if(!alpha_is_almost_specular(alpha,alpha))sd->runtime_flag|=SR_BSDF_HAS_EVAL;
   return true;
 }
 

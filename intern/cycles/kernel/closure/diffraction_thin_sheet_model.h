@@ -57,7 +57,7 @@ ccl_device_inline float diffraction_thin_sheet_model_port_eval(ccl_private const
   *pdf = 0.0f;
   const float3 I = p->transmission ? diffraction_thin_sheet_model_port_flip_tangent(wi) : wi;
   const float3 O = p->transmission ? -wo : wo;
-  if (!(I.z > 0.0f && O.z > 0.0f) || roughness_is_almost_specular(p->alpha, p->alpha)) {
+  if (!(I.z > 0.0f && O.z > 0.0f) || alpha_is_almost_specular(p->alpha, p->alpha)) {
     return 0.0f;
   }
   const float3 axis = make_float3(1.0f, 0.0f, 0.0f);
@@ -96,7 +96,7 @@ ccl_device_inline bool diffraction_thin_sheet_model_port_sample(ccl_private cons
   if (!(I.z > 0.0f)) {
     return false;
   }
-  const bool singular = roughness_is_almost_specular(p->alpha, p->alpha);
+  const bool singular = alpha_is_almost_specular(p->alpha, p->alpha);
   const float3 h = singular ? make_float3(0.0f, 0.0f, 1.0f) :
                               microfacet_ggx_sample_vndf(I, p->alpha, p->alpha, make_float2(random));
   const float3 axis = make_float3(1.0f, 0.0f, 0.0f);
@@ -215,7 +215,7 @@ ccl_device_inline float diffraction_thin_sheet_model_eval(
       &model->transmission : &model->reflection;
   const float3 I = transmission ? diffraction_thin_sheet_model_port_flip_tangent(wi) : wi;
   const float3 O = transmission ? -wo : wo;
-  if (!(I.z>0.0f && O.z>0.0f) || roughness_is_almost_specular(p->alpha,p->alpha)) {
+  if (!(I.z>0.0f && O.z>0.0f) || alpha_is_almost_specular(p->alpha,p->alpha)) {
     return 0.0f;
   }
   const float3 axis = make_float3(1.0f,0.0f,0.0f);
@@ -247,7 +247,7 @@ ccl_device_inline float diffraction_thin_sheet_model_escape_port_sample(
   ccl_private const DiffractionThinSheetModelPort *p = port ?
       &model->transmission : &model->reflection;
   const float3 I=port ? diffraction_thin_sheet_model_port_flip_tangent(wi) : wi;
-  const bool singular=roughness_is_almost_specular(p->alpha,p->alpha);
+  const bool singular=alpha_is_almost_specular(p->alpha,p->alpha);
   /* A singular port is evaluated exactly once by lane zero. */
   if (singular && sample != 0) return 0.0f;
   const float li=singular ? 0.0f : bsdf_aniso_lambda<GGX>(p->alpha,p->alpha,I);
@@ -272,7 +272,7 @@ ccl_device_inline float diffraction_thin_sheet_model_escape(
   float sum=0.0f;
   for (int port=0;port<2;++port) {
     ccl_private const DiffractionThinSheetModelPort *p=port ? &model->transmission : &model->reflection;
-    const int count=roughness_is_almost_specular(p->alpha,p->alpha) ? 1 : samples;
+    const int count=alpha_is_almost_specular(p->alpha,p->alpha) ? 1 : samples;
     for (int s=0;s<count;++s) {
       sum += diffraction_thin_sheet_model_escape_port_sample(model,wi,port,s,samples);
     }

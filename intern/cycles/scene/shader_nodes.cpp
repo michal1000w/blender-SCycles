@@ -3492,7 +3492,7 @@ bool PrincipledBsdfNode::prepare_diffraction_thin_sheet_albedo(Scene *scene, Pro
   request.mu_count = 24;
   request.facet_samples = 512;
   request.alpha_x = alpha;
-  request.alpha_y = bsdf_thin_glass_transmission_roughness(alpha, ior);
+  request.alpha_y = bsdf_thin_glass_transmission_alpha(alpha, ior);
   request.pitch_nm = diffraction_pitch;
   request.depth_nm = diffraction_depth;
   request.duty = saturatef(diffraction_duty);

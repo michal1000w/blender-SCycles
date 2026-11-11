@@ -16,8 +16,9 @@
 #  define MAX_SAMPLE_BUFFER_LENGTH 4096
 
 /* The maximum number of resources contiguously encoded into the MetalAncillaries struct:
- * textures, MetalRT resources and the visible function tables. */
-#  define ANCILLARY_SLOT_COUNT (12 + METAL_VFT_NUM)
+ * textures, samplers, the OSL camera function table, MetalRT resources and the visible function
+ * tables. */
+#  define ANCILLARY_SLOT_COUNT (13 + METAL_VFT_NUM)
 
 CCL_NAMESPACE_BEGIN
 

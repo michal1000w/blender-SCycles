@@ -1,17 +1,20 @@
 #!/bin/bash
 # Every test suite of the fork for one build, one GPU job at a time:
 #   tools/rebase_validation/run_all.sh <Blender.app> <output directory> [stages]
-# Stages (default all): suites nested vcm osl metalfx upstream
+# Stages (default all): suites nested vcm osl metalfx ior grating lights upstream
 #   suites   feature, CPU parity and shader node scenes on Metal and CPU, EEVEE nodes
 #   nested   nested dielectrics (tools/nested_dielectrics/run_all.sh)
 #   vcm      vertex connection and merging against the references in build/vcm/out/ref
 #   osl      custom (OSL) cameras, Metal translation against the CPU runtime, and a session
 #   metalfx  MetalFX denoiser scenes, noisy and denoised
+#   ior      volume index of refraction scenes against closed forms (tools/volume_ior)
+#   grating  Grating model of the Diffraction BSDF in every integrator (tools/diffraction_grating)
+#   lights   every light type with PT, BDPT, VCM and photons, with and without guiding
 #   upstream Blender's Cycles render tests on CPU and Metal (needs tests/files/render from LFS)
 # Run it for the build before and after a change and compare with compare_all.sh.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-APP="$1"; OUT="$2"; STAGES="${3:-suites nested vcm osl metalfx upstream}"
+APP="$1"; OUT="$2"; STAGES="${3:-suites nested vcm osl metalfx ior grating lights upstream}"
 BLENDER="$APP/Contents/MacOS/Blender"
 VCM_REF="${VCM_REF:-$ROOT/build/vcm/out/ref}"
 mkdir -p "$OUT"
@@ -61,6 +64,27 @@ for stage in $STAGES; do
         --output "$OUT/metalfx" --denoiser METALFX --upscale QUALITY --tag upscale \
         > "$OUT/metalfx/upscale.log" 2>&1
       echo "metalfx upscale exit $?" >> "$OUT/status.txt"
+      ;;
+    ior)
+      "$ROOT/tools/volume_ior/run_analytic.sh" "$APP" "$OUT/ior" > "$OUT/ior.log" 2>&1
+      echo "ior exit $?" >> "$OUT/status.txt"
+      ;;
+    grating)
+      "$ROOT/tools/diffraction_grating/run_matrix.sh" "$APP" "$OUT/grating" > "$OUT/grating.log" 2>&1
+      echo "grating exit $?" >> "$OUT/status.txt"
+      ;;
+    lights)
+      mkdir -p "$OUT/lights"
+      for device in CPU METAL; do
+        for guiding in "" --guiding; do
+          name="${device}${guiding:+_guiding}"
+          "$BLENDER" -b --factory-startup --python-exit-code 1 \
+            --python "$ROOT/tests/python/cycles_bdpt_light_scenes.py" -- \
+            --output "$OUT/lights/$name" --device $device --integrators pt,bdpt,vcm,photon $guiding \
+            > "$OUT/lights/$name.log" 2>&1
+          echo "lights $name exit $?" >> "$OUT/status.txt"
+        done
+      done
       ;;
     upstream)
       "$ROOT/tools/rebase_validation/run_upstream_tests.sh" "$APP" CPU "$OUT/upstream_cpu" \

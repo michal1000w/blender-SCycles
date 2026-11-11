@@ -274,7 +274,7 @@ bool diffraction_albedo_build_cpu(const DiffractionAlbedoRequest &r,
                                                   dielectric_wavelength_um(wavelength));
       sheet.reflection = {r.alpha_x, wavelength / r.pitch_nm,
                            2.0f * M_2PI_F * r.depth_nm / wavelength, r.duty, false};
-      sheet.transmission = {bsdf_thin_glass_transmission_roughness(r.alpha_x, n),
+      sheet.transmission = {bsdf_thin_glass_transmission_alpha(r.alpha_x, n),
                              wavelength / r.pitch_nm,
                              M_2PI_F * (n - 1.0f) * r.depth_nm / wavelength, r.duty, true};
       sheet.ior = n;

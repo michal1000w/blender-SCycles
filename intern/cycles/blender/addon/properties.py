@@ -2319,11 +2319,11 @@ class CyclesPreferences(bpy.types.AddonPreferences):
         # We need Metal devices, used for rendering and supporting MetalFX denoising
         if compute_device_type == 'METAL':
             for device in self.get_device_list(compute_device_type):
-                device_type = device[1]
+                device_type = device.type
                 if device_type == 'CPU':
                     continue
 
-                has_device_metalfx_support = device[10]
+                has_device_metalfx_support = device.has_metalfx
                 if has_device_metalfx_support and self.find_existing_device_entry(device).use:
                     return True
 

@@ -260,11 +260,9 @@ class RenderScheduler {
    * unit. */
   bool is_denoise_active_during_update() const;
 
-  /* Check whether a real-time denoiser like DLSS is active. */
-  bool is_denoiser_interactive() const;
-
-  /* Either of the above: a denoiser that works on a sequence of frames. In the viewport those
-   * take care of navigation themselves, there is no low resolution preview. */
+  /* A denoiser that works on a sequence of frames: an interactive one like DLSS or a progressive
+   * one like MetalFX. In the viewport those take care of navigation themselves, there is no low
+   * resolution preview. */
   bool is_denoiser_temporal() const;
 
   /* Largest number of samples in a batch for a progressive denoiser. */

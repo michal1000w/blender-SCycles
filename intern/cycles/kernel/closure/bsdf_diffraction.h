@@ -114,7 +114,7 @@ ccl_device_inline float diffraction_reflection_eval(ccl_private const Diffractio
                                                     ccl_private float *pdf)
 {
   *pdf = 0.0f;
-  if (!(wi.z > 0.0f && wo.z > 0.0f) || roughness_is_almost_specular(p->alpha_x, p->alpha_y)) {
+  if (!(wi.z > 0.0f && wo.z > 0.0f) || alpha_is_almost_specular(p->alpha_x, p->alpha_y)) {
     return 0.0f;
   }
   const float lambda_i = bsdf_aniso_lambda<GGX>(p->alpha_x, p->alpha_y, wi);
@@ -154,7 +154,7 @@ ccl_device_inline bool diffraction_reflection_sample(ccl_private const Diffracti
   if (!(wi.z > 0.0f)) {
     return false;
   }
-  const bool singular = roughness_is_almost_specular(p->alpha_x, p->alpha_y);
+  const bool singular = alpha_is_almost_specular(p->alpha_x, p->alpha_y);
   const float3 h = singular ?
                        make_float3(0.0f, 0.0f, 1.0f) :
                        microfacet_ggx_sample_vndf(wi, p->alpha_x, p->alpha_y, make_float2(rand));
@@ -182,7 +182,7 @@ ccl_device_inline float diffraction_transmission_ggx_order_pdf(
     const float eta, const float delta)
 {
   if (!(wi.z > 0.0f && wo.z < 0.0f && alpha_x > 0.0f && alpha_y > 0.0f) ||
-      roughness_is_almost_specular(alpha_x, alpha_y) || (eta == 1.0f && delta == 0.0f))
+      alpha_is_almost_specular(alpha_x, alpha_y) || (eta == 1.0f && delta == 0.0f))
     return 0.0f;
   const float3 axis = make_float3(1.0f, 0.0f, 0.0f);
   DiffractionTransmissionRoot roots[2];
@@ -205,7 +205,7 @@ ccl_device_inline bool diffraction_transmission_ggx_sample_order(
   *wo = zero_float3();
   *pdf = 0.0f;
   if (!(wi.z > 0.0f && alpha_x > 0.0f && alpha_y > 0.0f) ||
-      roughness_is_almost_specular(alpha_x, alpha_y) || (eta == 1.0f && delta == 0.0f))
+      alpha_is_almost_specular(alpha_x, alpha_y) || (eta == 1.0f && delta == 0.0f))
     return false;
   const float3 h = microfacet_ggx_sample_vndf(wi, alpha_x, alpha_y, rand);
   if (!diffraction_facet_transmit(wi, h, make_float3(1.0f, 0.0f, 0.0f), eta, delta, wo) ||

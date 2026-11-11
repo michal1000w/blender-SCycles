@@ -76,7 +76,7 @@ ccl_device_inline float diffraction_thin_sheet_eval(ccl_private const Diffractio
   *pdf = 0.0f;
   const float3 I = p->transmission ? diffraction_thin_sheet_flip_tangent(wi) : wi;
   const float3 O = p->transmission ? -wo : wo;
-  if (!(I.z > 0.0f && O.z > 0.0f) || roughness_is_almost_specular(p->alpha, p->alpha)) {
+  if (!(I.z > 0.0f && O.z > 0.0f) || alpha_is_almost_specular(p->alpha, p->alpha)) {
     return 0.0f;
   }
   const float3 axis = make_float3(1.0f, 0.0f, 0.0f);
@@ -115,7 +115,7 @@ ccl_device_inline bool diffraction_thin_sheet_sample(ccl_private const Diffracti
   if (!(I.z > 0.0f)) {
     return false;
   }
-  const bool singular = roughness_is_almost_specular(p->alpha, p->alpha);
+  const bool singular = alpha_is_almost_specular(p->alpha, p->alpha);
   const float3 h = singular ? make_float3(0.0f, 0.0f, 1.0f) :
                               microfacet_ggx_sample_vndf(I, p->alpha, p->alpha, make_float2(random));
   const float3 axis = make_float3(1.0f, 0.0f, 0.0f);
@@ -238,7 +238,7 @@ ccl_device_inline bool bsdf_diffraction_thin_sheet_setup(ccl_private ShaderData 
                               CLOSURE_BSDF_DIFFRACTION_THIN_SHEET_REFLECTION_ID;
   sd->runtime_flag |= SR_BSDF | SR_BSDF_HAS_DISPERSION |
                       (transmission ? SR_BSDF_HAS_TRANSMISSION : 0) |
-                      (roughness_is_almost_specular(alpha, alpha) ? 0 : SR_BSDF_HAS_EVAL);
+                      (alpha_is_almost_specular(alpha, alpha) ? 0 : SR_BSDF_HAS_EVAL);
   return true;
 }
 
@@ -311,7 +311,7 @@ ccl_device_inline_outline_rare FresnelCoeff bsdf_diffraction_thin_glass_setup(
                          N, roughness, cached ? ior : sheet_ior, thinfilm, ray_visibility,path_flag);
   }
   const float alpha_reflection = saturatef(roughness);
-  const float alpha_transmission = bsdf_thin_glass_transmission_roughness(
+  const float alpha_transmission = bsdf_thin_glass_transmission_alpha(
       alpha_reflection, sheet_ior);
   const Spectrum native_reflection_compensation = diffraction_thin_sheet_native_compensation(
       kg, sd, N, alpha_reflection, tint.reflectance, false);
@@ -391,7 +391,7 @@ ccl_device_inline int bsdf_diffraction_thin_sheet_label(const ccl_private Shader
   const ccl_private DiffractionThinSheetBsdf *bsdf =
       (const ccl_private DiffractionThinSheetBsdf *)sc;
   return (bsdf->port.transmission ? LABEL_TRANSMIT : LABEL_REFLECT) |
-         (!bsdf->return_only && roughness_is_almost_specular(bsdf->port.alpha, bsdf->port.alpha) ? LABEL_SINGULAR :
+         (!bsdf->return_only && alpha_is_almost_specular(bsdf->port.alpha, bsdf->port.alpha) ? LABEL_SINGULAR :
                                                                             LABEL_GLOSSY);
 }
 
@@ -455,7 +455,7 @@ ccl_device_inline Spectrum bsdf_diffraction_thin_sheet_delta_legacy(const ccl_pr
   *pdf = 0.0f;
   const ccl_private DiffractionThinSheetBsdf *bsdf =
       (const ccl_private DiffractionThinSheetBsdf *)sc;
-  if (!roughness_is_almost_specular(bsdf->port.alpha, bsdf->port.alpha)) {
+  if (!alpha_is_almost_specular(bsdf->port.alpha, bsdf->port.alpha)) {
     return zero_spectrum();
   }
   float3 X, Y;
@@ -534,7 +534,7 @@ ccl_device_inline Spectrum bsdf_diffraction_thin_sheet_eval(
   const float raw=diffraction_thin_sheet_eval(&b->port,I,O,&proposal);
   *pdf=proposal;
   Spectrum value=(1.0f-e->blend)*raw*(b->port.transmission ? e->native_transmission : e->native_reflection);
-  if (!roughness_is_almost_specular(b->port.alpha,b->port.alpha)) {
+  if (!alpha_is_almost_specular(b->port.alpha,b->port.alpha)) {
     /* Reuse facet roots/Jacobians across RGB coefficient channels. */
     const float3 FI=b->port.transmission ? diffraction_thin_sheet_flip_tangent(I) : I;
     const float3 FO=b->port.transmission ? -O : O;
@@ -616,7 +616,7 @@ ccl_device_inline int bsdf_diffraction_thin_sheet_sample(
   }
   *wo=to_global(O,X,Y,b->N);
   if (!(b->port.transmission ? dot(Ng,*wo)<0.0f : dot(Ng,*wo)>0.0f)) return LABEL_NONE;
-  if (first && roughness_is_almost_specular(b->port.alpha,b->port.alpha)) {
+  if (first && alpha_is_almost_specular(b->port.alpha,b->port.alpha)) {
     *eval=bsdf_diffraction_thin_sheet_delta(kg,sc,wi,*wo,pdf);
     *roughness=zero_float2();
     return (b->port.transmission ? LABEL_TRANSMIT : LABEL_REFLECT)|LABEL_SINGULAR;

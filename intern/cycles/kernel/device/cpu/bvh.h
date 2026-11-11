@@ -96,10 +96,9 @@ struct CCLFirstHitContext : public CCLKernelContext {
 };
 
 struct CCLShadowContext : public CCLKernelContext {
-#if defined(__KERNEL_ONEAPI__)
-  ONEAPIKernelContext *oneapi_kernel_context;
+#ifdef __KERNEL_ONEAPI__
+  KernelGlobals kg;
 #endif
-
   BVHShadowAllPayload *payload;
 };
 

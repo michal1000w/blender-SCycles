@@ -1217,7 +1217,7 @@ ccl_device_inline ShaderEvalResult kernel_path_mnee_sample(KernelGlobals kg,
           /* The volumetric sensor partition can replay a delta camera prefix exactly.
            * Rough camera prefixes retain the complete ordinary camera estimator. */
           if (volume_endpoint &&
-              !roughness_is_almost_specular(microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y))
+              !alpha_is_almost_specular(microfacet_bsdf->alpha_x, microfacet_bsdf->alpha_y))
           {
             return SHADER_EVAL_EMPTY;
           }

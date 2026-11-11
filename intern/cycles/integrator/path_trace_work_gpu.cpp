@@ -170,29 +170,29 @@ void PathTraceWorkGPU::alloc_integrator_soa()
   /* Check if we already allocated memory for the required features.
    * Note that both disabling and enabling features may require memory
    * allocations, so we check for equality. */
-  const int requested_volume_stack_size = device_scene_->data.volume_stack_size;
-  const int requested_medium_stack_size = device_scene_->data.medium_stack_size;
+  const int volume_stack_size = device_scene_->data.volume_stack_size;
+  const int medium_stack_size = device_scene_->data.medium_stack_size;
   const uint64_t kernel_features = device_scene_->data.kernel_features;
   if (integrator_state_soa_kernel_features_ == kernel_features &&
-      integrator_state_soa_volume_stack_size_ >= requested_volume_stack_size &&
-      integrator_state_soa_medium_stack_size_ >= requested_medium_stack_size)
+      integrator_state_soa_volume_stack_size_ == volume_stack_size &&
+      integrator_state_soa_medium_stack_size_ == medium_stack_size)
   {
     return;
   }
   integrator_state_soa_kernel_features_ = kernel_features;
-  integrator_state_soa_volume_stack_size_ = max(integrator_state_soa_volume_stack_size_,
-                                                requested_volume_stack_size);
-  integrator_state_soa_medium_stack_size_ = max(integrator_state_soa_medium_stack_size_,
-                                                requested_medium_stack_size);
+  integrator_state_soa_volume_stack_size_ = volume_stack_size;
+  integrator_state_soa_medium_stack_size_ = medium_stack_size;
+
+  /* Free existing state, before state size estimation which takes into account free memory. */
+  integrator_state_soa_.clear();
 
   /* Determine the number of path states. Deferring this for as long as possible allows the
    * back-end to make better decisions about memory availability. */
-  if (max_num_paths_ == 0) {
-    const size_t single_state_size = estimate_single_state_size(
-        kernel_features,
-        integrator_state_soa_volume_stack_size_,
-        integrator_state_soa_medium_stack_size_,
-        device_->info.type);
+  const size_t single_state_size = estimate_single_state_size(
+      kernel_features,
+      integrator_state_soa_volume_stack_size_,
+      integrator_state_soa_medium_stack_size_,
+      device_->info.type);
 
   max_num_paths_ = queue_->num_concurrent_states(single_state_size);
 
@@ -201,6 +201,46 @@ void PathTraceWorkGPU::alloc_integrator_soa()
    * with work without losing performance. The renderer will add more work (when
    * available) when the number of active paths falls below this value. */
   min_num_active_main_paths_ = max_num_paths_ / 4;
+
+  /* Clear the array pointers up to their full size. The allocation below only visits the
+   * entries of the current volume and medium stack sizes, so after a stack shrinks the entries
+   * past its end would still point to the memory freed above, which Metal dereferences when it
+   * resolves the pointers of the state. */
+  {
+#define KERNEL_STRUCT_BEGIN(name) for (int array_index = 0;; array_index++) {
+#define KERNEL_STRUCT_BEGIN_PACKED(parent_struct, feature) KERNEL_STRUCT_BEGIN(parent_struct)
+#define KERNEL_STRUCT_MEMBER(parent_struct, type, name, feature)
+#define KERNEL_STRUCT_MEMBER_PACKED(parent_struct, type, name, feature)
+#define KERNEL_STRUCT_ARRAY_MEMBER(parent_struct, type, name, feature) \
+  integrator_state_gpu_.parent_struct[array_index].name = nullptr;
+#define KERNEL_STRUCT_END(name) \
+  (void)array_index; \
+  break; \
+  }
+#define KERNEL_STRUCT_END_ARRAY(name, cpu_array_size, gpu_array_size) \
+  if (array_index >= gpu_array_size - 1) { \
+    break; \
+  } \
+  }
+#define KERNEL_STRUCT_VOLUME_STACK_SIZE MAX_VOLUME_STACK_SIZE
+#define KERNEL_STRUCT_MEDIUM_STACK_SIZE MAX_MEDIUM_STACK_SIZE
+#define KERNEL_STRUCT_CPU_GUIDING_FEATURE 0
+#define KERNEL_STRUCT_GPU_GUIDING_FEATURE 0
+#include "kernel/integrator/state_template.h"
+
+#include "kernel/integrator/shadow_state_template.h"
+#undef KERNEL_STRUCT_CPU_GUIDING_FEATURE
+#undef KERNEL_STRUCT_GPU_GUIDING_FEATURE
+#undef KERNEL_STRUCT_BEGIN
+#undef KERNEL_STRUCT_BEGIN_PACKED
+#undef KERNEL_STRUCT_MEMBER
+#undef KERNEL_STRUCT_MEMBER_PACKED
+#undef KERNEL_STRUCT_ARRAY_MEMBER
+#undef KERNEL_STRUCT_END
+#undef KERNEL_STRUCT_END_ARRAY
+#undef KERNEL_STRUCT_VOLUME_STACK_SIZE
+#undef KERNEL_STRUCT_MEDIUM_STACK_SIZE
+  }
 
   /* Allocate a device only memory buffer before for each struct member, and then
    * write the pointers into a struct that resides in constant memory.

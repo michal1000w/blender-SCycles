@@ -287,9 +287,14 @@ bool MetalFXDenoiser::denoise_run(const DenoiseContext &context, const DenoisePa
 
   frame.accumulate = frame_info_.accumulate;
   frame.reset_history_on_restart = !frame_info_.interactive;
-  if (frame_info_.interactive && (context.denoise_params.passes & DENOISER_PASS_MOTION)) {
-    frame.pass_motion = buffer_params.get_pass_offset(PASS_MOTION);
-    frame.pass_motion_weight = buffer_params.get_pass_offset(PASS_MOTION_WEIGHT);
+  if (frame_info_.interactive &&
+      (context.denoise_params.passes & DENOISER_PASS_BACKWARD_MOTION))
+  {
+    /* Like DLSS: the denoising motion pass also has the motion of the background and takes the
+     * motion of a single hit behind transparent surfaces. It is a sum over the samples of the
+     * pixel, so it has no weight pass. */
+    frame.pass_motion = buffer_params.get_pass_offset(PASS_DENOISING_BACKWARD_MOTION);
+    frame.pass_motion_weight = PASS_UNUSED;
   }
 
   frame.out_width = denoised_buffer_params.width;

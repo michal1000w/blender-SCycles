@@ -11,6 +11,7 @@ time), devices are asked from the render worker once and cached, and functions t
 itself (OSL compiler, denoiser, merging) run in the worker.
 """
 
+import collections
 import json
 import os
 import threading
@@ -126,6 +127,31 @@ def get_device_types():
     return (False, False, False, False, False, False)
 
 
+# Fields of `_cycles.DeviceInfo`, in the order of `device_info_fields` in `blender/python.cpp`.
+# The Cycles add-on reads them by name (`device.type`) and some code by index.
+_DEVICE_INFO_FIELDS = (
+    "name",
+    "type",
+    "id",
+    "has_peer_memory",
+    "use_hardware_raytracing",
+    "has_openimagedenoise",
+    "has_optix_denoiser",
+    "has_execution_optimization",
+    "meets_driver_requirement",
+    "has_dlss",
+    "has_metalfx",
+)
+DeviceInfo = collections.namedtuple("DeviceInfo", _DEVICE_INFO_FIELDS)
+
+
+def _device_info(values):
+    values = list(values)[:len(_DEVICE_INFO_FIELDS)]
+    # A runtime with fewer fields does not support the missing features.
+    values += [False] * (len(_DEVICE_INFO_FIELDS) - len(values))
+    return DeviceInfo(*values)
+
+
 def available_devices(device_type=None):
     data = _device_data()
     if not data:
@@ -134,7 +160,7 @@ def available_devices(device_type=None):
     if device_type is None or device_type == 'NONE':
         device_type = 'CPU'
     # The worker stores exactly what `_cycles.available_devices(type)` returned there.
-    return tuple(tuple(device) for device in devices.get(device_type, []))
+    return tuple(_device_info(device) for device in devices.get(device_type, []))
 
 
 # -----------------------------------------------------------------------------

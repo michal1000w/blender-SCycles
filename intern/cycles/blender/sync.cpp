@@ -1405,7 +1405,8 @@ DenoiseParams BlenderSync::get_denoise_params(blender::Scene &b_scene,
         /* MetalFX has no input for the motion of reflections. */
         denoising.use_gpu = true;
         denoising.passes = DENOISER_PASS_ALBEDO | DENOISER_PASS_NORMAL |
-                           DENOISER_PASS_ROUGHNESS | DENOISER_PASS_DEPTH | DENOISER_PASS_MOTION;
+                           DENOISER_PASS_ROUGHNESS | DENOISER_PASS_DEPTH |
+                           DENOISER_PASS_BACKWARD_MOTION;
         return denoising;
       }
 

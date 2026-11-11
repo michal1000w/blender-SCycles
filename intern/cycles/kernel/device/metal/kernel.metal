@@ -1424,7 +1424,8 @@ CCL_METAL_SVM_FUNCTIONS(CCL_METAL_SVM_VISIBLE_FUNCTION)
                                                 thread const void *rng_ptr, \
                                                 device float *render_buffer, \
                                                 thread float3 *result, \
-                                                thread float3 *secondary_result) \
+                                                thread float3 *secondary_result, \
+                                                uint path_flag) \
     { \
       MetalKernelContext context(*(constant KernelParamsMetal *)launch_params, \
                                  (constant MetalAncillaries *)ancillaries); \
@@ -1470,14 +1471,14 @@ CCL_METAL_SURFACE_STAGE_END
 
 CCL_METAL_SURFACE_STAGE_BEGIN(6)
 #  ifdef __PASSES__
-context.film_write_data_passes(nullptr, state, sd, render_buffer);
+context.film_write_data_passes(nullptr, state, path_flag, sd, render_buffer);
 #  endif
 return 0;
 CCL_METAL_SURFACE_STAGE_END
 
 CCL_METAL_SURFACE_STAGE_BEGIN(7)
 #  ifdef __DENOISING_FEATURES__
-context.film_write_denoising_features_surface(nullptr, state, sd, render_buffer);
+context.film_write_denoising_features_surface(nullptr, state, path_flag, sd, render_buffer);
 #  endif
 return 0;
 CCL_METAL_SURFACE_STAGE_END

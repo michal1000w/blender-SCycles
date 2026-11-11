@@ -277,7 +277,8 @@ kernel void metalfx_pack(texture2d<float, access::write> color_texture [[texture
   }
   depth_texture.write(float4(clip_depth, 0.0f, 0.0f, 0.0f), gid);
 
-  /* Motion: the pass holds the offset in pixels to the position in the previous frame. */
+  /* Motion: the pass holds the offset in pixels to the position in the previous frame, summed over
+   * the samples when it has no weight pass. */
   float2 motion = float2(0.0f);
   if (params.pass_motion >= 0 && params.use_motion) {
     float motion_weight = num_samples;

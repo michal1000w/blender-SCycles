@@ -68,7 +68,7 @@ ccl_device_inline Spectrum diffraction_conductor_eval(
 {
   *pdf=0;
   const ccl_private DiffractionReflection *p=&e->param;
-  if (!(wi.z>0 && wo.z>0) || roughness_is_almost_specular(p->alpha_x,p->alpha_y))
+  if (!(wi.z>0 && wo.z>0) || alpha_is_almost_specular(p->alpha_x,p->alpha_y))
     return zero_spectrum();
   Spectrum density=zero_spectrum();
   float proposal=0;
@@ -140,7 +140,7 @@ ccl_device_inline int bsdf_diffraction_conductor_label(ccl_private const ShaderC
 {
   const ccl_private DiffractionConductorBsdf *b=(const ccl_private DiffractionConductorBsdf *)sc;
   const ccl_private DiffractionReflection *p=&b->extra->param;
-  return LABEL_REFLECT | (roughness_is_almost_specular(p->alpha_x,p->alpha_y) ?
+  return LABEL_REFLECT | (alpha_is_almost_specular(p->alpha_x,p->alpha_y) ?
                          LABEL_SINGULAR : LABEL_GLOSSY);
 }
 
@@ -157,7 +157,7 @@ ccl_device_inline int bsdf_diffraction_conductor_sample(
   float3 X,Y;make_orthonormals_safe_tangent(b->N,b->T,&X,&Y);
   const float3 I=make_float3(dot(wi,X),dot(wi,Y),dot(wi,b->N));
   if (!(I.z>0)) return LABEL_NONE;
-  const bool singular=roughness_is_almost_specular(p->alpha_x,p->alpha_y);
+  const bool singular=alpha_is_almost_specular(p->alpha_x,p->alpha_y);
   float order_random = random.z;
   if (!singular && e->albedo_handle >= 0) {
     const float2 albedo = diffraction_albedo_lookup(kg, e->albedo_handle, e->wavelength_nm, I);

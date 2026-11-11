@@ -480,7 +480,8 @@ bool MetalDeviceQueue::enqueue(DeviceKernel kernel,
     write_resource(ancillary_args, metal_device_->image_bindings, ancillary_index++);
     write_resource(ancillary_args, metal_device_->sampler_bindings, ancillary_index++);
 
-    /* The camera function table directly follows the textures in every library variant. */
+    /* The camera function table directly follows the textures and samplers in every library
+     * variant. */
     if (metal_device_->use_osl_camera_function) {
       write_resource(ancillary_args, active_pipeline.camera_func_table, ancillary_index++);
     }

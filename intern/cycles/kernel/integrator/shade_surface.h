@@ -1406,7 +1406,8 @@ ccl_device_inline int integrate_surface_stage(const MetalSurfaceStage stage,
                                               const ccl_private RNGState *rng_state,
                                               ccl_global float *render_buffer = nullptr,
                                               ccl_private float3 *result = nullptr,
-                                              ccl_private float3 *secondary_result = nullptr)
+                                              ccl_private float3 *secondary_result = nullptr,
+                                              const uint32_t path_flag = 0)
 {
   return metal_ancillaries->vft_surface[stage](&launch_params_metal,
                                                metal_ancillaries,
@@ -1415,7 +1416,8 @@ ccl_device_inline int integrate_surface_stage(const MetalSurfaceStage stage,
                                                rng_state,
                                                render_buffer,
                                                result,
-                                               secondary_result);
+                                               secondary_result,
+                                               path_flag);
 }
 #endif
 
@@ -1582,21 +1584,34 @@ ccl_device int integrate_surface(KernelGlobals kg,
       /* Write render passes. */
 #ifdef __KERNEL_METAL_VISIBLE_SHADING__
 #  ifdef __PASSES__
-      integrate_surface_stage(
-          METAL_SURFACE_STAGE_DATA_PASSES, state, &sd, nullptr, render_buffer);
+      /* Both stages take the path flag from before the data passes update it. */
+      integrate_surface_stage(METAL_SURFACE_STAGE_DATA_PASSES,
+                              state,
+                              &sd,
+                              nullptr,
+                              render_buffer,
+                              nullptr,
+                              nullptr,
+                              path_flag);
 #  endif
 #  ifdef __DENOISING_FEATURES__
-      integrate_surface_stage(
-          METAL_SURFACE_STAGE_DENOISING_FEATURES, state, &sd, nullptr, render_buffer);
+      integrate_surface_stage(METAL_SURFACE_STAGE_DENOISING_FEATURES,
+                              state,
+                              &sd,
+                              nullptr,
+                              render_buffer,
+                              nullptr,
+                              nullptr,
+                              path_flag);
 #  endif
 #else
 #  ifdef __PASSES__
       PROFILING_EVENT(PROFILING_SHADE_SURFACE_PASSES);
-      film_write_data_passes(kg, state, &sd, render_buffer);
+      film_write_data_passes(kg, state, path_flag, &sd, render_buffer);
 #  endif
 
 #  ifdef __DENOISING_FEATURES__
-      film_write_denoising_features_surface(kg, state, &sd, render_buffer);
+      film_write_denoising_features_surface(kg, state, path_flag, &sd, render_buffer);
 #  endif
 #endif
       }

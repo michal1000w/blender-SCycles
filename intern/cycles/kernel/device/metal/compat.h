@@ -455,7 +455,8 @@ using MetalSurfaceStageFunction = int(constant void *launch_params,
                                       thread const void *rng_state,
                                       device float *render_buffer,
                                       thread float3 *result,
-                                      thread float3 *secondary_result);
+                                      thread float3 *secondary_result,
+                                      uint path_flag);
 using MetalMNEEFunction = int(constant void *launch_params,
                                constant void *ancillaries,
                                int state,
@@ -527,6 +528,10 @@ using MetalOSLCameraFunction = void(constant void *launch_params,
                                     thread float *output);
 #endif
 
+struct MetalSamplerEntry {
+  metal::sampler s;
+};
+
 /* Additional Metal-specific resources which aren't encoded in KernelData.
  * IMPORTANT: If this layout changes, ANCILLARY_SLOT_COUNT and the host-side encoding must change
  * to match. */
@@ -536,7 +541,8 @@ struct MetalAncillaries {
 
 #ifdef __KERNEL_METAL_OSL_CAMERA__
   /* Only the camera ray kernel calls this function, and only for custom cameras. The slot
-   * directly follows the textures, so its position is the same in every library variant. */
+   * directly follows the textures and samplers, so its position is the same in every library
+   * variant. */
   metal::visible_function_table<MetalOSLCameraFunction> vft_osl_camera;
 #endif
 
@@ -575,66 +581,6 @@ struct MetalAncillaries {
 
 #include "util/half.h"
 #include "util/types.h"
-
-enum SamplerType {
-  SamplerFilterNearest_AddressRepeat,
-  SamplerFilterNearest_AddressClampEdge,
-  SamplerFilterNearest_AddressClampZero,
-  SamplerFilterNearest_AddressMirroredRepeat,
-
-  SamplerFilterLinear_AddressRepeat,
-  SamplerFilterLinear_AddressClampEdge,
-  SamplerFilterLinear_AddressClampZero,
-  SamplerFilterLinear_AddressMirroredRepeat,
-
-  SamplerCount
-};
-
-constexpr constant metal::array<metal::sampler, SamplerCount> metal_samplers = {
-    metal::sampler(metal::address::repeat, metal::filter::nearest),
-    metal::sampler(metal::address::clamp_to_edge, metal::filter::nearest),
-    metal::sampler(metal::address::clamp_to_zero, metal::filter::nearest),
-    metal::sampler(metal::address::mirrored_repeat, metal::filter::nearest),
-    metal::sampler(metal::address::repeat, metal::filter::linear),
-    metal::sampler(metal::address::clamp_to_edge, metal::filter::linear),
-    metal::sampler(metal::address::clamp_to_zero, metal::filter::linear),
-    metal::sampler(metal::address::mirrored_repeat, metal::filter::linear),
-};
-
-#ifdef __KERNEL_METAL_VISIBLE_SHADING__
-/* Separately compiled visible functions lose the constant sampler states when the array above
- * is indexed dynamically, and fall back to a default sampler. Select an inline constexpr sampler
- * instead, which works in both kernels and visible functions. */
-template<typename TextureT>
-inline __attribute__((__always_inline__)) float4 metal_sample_2d(const TextureT tex,
-                                                                 const uint sid,
-                                                                 const float2 uv)
-{
-  switch (sid) {
-    case SamplerFilterNearest_AddressRepeat:
-      return tex.sample(metal::sampler(metal::address::repeat, metal::filter::nearest), uv);
-    case SamplerFilterNearest_AddressClampEdge:
-      return tex.sample(metal::sampler(metal::address::clamp_to_edge, metal::filter::nearest), uv);
-    case SamplerFilterNearest_AddressClampZero:
-      return tex.sample(metal::sampler(metal::address::clamp_to_zero, metal::filter::nearest), uv);
-    case SamplerFilterNearest_AddressMirroredRepeat:
-      return tex.sample(metal::sampler(metal::address::mirrored_repeat, metal::filter::nearest),
-                        uv);
-    case SamplerFilterLinear_AddressRepeat:
-      return tex.sample(metal::sampler(metal::address::repeat, metal::filter::linear), uv);
-    case SamplerFilterLinear_AddressClampEdge:
-      return tex.sample(metal::sampler(metal::address::clamp_to_edge, metal::filter::linear), uv);
-    case SamplerFilterLinear_AddressClampZero:
-      return tex.sample(metal::sampler(metal::address::clamp_to_zero, metal::filter::linear), uv);
-    default:
-      return tex.sample(metal::sampler(metal::address::mirrored_repeat, metal::filter::linear),
-                        uv);
-  }
-}
-#  define METAL_SAMPLE_2D(tex, sid, uv) metal_sample_2d(tex, sid, uv)
-#else
-#  define METAL_SAMPLE_2D(tex, sid, uv) (tex).sample(metal_samplers[sid], uv)
-#endif
 
 #ifdef __METAL_GLOBAL_BUILTINS__
 const uint metal_global_id [[thread_position_in_grid]];

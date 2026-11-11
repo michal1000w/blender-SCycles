@@ -10,9 +10,16 @@
 
 #include "kernel/sample/lcg.h"
 
-/* KernelGlobals passed by the intersection kernels, see `pixel_displacement_rays`. */
+/* The kg passed by the kernels that read specialization constants, see
+ * oneapi/context_intersect_begin.h. */
+#ifndef ccl_gpu_kernel_kg
+#  define ccl_gpu_kernel_kg nullptr
+#endif
+
+/* KernelGlobals passed by the intersection kernels. CUDA and OptiX pass their own to trace
+ * `pixel_displacement_rays`, see cuda/globals.h. Other back-ends pass the one above. */
 #ifndef ccl_gpu_intersect_kg
-#  define ccl_gpu_intersect_kg nullptr
+#  define ccl_gpu_intersect_kg ccl_gpu_kernel_kg
 #endif
 
 /* Include constant tables before entering Metal's context class scope (context_begin.h) */
